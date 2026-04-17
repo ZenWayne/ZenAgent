@@ -1,0 +1,18 @@
+{
+  "cargo": "cargo",
+  "gcc": "gcc",
+  "cmake": "cmake",
+  "code-notify": "/home/wayne/.local/bin/code-notify",
+  "node": "node",
+  "npm": "/usr/bin/npm",
+  "g++": "g++",
+  "flutter": "/usr/bin/flutter",
+  "rustup": "rustup",
+  "make": "make",
+  "dart": "dart",
+  "update-pencil-mcp": "/home/wayne/.local/bin/update-pencil-mcp",
+  "uv": "uv",
+  "adb": "adb",
+  "podman": "podman",
+  "python": "python"
+}
