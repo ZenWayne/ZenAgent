@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(agentflow LANGUAGES CXX VERSION 0.1.0)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 option(AGENTFLOW_BUILD_TESTS "Build unit tests" ON)
 option(AGENTFLOW_BUILD_EXAMPLES "Build example binaries" ON)
 
