@@ -4,6 +4,7 @@ add_library(agentflow_core
   cancel.cc
   event.cc
   state.cc
+  graph.cc
 )
 
 target_include_directories(agentflow_core
