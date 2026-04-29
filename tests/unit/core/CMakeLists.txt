@@ -13,3 +13,4 @@ function(agentflow_add_test name)
 endfunction()
 
 agentflow_add_test(errors_test)
+agentflow_add_test(cancel_test)

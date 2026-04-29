@@ -1,6 +1,7 @@
 # agentflow/core/CMakeLists.txt
 add_library(agentflow_core
   errors.cc
+  cancel.cc
 )
 
 target_include_directories(agentflow_core
