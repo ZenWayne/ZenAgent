@@ -2,6 +2,7 @@
 add_library(agentflow_core
   errors.cc
   cancel.cc
+  event.cc
 )
 
 target_include_directories(agentflow_core
