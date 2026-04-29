@@ -33,6 +33,9 @@ FetchContent_Declare(protobuf
   GIT_TAG v25.3
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(protobuf)
+# Expose protobuf_generate() which is only loaded via find_package in the
+# installed config but not automatically when using FetchContent.
+include(${protobuf_SOURCE_DIR}/cmake/protobuf-generate.cmake)
 
 # --- googletest (only when AGENTFLOW_BUILD_TESTS) ---
 if(AGENTFLOW_BUILD_TESTS)
