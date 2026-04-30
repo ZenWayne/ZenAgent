@@ -1,1 +1,3 @@
-# TODO: filled in later tasks
+add_executable(core_stub_graph_demo main.cc)
+target_link_libraries(core_stub_graph_demo PRIVATE agentflow_core)
+agentflow_apply_warnings(core_stub_graph_demo)
