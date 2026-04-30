@@ -5,6 +5,7 @@ add_library(agentflow_core
   event.cc
   state.cc
   graph.cc
+  runner.cc
 )
 
 target_include_directories(agentflow_core
