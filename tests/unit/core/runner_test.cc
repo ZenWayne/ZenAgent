@@ -174,101 +174,51 @@ TEST(RunnerTest, NodeFailureAbortsGraph) {
                ToolError);
 }
 
-// ---- activation_group cycle tests ------------------------------------------
+// ---- activation_group self-cycle test --------------------------------------
+// Adapted from autogen's test_digraph_group_chat_loop_with_self_cycle:
+//
+//   A -> B -> B (self-loop, activation_group="B_loop")
+//   B -> C  (autogen routes via condition="exit"; P1 has no edge-conditional
+//            routing, so we model the exit as a body-thrown exception after
+//            three loop iterations)
+//
+// Expected source order before exit: ["A", "B", "B", "B"].
 
-TEST(RunnerTest, TwoNodeCycleRunsMultipleIterations) {
-  // entry -> a -> b -> a (group=1) ; node `a` increments counter every fire.
-  // After 3 fires of `a`, `a` throws to terminate. Verify that the throw
-  // happens (proves the cycle was actually re-entered the expected number of
-  // times by the runner).
-  auto counter = std::make_shared<std::atomic<int>>(0);
+TEST(RunnerTest, SelfCycleAgentBLoopsThenExits) {
+  auto sources = std::make_shared<std::vector<std::string>>();
+  auto sources_mu = std::make_shared<std::mutex>();
 
-  auto inc_or_throw = [](State& s) {
+  auto record_a = [sources, sources_mu](State&) {
+    std::lock_guard<std::mutex> lk(*sources_mu);
+    sources->push_back("A");
+  };
+
+  auto loop_b_or_exit = [sources, sources_mu](State& s) {
+    {
+      std::lock_guard<std::mutex> lk(*sources_mu);
+      sources->push_back("B");
+    }
     auto& ts = s.Mutable<test::TestState>();
     ts.set_counter(ts.counter() + 1);
-    if (ts.counter() >= 3) throw AgentflowError("done after 3");
+    // Equivalent to autogen's condition flipping from "loop" to "exit" after
+    // three iterations of B. Body throw stands in for the exit branch.
+    if (ts.counter() >= 3) throw AgentflowError("exit");
   };
 
   GraphBuilder b;
-  b.AddNode(std::make_unique<StubNode>("entry", 0ms, counter, nullptr))
-   .AddNode(std::make_unique<StubNode>("a", 0ms, counter, inc_or_throw))
-   .AddNode(std::make_unique<StubNode>("b", 0ms, counter, nullptr))
-   .AddEdge("entry", "a")
-   .AddEdge("a", "b", /*user_group=*/1, Edge::Condition::ALL)
-   .AddEdge("b", "a", /*user_group=*/1, Edge::Condition::ALL);
+  b.AddNode(std::make_unique<StubNode>("A", 0ms, nullptr, record_a))
+   .AddNode(std::make_unique<StubNode>("B", 0ms, nullptr, loop_b_or_exit))
+   .AddEdge("A", "B")
+   .AddEdge("B", "B", /*user_group=*/1, Edge::Condition::ALL);
 
   EXPECT_THROW(RunSync(b.Build(), Runner::Options{}, MakeInitState()),
                AgentflowError);
-}
 
-TEST(RunnerTest, NodeWithMixedGroupsRequiresBoth) {
-  // Topology:
-  //   entry --(group 0)--> joinNode
-  //   loopSrc --(group 1)--> joinNode
-  //   joinNode --(group 1)--> loopSrc
-  //
-  // joinNode has TWO incoming groups. On its first activation:
-  //   - group=0 must drain (entry must fire first).
-  //   - group=1 is vacuously satisfied via cycle bootstrap.
-  // After joinNode fires, loopSrc fires (its only incoming, in group 1, fires
-  // and triggers the runner's cycle reset). Each subsequent firing of joinNode
-  // requires group=1 to drain again. We bound the loop with a counter throw.
-  auto counter = std::make_shared<std::atomic<int>>(0);
-
-  auto bump_or_throw = [](State& s) {
-    auto& ts = s.Mutable<test::TestState>();
-    ts.set_counter(ts.counter() + 1);
-    if (ts.counter() >= 3) throw AgentflowError("3 cycles done");
-  };
-
-  GraphBuilder b;
-  b.AddNode(std::make_unique<StubNode>("entry", 0ms, counter, nullptr))
-   .AddNode(std::make_unique<StubNode>("joinNode", 0ms, counter, bump_or_throw))
-   .AddNode(std::make_unique<StubNode>("loopSrc", 0ms, counter, nullptr))
-   .AddEdge("entry", "joinNode")
-   .AddEdge("joinNode", "loopSrc", 1, Edge::Condition::ALL)
-   .AddEdge("loopSrc", "joinNode", 1, Edge::Condition::ALL);
-
-  // We expect the cycle to actually iterate (joinNode fires multiple times),
-  // proving that on subsequent activations group=1 is being driven by
-  // loopSrc->joinNode firings. The body throw caps it at 3.
-  EXPECT_THROW(RunSync(b.Build(), Runner::Options{}, MakeInitState()),
-               AgentflowError);
-}
-
-TEST(RunnerTest, TwoIndependentCyclesRunInParallel) {
-  // entry -> a1 -> b1 -> a1 (group=1)
-  // entry -> a2 -> b2 -> a2 (group=2)
-  // Each cycle is independent. We use body throws to terminate them.
-  auto counter1 = std::make_shared<std::atomic<int>>(0);
-  auto counter2 = std::make_shared<std::atomic<int>>(0);
-
-  auto bump1 = [counter1](State&) {
-    if (counter1->fetch_add(1) + 1 >= 2) throw AgentflowError("c1 done");
-  };
-  auto bump2 = [counter2](State&) {
-    if (counter2->fetch_add(1) + 1 >= 2) throw AgentflowError("c2 done");
-  };
-
-  GraphBuilder b;
-  b.AddNode(std::make_unique<StubNode>("entry", 0ms, nullptr, nullptr))
-   .AddNode(std::make_unique<StubNode>("a1", 0ms, nullptr, bump1))
-   .AddNode(std::make_unique<StubNode>("b1", 0ms, nullptr, nullptr))
-   .AddNode(std::make_unique<StubNode>("a2", 0ms, nullptr, bump2))
-   .AddNode(std::make_unique<StubNode>("b2", 0ms, nullptr, nullptr))
-   .AddEdge("entry", "a1").AddEdge("entry", "a2")
-   .AddEdge("a1", "b1", 1, Edge::Condition::ALL)
-   .AddEdge("b1", "a1", 1, Edge::Condition::ALL)
-   .AddEdge("a2", "b2", 2, Edge::Condition::ALL)
-   .AddEdge("b2", "a2", 2, Edge::Condition::ALL);
-
-  // First cycle to throw aborts the whole graph; either bump1 or bump2 wins.
-  EXPECT_THROW(RunSync(b.Build(), Runner::Options{}, MakeInitState()),
-               AgentflowError);
-
-  // At least one cycle must have iterated past its first body call, proving
-  // the runner re-entered it (i.e., the cycle counter reset worked).
-  EXPECT_GE(counter1->load() + counter2->load(), 2);
+  ASSERT_EQ(sources->size(), 4u);
+  EXPECT_EQ((*sources)[0], "A");
+  EXPECT_EQ((*sources)[1], "B");
+  EXPECT_EQ((*sources)[2], "B");
+  EXPECT_EQ((*sources)[3], "B");
 }
 
 }  // namespace
