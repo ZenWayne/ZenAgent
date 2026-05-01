@@ -2,6 +2,7 @@
 #include "agentflow/core/graph.h"
 
 #include <algorithm>
+#include <unordered_map>
 
 #include <gtest/gtest.h>
 
@@ -108,10 +109,55 @@ TEST(GraphCompileTest, CycleOnlyIncomingNodeIsEntry) {
 }
 
 TEST(GraphCompileTest, ConflictingConditionThrows) {
+  // Two non-cycle (group=0) edges into the same node with conflicting
+  // ALL/ANY conditions — same as autogen's "different activation groups
+  // detection" scenario for the default group.
   GraphBuilder b;
   b.AddNode(MakeStub("a")).AddNode(MakeStub("b")).AddNode(MakeStub("c"))
    .AddEdge("a", "c", Edge::Condition::ALL)
    .AddEdge("b", "c", Edge::Condition::ANY);
+  EXPECT_THROW(b.Build(), GraphCompileError);
+}
+
+TEST(GraphCompileTest, DifferentGroupsAllowDifferentConditions) {
+  // Same target, two distinct cycle groups — each group can carry its own
+  // condition. group=1 ALL, group=2 ANY on node `target` should compile.
+  GraphBuilder b;
+  for (auto id : {"start", "a1", "b1", "a2", "b2", "target"})
+    b.AddNode(MakeStub(id));
+  // Cycle 1 (group=1, ALL) feeds target via b1 -> target.
+  b.AddEdge("start", "a1")
+   .AddEdge("a1", "b1", 1, Edge::Condition::ALL)
+   .AddEdge("b1", "a1", 1, Edge::Condition::ALL)
+   .AddEdge("b1", "target", 1, Edge::Condition::ALL);
+  // Cycle 2 (group=2, ANY) feeds target via b2 -> target.
+  b.AddEdge("start", "a2")
+   .AddEdge("a2", "b2", 2, Edge::Condition::ANY)
+   .AddEdge("b2", "a2", 2, Edge::Condition::ANY)
+   .AddEdge("b2", "target", 2, Edge::Condition::ANY);
+  auto g = b.Build();
+  // No throw = different groups truly isolate condition validation.
+  // Verify the edges into `target` have distinct groups + distinct conditions.
+  std::unordered_map<int, Edge::Condition> by_group;
+  for (const auto& e : g.Edges()) {
+    if (e.to == "target") by_group[e.activation_group] = e.condition;
+  }
+  ASSERT_EQ(by_group.size(), 2u);
+  EXPECT_EQ(by_group.at(1), Edge::Condition::ALL);
+  EXPECT_EQ(by_group.at(2), Edge::Condition::ANY);
+}
+
+TEST(GraphCompileTest, ConflictingConditionWithinSameCycleGroupThrows) {
+  // Two edges into the same node, both in cycle group=1, but with
+  // conflicting ALL/ANY conditions — must be rejected just like group=0.
+  GraphBuilder b;
+  b.AddNode(MakeStub("entry")).AddNode(MakeStub("a"))
+   .AddNode(MakeStub("b")).AddNode(MakeStub("c"))
+   .AddEdge("entry", "a")
+   .AddEdge("a", "c", 1, Edge::Condition::ALL)
+   .AddEdge("b", "c", 1, Edge::Condition::ANY)
+   .AddEdge("c", "a", 1, Edge::Condition::ALL)
+   .AddEdge("c", "b", 1, Edge::Condition::ANY);
   EXPECT_THROW(b.Build(), GraphCompileError);
 }
 
