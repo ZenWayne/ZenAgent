@@ -51,20 +51,15 @@ State RunSync(Graph g, Runner::Options opts, State initial,
 }
 
 TEST(RunnerTest, LinearGraphRunsInOrder) {
-  auto counter = std::make_shared<std::atomic<int>>(0);
-
-  // Each node records its execution position into state.counter and its id
-  // into state.last_node. The shared atomic gives stable per-node positions
-  // independent of the StubNode lifetime (the StubNodes are owned by the
-  // Graph and destroyed when Runner goes out of scope).
-  auto recorded_orders = std::make_shared<std::vector<std::pair<std::string, int>>>();
-  auto recorded_mu = std::make_shared<std::mutex>();
-  auto record_for = [recorded_orders, recorded_mu, counter](std::string node_id) {
-    return [recorded_orders, recorded_mu, counter, node_id](State& s) {
-      int pos = counter->fetch_add(1);
+  // RunSync blocks until the runner returns, so stack-local order/order_mu
+  // outlive every lambda invocation; reference capture is safe.
+  std::vector<std::string> order;
+  std::mutex order_mu;
+  auto record_for = [&](std::string node_id) {
+    return [&, node_id](State& s) {
       {
-        std::lock_guard<std::mutex> lk(*recorded_mu);
-        recorded_orders->emplace_back(node_id, pos);
+        std::lock_guard<std::mutex> lk(order_mu);
+        order.push_back(node_id);
       }
       s.Mutable<test::TestState>().set_counter(
           s.As<test::TestState>().counter() + 1);
@@ -81,10 +76,7 @@ TEST(RunnerTest, LinearGraphRunsInOrder) {
   auto out = RunSync(b.Build(), Runner::Options{.trace = &cap}, MakeInitState());
 
   EXPECT_EQ(out.As<test::TestState>().counter(), 3);
-  ASSERT_EQ(recorded_orders->size(), 3u);
-  EXPECT_EQ((*recorded_orders)[0].first, "a");
-  EXPECT_EQ((*recorded_orders)[1].first, "b");
-  EXPECT_EQ((*recorded_orders)[2].first, "c");
+  EXPECT_EQ(order, (std::vector<std::string>{"a", "b", "c"}));
 }
 
 TEST(RunnerTest, DiamondFanInMergesLastWriter) {
