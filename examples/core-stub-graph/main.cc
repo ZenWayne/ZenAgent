@@ -30,7 +30,7 @@ class DemoNode : public af::Node {
   DemoNode(std::string id, std::chrono::milliseconds delay)
       : id_(std::move(id)), delay_(delay) {}
 
-  NodeId Id() const override { return id_; }
+  std::string_view Id() const override { return id_; }
   std::string_view Kind() const override { return "demo"; }
 
   asio::awaitable<af::State> Run(af::State state, const af::CancelToken& cancel,

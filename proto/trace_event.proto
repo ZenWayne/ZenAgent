@@ -38,6 +38,10 @@ message FinalPayload {
   optional ErrorEvent error = 2;
 }
 
+message GraphDonePayload {
+  bool failed = 1;
+}
+
 message TraceEvent {
   enum Kind {
     KIND_UNSPECIFIED = 0;
@@ -64,5 +68,6 @@ message TraceEvent {
     EdgeFirePayload edge_fire = 15;
     ErrorEvent failure = 16;
     FinalPayload final = 17;
+    GraphDonePayload graph_done = 18;
   }
 }

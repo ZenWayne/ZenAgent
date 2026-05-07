@@ -116,7 +116,7 @@ TEST(GraphCompileTest, ConflictingConditionThrows) {
   b.AddNode(MakeStub("a")).AddNode(MakeStub("b")).AddNode(MakeStub("c"))
    .AddEdge("a", "c", Edge::Condition::ALL)
    .AddEdge("b", "c", Edge::Condition::ANY);
-  EXPECT_THROW(b.Build(), GraphCompileError);
+  EXPECT_THROW({ (void)b.Build(); }, GraphCompileError);
 }
 
 TEST(GraphCompileTest, DifferentGroupsAllowDifferentConditions) {
@@ -158,26 +158,26 @@ TEST(GraphCompileTest, ConflictingConditionWithinSameCycleGroupThrows) {
    .AddEdge("b", "c", 1, Edge::Condition::ANY)
    .AddEdge("c", "a", 1, Edge::Condition::ALL)
    .AddEdge("c", "b", 1, Edge::Condition::ANY);
-  EXPECT_THROW(b.Build(), GraphCompileError);
+  EXPECT_THROW({ (void)b.Build(); }, GraphCompileError);
 }
 
 TEST(GraphCompileTest, DuplicateNodeIdThrows) {
   GraphBuilder b;
   b.AddNode(MakeStub("dup")).AddNode(MakeStub("dup"));
-  EXPECT_THROW(b.Build(), GraphCompileError);
+  EXPECT_THROW({ (void)b.Build(); }, GraphCompileError);
 }
 
 TEST(GraphCompileTest, EdgeReferencingUnknownNodeThrows) {
   GraphBuilder b;
   b.AddNode(MakeStub("a")).AddEdge("a", "ghost");
-  EXPECT_THROW(b.Build(), GraphCompileError);
+  EXPECT_THROW({ (void)b.Build(); }, GraphCompileError);
 }
 
 TEST(GraphCompileTest, NoEntryNodeThrows) {
   GraphBuilder b;
   b.AddNode(MakeStub("a")).AddNode(MakeStub("b"))
    .AddEdge("a", "b").AddEdge("b", "a");
-  EXPECT_THROW(b.Build(), GraphCompileError);
+  EXPECT_THROW({ (void)b.Build(); }, GraphCompileError);
 }
 
 TEST(GraphCompileTest, UserGroupZeroRejected) {

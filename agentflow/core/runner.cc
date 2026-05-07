@@ -76,16 +76,15 @@ class Runner::Impl {
 
 void Runner::Impl::InitActivations() {
   for (const auto& np : graph_.Nodes()) {
-    activations_[np->Id()] = NodeActivation{};
+    activations_.try_emplace(std::string(np->Id()));
   }
   for (const auto& e : graph_.Edges()) {
     auto& na = activations_[e.to];
-    auto cond_it = na.conditions.find(e.activation_group);
-    if (cond_it == na.conditions.end()) {
+    if (!na.conditions.contains(e.activation_group)) {
       na.conditions[e.activation_group] = e.condition;
     }
     na.remaining_all[e.activation_group] += 1;
-    na.any_fired[e.activation_group];  // ensure key exists
+    na.any_fired.try_emplace(e.activation_group, false);
   }
   // Snapshot only the counter maps (NodeActivation is non-copyable because
   // pending_inputs holds non-copyable State values; we only need the per-group
@@ -152,8 +151,9 @@ asio::awaitable<State> Runner::Impl::Run(State initial, CancelToken cancel) {
     Node* node = graph_.FindNode(node_id);
 
     asio::co_spawn(exec,
-      [this, node, &done, &cancel, input = std::move(input)]() mutable
-          -> asio::awaitable<void> {
+      [this, node, node_id, &done, &cancel,
+       input = std::move(input)]() mutable -> asio::awaitable<void> {
+        const std::string_view node_id_view = node_id;
         State out;
         bool failed = false;
         try {
@@ -163,14 +163,20 @@ asio::awaitable<State> Runner::Impl::Run(State initial, CancelToken cancel) {
             std::lock_guard<std::mutex> lk(mu_);
             if (!first_error_) first_error_ = std::current_exception();
           }
-          emit_.EmitNodeFailed(node->Id(), "Exception", "node threw");
+          emit_.EmitNodeFailed(node_id_view, "Exception", "node threw");
           failed = true;
         }
 
-        if (!failed) {
+        // Cancellation skips fan-out: a cancelled node returns normally
+        // (per Node contract — exit promptly without throwing) but its output
+        // is partial/undefined. Treating it like the !failed path would push
+        // stale state to successors; treating it like failed would propagate
+        // an error. We do neither — quiesce silently and let the caller see
+        // an empty terminal state.
+        if (!failed && !cancel.IsCancelled()) {
           bool has_outgoing = false;
           for (const auto& e : graph_.Edges()) {
-            if (e.from != node->Id()) continue;
+            if (e.from != node_id_view) continue;
             has_outgoing = true;
             std::lock_guard<std::mutex> lk(mu_);
             auto& target = activations_[e.to];
@@ -190,7 +196,7 @@ asio::awaitable<State> Runner::Impl::Run(State initial, CancelToken cancel) {
 
         {
           std::lock_guard<std::mutex> lk(mu_);
-          activations_[node->Id()].in_flight = false;
+          activations_[node_id].in_flight = false;
         }
         in_flight_count_.fetch_sub(1);
         co_await done.async_send(asio::error_code{}, 1, asio::use_awaitable);
@@ -240,13 +246,17 @@ asio::awaitable<State> Runner::Impl::Run(State initial, CancelToken cancel) {
     {
       std::lock_guard<std::mutex> lk(mu_);
       if (first_error_ && in_flight_count_.load() == 0) {
+        emit_.EmitGraphDone(/*failed=*/true);
         std::rethrow_exception(first_error_);
       }
       if (first_error_) continue;
     }
   }
 
-  if (first_error_) std::rethrow_exception(first_error_);
+  if (first_error_) {
+    emit_.EmitGraphDone(/*failed=*/true);
+    std::rethrow_exception(first_error_);
+  }
 
   emit_.EmitGraphDone(/*failed=*/false);
   if (terminal_state_) co_return std::move(*terminal_state_);

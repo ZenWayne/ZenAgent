@@ -23,21 +23,21 @@ class State {
   State() = default;
 
   template <typename ProtoT>
-  static State From(ProtoT msg) {
+  [[nodiscard]] static State From(ProtoT msg) {
     State s;
     s.msg_ = std::make_unique<ProtoT>(std::move(msg));
     return s;
   }
 
   template <typename ProtoT>
-  static State Empty() {
+  [[nodiscard]] static State Empty() {
     State s;
     s.msg_ = std::make_unique<ProtoT>();
     return s;
   }
 
   template <typename ProtoT>
-  const ProtoT& As() const {
+  [[nodiscard]] const ProtoT& As() const {
     const auto* typed = dynamic_cast<const ProtoT*>(msg_.get());
     if (!typed) {
       throw AgentflowError(
@@ -48,7 +48,7 @@ class State {
   }
 
   template <typename ProtoT>
-  ProtoT& Mutable() {
+  [[nodiscard]] ProtoT& Mutable() {
     auto* typed = dynamic_cast<ProtoT*>(msg_.get());
     if (!typed) {
       throw AgentflowError(
@@ -58,12 +58,15 @@ class State {
     return *typed;
   }
 
-  std::string SerializeAsString() const;
+  [[nodiscard]] std::string SerializeAsString() const;
   bool ParseFromString(std::string_view data);
 
-  State Clone() const;
+  [[nodiscard]] State Clone() const;
 
-  bool Empty() const noexcept { return msg_ == nullptr; }
+  // True iff this State holds no message (default-constructed or moved-from).
+  // Distinct from the static factory State::Empty<T>(), which constructs a
+  // State that holds a default-constructed T (and therefore IsEmpty() == false).
+  [[nodiscard]] bool IsEmpty() const noexcept { return msg_ == nullptr; }
 
  private:
   std::unique_ptr<google::protobuf::Message> msg_;

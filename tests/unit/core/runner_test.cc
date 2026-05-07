@@ -157,7 +157,76 @@ TEST(RunnerTest, CancelTerminatesPromptly) {
   t.join();
   auto elapsed = std::chrono::steady_clock::now() - start;
   EXPECT_LT(elapsed, 500ms);
-  (void)fut.get();
+  // Cancelled run must not produce a terminal state — the slow node returned
+  // its (unmodified) state on cancel, but the runner skips fan-out for a
+  // cancelled node, so no terminal state is recorded.
+  State out = fut.get();
+  EXPECT_TRUE(out.IsEmpty());
+}
+
+TEST(RunnerTest, CancelDoesNotFireDownstreamNodes) {
+  auto counter = std::make_shared<std::atomic<int>>(0);
+  auto downstream_ran = std::make_shared<std::atomic<bool>>(false);
+  auto mark_ran = [downstream_ran](State&) {
+    downstream_ran->store(true);
+  };
+
+  // upstream sleeps 5s (long enough to be cancelled mid-flight); downstream
+  // would only run if the runner naively fanned out from a cancelled node.
+  GraphBuilder b;
+  b.AddNode(std::make_unique<StubNode>("upstream", 5s, counter, nullptr))
+   .AddNode(std::make_unique<StubNode>("downstream", 0ms, counter, mark_ran))
+   .AddEdge("upstream", "downstream");
+
+  CancelSource src;
+  asio::io_context io;
+  Runner runner(b.Build(), Runner::Options{});
+  auto fut = asio::co_spawn(io,
+    [&]() -> asio::awaitable<State> {
+      co_return co_await runner.Run(MakeInitState(), src.Token());
+    },
+    asio::use_future);
+
+  std::thread t([&] { io.run(); });
+  std::this_thread::sleep_for(50ms);
+  src.Cancel();
+  t.join();
+
+  State out = fut.get();
+  EXPECT_FALSE(downstream_ran->load());
+  EXPECT_TRUE(out.IsEmpty());
+}
+
+TEST(RunnerTest, GraphDoneEmittedOnSuccess) {
+  GraphBuilder b;
+  b.AddNode(std::make_unique<StubNode>("only", 0ms, nullptr, nullptr));
+
+  CapturingEmitter cap;
+  (void)RunSync(b.Build(), Runner::Options{.trace = &cap}, MakeInitState());
+
+  ASSERT_FALSE(cap.events.empty());
+  const auto& last = cap.events.back();
+  EXPECT_EQ(last.kind(), proto::TraceEvent::GRAPH_DONE);
+  ASSERT_TRUE(last.has_graph_done());
+  EXPECT_FALSE(last.graph_done().failed());
+}
+
+TEST(RunnerTest, GraphDoneEmittedOnFailure) {
+  auto throwing = [](State&) { throw ToolError("boom"); };
+
+  GraphBuilder b;
+  b.AddNode(std::make_unique<StubNode>("a", 0ms, nullptr, throwing));
+
+  CapturingEmitter cap;
+  EXPECT_THROW(
+      RunSync(b.Build(), Runner::Options{.trace = &cap}, MakeInitState()),
+      ToolError);
+
+  ASSERT_FALSE(cap.events.empty());
+  const auto& last = cap.events.back();
+  EXPECT_EQ(last.kind(), proto::TraceEvent::GRAPH_DONE);
+  ASSERT_TRUE(last.has_graph_done());
+  EXPECT_TRUE(last.graph_done().failed());
 }
 
 TEST(RunnerTest, NodeFailureAbortsGraph) {

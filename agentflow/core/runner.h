@@ -20,8 +20,9 @@ namespace agentflow {
 class Runner {
  public:
   struct Options {
-    int max_concurrent_nodes = 4;
-    EventEmitter* trace = nullptr;  // if null, NullEventEmitter is used
+    // Non-owning. Must outlive Run(). If null, a process-wide NullEventEmitter
+    // is used and trace events are dropped.
+    EventEmitter* trace = nullptr;
   };
 
   Runner(Graph graph, Options opts);

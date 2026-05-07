@@ -18,7 +18,7 @@ class CancelSource;
 class CancelToken {
  public:
   CancelToken() = default;
-  bool IsCancelled() const noexcept;
+  [[nodiscard]] bool IsCancelled() const noexcept;
   void OnCancel(std::function<void()> cb) const;
   asio::awaitable<void> WaitCancelled() const;
 
@@ -36,9 +36,9 @@ class CancelToken {
 class CancelSource {
  public:
   CancelSource();
-  CancelToken Token() const { return CancelToken(state_); }
+  [[nodiscard]] CancelToken Token() const { return CancelToken(state_); }
   void Cancel();
-  bool IsCancelled() const noexcept;
+  [[nodiscard]] bool IsCancelled() const noexcept;
 
  private:
   std::shared_ptr<CancelToken::State> state_;

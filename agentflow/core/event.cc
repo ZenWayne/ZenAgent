@@ -99,8 +99,7 @@ void EventEmitter::EmitGraphDone(bool failed) {
   proto::TraceEvent ev;
   ev.set_kind(proto::TraceEvent::GRAPH_DONE);
   ev.set_unix_micros(NowMicros());
-  auto* p = ev.mutable_node_end();
-  p->set_failed(failed);
+  ev.mutable_graph_done()->set_failed(failed);
   Emit(std::move(ev));
 }
 

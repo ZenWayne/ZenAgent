@@ -2,6 +2,7 @@
 #include "agentflow/core/graph.h"
 
 #include <sstream>
+#include <string>
 #include <unordered_set>
 
 #include "agentflow/core/errors.h"
@@ -36,19 +37,19 @@ Graph GraphBuilder::Build() {
   std::vector<std::string> ids;
   ids.reserve(g.nodes_.size());
   for (size_t i = 0; i < g.nodes_.size(); ++i) {
-    const auto& id = g.nodes_[i]->Id();
-    if (g.id_to_index_.count(id)) {
-      throw GraphCompileError("duplicate node id: " + id);
+    std::string_view id = g.nodes_[i]->Id();
+    if (g.id_to_index_.contains(id)) {
+      throw GraphCompileError("duplicate node id: " + std::string(id));
     }
-    g.id_to_index_[id] = i;
-    ids.push_back(id);
+    g.id_to_index_.emplace(std::string(id), i);
+    ids.emplace_back(id);
   }
 
   g.edges_ = std::move(edges_);
 
   // Endpoint sanity check.
   for (const auto& e : g.edges_) {
-    if (!g.id_to_index_.count(e.from) || !g.id_to_index_.count(e.to)) {
+    if (!g.id_to_index_.contains(e.from) || !g.id_to_index_.contains(e.to)) {
       throw GraphCompileError("edge references unknown node: " + e.from +
                               " -> " + e.to);
     }
@@ -77,7 +78,7 @@ Graph GraphBuilder::Build() {
     if (e.activation_group == 0) has_g0_in.insert(e.to);
   }
   for (const auto& id : ids) {
-    if (!has_g0_in.count(id)) g.entry_ids_.push_back(id);
+    if (!has_g0_in.contains(id)) g.entry_ids_.push_back(id);
   }
   if (g.entry_ids_.empty()) {
     throw GraphCompileError("graph has no entry node (every node has a "
@@ -88,7 +89,7 @@ Graph GraphBuilder::Build() {
 }
 
 Node* Graph::FindNode(std::string_view id) const {
-  auto it = id_to_index_.find(std::string(id));
+  auto it = id_to_index_.find(id);
   if (it == id_to_index_.end()) return nullptr;
   return nodes_[it->second].get();
 }

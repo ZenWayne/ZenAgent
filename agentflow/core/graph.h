@@ -15,20 +15,47 @@ namespace agentflow {
 
 class GraphBuilder;
 
+// Transparent hash + equality, so std::unordered_map<std::string, ...>::find()
+// can be called with a std::string_view without allocating a temporary string.
+// Requires C++20 (std::unordered_map heterogeneous lookup).
+struct StringHashTransparent {
+  using is_transparent = void;
+  size_t operator()(std::string_view sv) const noexcept {
+    return std::hash<std::string_view>{}(sv);
+  }
+  size_t operator()(const std::string& s) const noexcept {
+    return std::hash<std::string_view>{}(s);
+  }
+  size_t operator()(const char* s) const noexcept {
+    return std::hash<std::string_view>{}(s);
+  }
+};
+
+struct StringEqTransparent {
+  using is_transparent = void;
+  bool operator()(std::string_view a, std::string_view b) const noexcept {
+    return a == b;
+  }
+};
+
 class Graph {
  public:
-  const std::vector<Edge>& Edges() const { return edges_; }
-  const std::vector<std::unique_ptr<Node>>& Nodes() const { return nodes_; }
+  [[nodiscard]] const std::vector<Edge>& Edges() const { return edges_; }
+  [[nodiscard]] const std::vector<std::unique_ptr<Node>>& Nodes() const {
+    return nodes_;
+  }
 
-  Node* FindNode(std::string_view id) const;
+  [[nodiscard]] Node* FindNode(std::string_view id) const;
 
   // graphviz DOT dump, with activation_group + condition labels on each edge.
-  std::string ToDotString() const;
+  [[nodiscard]] std::string ToDotString() const;
 
   // Entry node IDs: nodes with no incoming activation_group=0 edge. The Runner
   // seeds these with the initial state. Cycle-only entry nodes are also valid
   // entries (they bootstrap via the Runner's times_fired==0 rule).
-  const std::vector<std::string>& EntryNodeIds() const { return entry_ids_; }
+  [[nodiscard]] const std::vector<std::string>& EntryNodeIds() const {
+    return entry_ids_;
+  }
 
  private:
   friend class GraphBuilder;
@@ -36,7 +63,8 @@ class Graph {
 
   std::vector<std::unique_ptr<Node>> nodes_;
   std::vector<Edge> edges_;
-  std::unordered_map<std::string, size_t> id_to_index_;
+  std::unordered_map<std::string, size_t,
+                     StringHashTransparent, StringEqTransparent> id_to_index_;
   std::vector<std::string> entry_ids_;
 };
 
@@ -56,7 +84,9 @@ class GraphBuilder {
                         int user_group, Edge::Condition cond);
 
   // Validates and returns immutable Graph. Throws GraphCompileError on failure.
-  Graph Build();
+  // Consumes nodes_/edges_; calling Build() twice on the same builder yields
+  // an empty graph. Cheap to discard; do not ignore the result.
+  [[nodiscard]] Graph Build();
 
  private:
   std::vector<std::unique_ptr<Node>> nodes_;

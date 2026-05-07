@@ -32,7 +32,7 @@ class StubNode : public Node {
         counter_(std::move(counter)),
         body_(std::move(body)) {}
 
-  NodeId Id() const override { return id_; }
+  std::string_view Id() const override { return id_; }
   std::string_view Kind() const override { return "stub"; }
 
   asio::awaitable<State> Run(State state, const CancelToken& cancel,
