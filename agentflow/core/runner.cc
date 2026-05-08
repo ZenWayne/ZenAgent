@@ -226,6 +226,9 @@ asio::awaitable<State> Runner::Impl::Run(State initial, CancelToken cancel) {
   // nodes to signal progress.
   while (true) {
     while (true) {
+      // Invariant: each node_id appears at most once in activations_, and the
+      // !in_flight check below runs under mu_ — so `next` cannot contain
+      // duplicates and we don't need explicit dedup before launch().
       std::vector<std::string> next;
       {
         std::lock_guard<std::mutex> lk(mu_);
