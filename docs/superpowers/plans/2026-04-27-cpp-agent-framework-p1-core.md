@@ -4,7 +4,7 @@
 
 **Goal:** Build the core graph + runner foundation in pure C++ (no LLM, no MCP, no JNI yet), so subsequent plans P2–P5 can plug real nodes into a working scheduler.
 
-**Architecture:** A graph engine where nodes are coroutine-based executors and edges carry `activation_group` IDs assigned by Tarjan SCC at compile time (autogen #6711 model). Runner counts remaining edges per group to decide node readiness. State is a protobuf-message wrapper. Cancellation is cooperative via `CancelToken`. Streaming events flow through an `EventEmitter` abstraction. No real LLM/tool integration in P1 — stub nodes prove the scheduler works.
+**Architecture:** A graph engine where nodes are coroutine-based executors and edges carry **user-declared** `activation_group` IDs (group=0 = standard DAG fan-in; group>0 = user-tagged cycle/back edge). Runner uses BFS-style queue traversal: per node, per group, it tracks `remaining_prerequisite` counters that decrement as upstream edges fire; a node is ready when every group it has incoming edges in is satisfied. Cycle bootstrap is handled by the Runner via a `times_fired==0` rule. State is a protobuf-message wrapper. Cancellation is cooperative via `CancelToken`. Streaming events flow through an `EventEmitter` abstraction. No real LLM/tool integration in P1 — stub nodes prove the scheduler works.
 
 **Tech Stack:** C++20, CMake 3.20+, standalone asio 1.30.x (coroutine support), protobuf 3.25+, abseil 20240722, GoogleTest 1.14.
 
@@ -44,7 +44,7 @@ zen/
 │       ├── edge.h                          # NEW (header-only)
 │       ├── node.h                          # NEW (abstract; impls live elsewhere)
 │       ├── graph.h                         # NEW
-│       ├── graph.cc                        # NEW: Tarjan SCC + Compile
+│       ├── graph.cc                        # NEW: Compile + validation (no SCC)
 │       ├── runner.h                        # NEW
 │       └── runner.cc                       # NEW: activation counting + dispatch
 ├── tests/
@@ -1328,9 +1328,9 @@ struct Edge {
   std::string from;
   std::string to;
 
-  // 0  = not in any cycle (regular DAG edge)
-  // >0 = belongs to SCC #N (assigned by Graph::Compile via Tarjan)
-  // Users may set explicitly to override automatic assignment.
+  // 0  = standard DAG fan-in edge (count must drain to 0)
+  // >0 = user-declared cycle/back edge (counter resets between firings;
+  //      vacuously satisfied on the destination node's first activation)
   int activation_group = 0;
 
   Condition condition = Condition::ALL;
@@ -1420,7 +1420,7 @@ git commit -m "core: add Edge struct and Node abstract interface"
 
 ---
 
-## Task 8: `core/graph` — Tarjan SCC + Compile
+## Task 8: `core/graph` — Graph + GraphBuilder (manual activation groups)
 
 **Files:**
 - Create: `agentflow/core/graph.h`
@@ -1429,7 +1429,13 @@ git commit -m "core: add Edge struct and Node abstract interface"
 - Modify: `agentflow/core/CMakeLists.txt`
 - Modify: `tests/unit/core/CMakeLists.txt`
 
-Provides `GraphBuilder` (mutable construction) and `Graph` (immutable, post-Compile). `Compile` runs Tarjan SCC and assigns `activation_group` to edges.
+Provides `GraphBuilder` (mutable construction) and `Graph` (immutable, post-Compile). **`activation_group` is purely user-declared.** No automatic SCC detection. The user is responsible for tagging back-edges with non-zero group IDs so the runner knows which incoming counters reset between cycle iterations.
+
+Compile validates only:
+- Node IDs unique
+- Every edge endpoint refers to a known node
+- Per-node-per-group: all edges in that group share the same Condition (ALL or ANY)
+- At least one node is an entry candidate (no incoming `group=0` edges, or no incoming edges at all)
 
 A test-only stub Node is also introduced here (used by graph + runner tests).
 
@@ -1441,8 +1447,8 @@ A test-only stub Node is also introduced here (used by graph + runner tests).
 #define AGENTFLOW_CORE_GRAPH_H_
 
 #include <memory>
-#include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -1455,19 +1461,17 @@ class GraphBuilder;
 
 class Graph {
  public:
-  // Read-only access after Compile.
   const std::vector<Edge>& Edges() const { return edges_; }
   const std::vector<std::unique_ptr<Node>>& Nodes() const { return nodes_; }
 
-  // Lookup by id. Returns nullptr if absent.
   Node* FindNode(std::string_view id) const;
 
-  // For debugging: emit a graphviz DOT representation with activation group
-  // labels on each edge.
+  // graphviz DOT dump, with activation_group + condition labels on each edge.
   std::string ToDotString() const;
 
-  // Entry node IDs: nodes that have no incoming activation_group=0 edge.
-  // Used by Runner to know where to start.
+  // Entry node IDs: nodes with no incoming activation_group=0 edge. The Runner
+  // seeds these with the initial state. Cycle-only entry nodes are also valid
+  // entries (they bootstrap via the Runner's times_fired==0 rule).
   const std::vector<std::string>& EntryNodeIds() const { return entry_ids_; }
 
  private:
@@ -1483,26 +1487,25 @@ class Graph {
 class GraphBuilder {
  public:
   GraphBuilder& AddNode(std::unique_ptr<Node> node);
+
+  // group=0 by default — the runner treats group-0 incoming edges as standard
+  // DAG fan-in (must drain to 0 before the node fires).
   GraphBuilder& AddEdge(std::string from, std::string to,
                         Edge::Condition cond = Edge::Condition::ALL);
+
+  // user_group must be > 0 for cycle/back edges. The runner treats group>0
+  // counters as "vacuously satisfied" on the node's first firing (cycle
+  // bootstrap) and resets them on each subsequent firing.
   GraphBuilder& AddEdge(std::string from, std::string to,
                         int user_group, Edge::Condition cond);
 
-  // Validates, runs Tarjan SCC, assigns activation_group, returns immutable Graph.
-  // Throws GraphCompileError on failure.
+  // Validates and returns immutable Graph. Throws GraphCompileError on failure.
   Graph Build();
 
  private:
   std::vector<std::unique_ptr<Node>> nodes_;
   std::vector<Edge> edges_;
 };
-
-// Exposed for testing: assigns activation_group to edges using Tarjan SCC.
-// Edges inside a non-trivial SCC (size>=2 OR self-edge) get a group_id starting
-// at 1 (each distinct SCC gets a distinct group). Edges already with
-// activation_group != 0 are left untouched (user override).
-void AssignActivationGroups(const std::vector<std::string>& node_ids,
-                            std::vector<Edge>& edges);
 
 }  // namespace agentflow
 
@@ -1515,109 +1518,12 @@ void AssignActivationGroups(const std::vector<std::string>& node_ids,
 // agentflow/core/graph.cc
 #include "agentflow/core/graph.h"
 
-#include <algorithm>
 #include <sstream>
-#include <stack>
 #include <unordered_set>
 
 #include "agentflow/core/errors.h"
 
 namespace agentflow {
-
-namespace {
-
-// Tarjan's algorithm. Returns vector<vector<node_index>>: each outer entry is
-// one SCC. Trivial SCCs (single node with no self-edge) included.
-struct TarjanCtx {
-  const std::vector<std::vector<size_t>>& adj;
-  std::vector<int> idx;
-  std::vector<int> low;
-  std::vector<bool> on_stack;
-  std::stack<size_t> stk;
-  std::vector<std::vector<size_t>> sccs;
-  int next_idx = 0;
-};
-
-void TarjanVisit(TarjanCtx& c, size_t v) {
-  c.idx[v] = c.low[v] = c.next_idx++;
-  c.stk.push(v);
-  c.on_stack[v] = true;
-  for (size_t w : c.adj[v]) {
-    if (c.idx[w] < 0) {
-      TarjanVisit(c, w);
-      c.low[v] = std::min(c.low[v], c.low[w]);
-    } else if (c.on_stack[w]) {
-      c.low[v] = std::min(c.low[v], c.idx[w]);
-    }
-  }
-  if (c.low[v] == c.idx[v]) {
-    std::vector<size_t> comp;
-    while (true) {
-      size_t w = c.stk.top();
-      c.stk.pop();
-      c.on_stack[w] = false;
-      comp.push_back(w);
-      if (w == v) break;
-    }
-    c.sccs.push_back(std::move(comp));
-  }
-}
-
-}  // namespace
-
-void AssignActivationGroups(const std::vector<std::string>& node_ids,
-                            std::vector<Edge>& edges) {
-  // Build adjacency.
-  std::unordered_map<std::string, size_t> id_to_idx;
-  for (size_t i = 0; i < node_ids.size(); ++i) id_to_idx[node_ids[i]] = i;
-
-  std::vector<std::vector<size_t>> adj(node_ids.size());
-  for (const auto& e : edges) {
-    auto fi = id_to_idx.find(e.from);
-    auto ti = id_to_idx.find(e.to);
-    if (fi == id_to_idx.end() || ti == id_to_idx.end()) {
-      throw GraphCompileError("edge references unknown node: " + e.from +
-                              " -> " + e.to);
-    }
-    adj[fi->second].push_back(ti->second);
-  }
-
-  TarjanCtx ctx{adj, std::vector<int>(node_ids.size(), -1),
-                std::vector<int>(node_ids.size(), -1),
-                std::vector<bool>(node_ids.size(), false), {}, {}, 0};
-  for (size_t v = 0; v < node_ids.size(); ++v) {
-    if (ctx.idx[v] < 0) TarjanVisit(ctx, v);
-  }
-
-  // Map each non-trivial SCC to a group id.
-  // node_index -> group_id (0 if not in non-trivial SCC).
-  std::vector<int> node_group(node_ids.size(), 0);
-  int next_group = 1;
-  for (const auto& comp : ctx.sccs) {
-    bool nontrivial = comp.size() > 1;
-    if (!nontrivial) {
-      // Single node — non-trivial only if there's a self-edge.
-      size_t v = comp[0];
-      for (size_t w : adj[v]) {
-        if (w == v) { nontrivial = true; break; }
-      }
-    }
-    if (!nontrivial) continue;
-    int g = next_group++;
-    for (size_t v : comp) node_group[v] = g;
-  }
-
-  // Assign group to each edge: group is non-zero iff both endpoints are in
-  // the SAME non-trivial SCC and the edge's group is not user-set.
-  for (auto& e : edges) {
-    if (e.activation_group != 0) continue;  // user override
-    size_t fi = id_to_idx[e.from];
-    size_t ti = id_to_idx[e.to];
-    if (node_group[fi] != 0 && node_group[fi] == node_group[ti]) {
-      e.activation_group = node_group[fi];
-    }
-  }
-}
 
 GraphBuilder& GraphBuilder::AddNode(std::unique_ptr<Node> node) {
   nodes_.push_back(std::move(node));
@@ -1633,7 +1539,8 @@ GraphBuilder& GraphBuilder::AddEdge(std::string from, std::string to,
 GraphBuilder& GraphBuilder::AddEdge(std::string from, std::string to,
                                     int user_group, Edge::Condition cond) {
   if (user_group <= 0) {
-    throw GraphCompileError("user_group must be > 0");
+    throw GraphCompileError("user_group must be > 0 (use 0-arg overload "
+                            "for non-cycle edges)");
   }
   edges_.push_back(Edge{std::move(from), std::move(to), user_group, cond});
   return *this;
@@ -1643,7 +1550,6 @@ Graph GraphBuilder::Build() {
   Graph g;
   g.nodes_ = std::move(nodes_);
 
-  // Build id->index map and uniqueness check.
   std::vector<std::string> ids;
   ids.reserve(g.nodes_.size());
   for (size_t i = 0; i < g.nodes_.size(); ++i) {
@@ -1656,9 +1562,16 @@ Graph GraphBuilder::Build() {
   }
 
   g.edges_ = std::move(edges_);
-  AssignActivationGroups(ids, g.edges_);
 
-  // Validate: per-node, all incoming edges in the same group share Condition.
+  // Endpoint sanity check.
+  for (const auto& e : g.edges_) {
+    if (!g.id_to_index_.count(e.from) || !g.id_to_index_.count(e.to)) {
+      throw GraphCompileError("edge references unknown node: " + e.from +
+                              " -> " + e.to);
+    }
+  }
+
+  // Per-node-per-group condition consistency.
   std::unordered_map<std::string, std::unordered_map<int, Edge::Condition>>
       cond_by_node_group;
   for (const auto& e : g.edges_) {
@@ -1673,7 +1586,9 @@ Graph GraphBuilder::Build() {
     }
   }
 
-  // Compute entry nodes: nodes with no incoming group=0 edges.
+  // Entry nodes: those with no incoming group=0 edge. Cycle-only-incoming
+  // nodes also count as entries — they bootstrap via the Runner's
+  // times_fired==0 rule.
   std::unordered_set<std::string> has_g0_in;
   for (const auto& e : g.edges_) {
     if (e.activation_group == 0) has_g0_in.insert(e.to);
@@ -1683,7 +1598,7 @@ Graph GraphBuilder::Build() {
   }
   if (g.entry_ids_.empty()) {
     throw GraphCompileError("graph has no entry node (every node has a "
-                            "non-cycle incoming edge)");
+                            "group=0 incoming edge)");
   }
 
   return g;
@@ -1839,27 +1754,29 @@ TEST(GraphCompileTest, DiamondAllGroupZero) {
   for (const auto& e : g.Edges()) EXPECT_EQ(e.activation_group, 0);
 }
 
-TEST(GraphCompileTest, SelfLoopGetsGroup) {
-  // a -> b, b -> b (self-loop)
+TEST(GraphCompileTest, UserGroupPreservedOnSelfLoop) {
+  // User declares b->b as a cycle by tagging it with group=1.
   GraphBuilder b;
   b.AddNode(MakeStub("a")).AddNode(MakeStub("b"))
-   .AddEdge("a", "b").AddEdge("b", "b");
+   .AddEdge("a", "b")
+   .AddEdge("b", "b", /*user_group=*/1, Edge::Condition::ALL);
   auto g = b.Build();
-  int self_group = -1;
-  int ext_group = -1;
+  int self_group = -1, ext_group = -1;
   for (const auto& e : g.Edges()) {
     if (e.from == "b" && e.to == "b") self_group = e.activation_group;
     if (e.from == "a" && e.to == "b") ext_group = e.activation_group;
   }
-  EXPECT_GT(self_group, 0);
+  EXPECT_EQ(self_group, 1);
   EXPECT_EQ(ext_group, 0);
 }
 
-TEST(GraphCompileTest, TwoNodeCycleSingleGroup) {
-  // a -> b, b -> a, plus external entry `start -> a`
+TEST(GraphCompileTest, TwoNodeCycleUsesUserGroup) {
+  // User explicitly tags the cycle edges (a->b and b->a) with group=1.
   GraphBuilder b;
   b.AddNode(MakeStub("start")).AddNode(MakeStub("a")).AddNode(MakeStub("b"))
-   .AddEdge("start", "a").AddEdge("a", "b").AddEdge("b", "a");
+   .AddEdge("start", "a")
+   .AddEdge("a", "b", /*user_group=*/1, Edge::Condition::ALL)
+   .AddEdge("b", "a", /*user_group=*/1, Edge::Condition::ALL);
   auto g = b.Build();
   int ab = -1, ba = -1, start_a = -1;
   for (const auto& e : g.Edges()) {
@@ -1867,33 +1784,48 @@ TEST(GraphCompileTest, TwoNodeCycleSingleGroup) {
     if (e.from == "b" && e.to == "a") ba = e.activation_group;
     if (e.from == "start" && e.to == "a") start_a = e.activation_group;
   }
-  EXPECT_GT(ab, 0);
-  EXPECT_EQ(ab, ba) << "both edges in the same SCC must share group";
-  EXPECT_EQ(start_a, 0) << "edge crossing into SCC stays group=0";
-  EXPECT_EQ(g.EntryNodeIds().size(), 1u);
+  EXPECT_EQ(ab, 1);
+  EXPECT_EQ(ba, 1);
+  EXPECT_EQ(start_a, 0);
+  ASSERT_EQ(g.EntryNodeIds().size(), 1u);
   EXPECT_EQ(g.EntryNodeIds()[0], "start");
 }
 
-TEST(GraphCompileTest, TwoSeparateCyclesGetDifferentGroups) {
-  // start -> a, a -> b, b -> a    (cycle 1)
-  // start -> c, c -> d, d -> c    (cycle 2)
+TEST(GraphCompileTest, TwoSeparateCyclesUseDistinctUserGroups) {
+  // start -> a, a -> b, b -> a    (cycle 1, group=1)
+  // start -> c, c -> d, d -> c    (cycle 2, group=2)
   GraphBuilder b;
   for (auto id : {"start", "a", "b", "c", "d"}) b.AddNode(MakeStub(id));
-  b.AddEdge("start", "a").AddEdge("a", "b").AddEdge("b", "a");
-  b.AddEdge("start", "c").AddEdge("c", "d").AddEdge("d", "c");
+  b.AddEdge("start", "a")
+   .AddEdge("a", "b", 1, Edge::Condition::ALL)
+   .AddEdge("b", "a", 1, Edge::Condition::ALL);
+  b.AddEdge("start", "c")
+   .AddEdge("c", "d", 2, Edge::Condition::ALL)
+   .AddEdge("d", "c", 2, Edge::Condition::ALL);
   auto g = b.Build();
   int ab = 0, cd = 0;
   for (const auto& e : g.Edges()) {
     if (e.from == "a" && e.to == "b") ab = e.activation_group;
     if (e.from == "c" && e.to == "d") cd = e.activation_group;
   }
-  EXPECT_GT(ab, 0);
-  EXPECT_GT(cd, 0);
-  EXPECT_NE(ab, cd) << "distinct SCCs must get distinct group ids";
+  EXPECT_EQ(ab, 1);
+  EXPECT_EQ(cd, 2);
+}
+
+TEST(GraphCompileTest, CycleOnlyIncomingNodeIsEntry) {
+  // Pure 2-node cycle with no external entry: both edges have user_group=1,
+  // so neither node has a group=0 incoming edge — both are entries and the
+  // Runner bootstraps them via times_fired==0.
+  GraphBuilder b;
+  b.AddNode(MakeStub("a")).AddNode(MakeStub("b"))
+   .AddEdge("a", "b", 1, Edge::Condition::ALL)
+   .AddEdge("b", "a", 1, Edge::Condition::ALL);
+  auto g = b.Build();
+  EXPECT_EQ(g.EntryNodeIds().size(), 2u);
 }
 
 TEST(GraphCompileTest, ConflictingConditionThrows) {
-  // Both edges go to the same node in group=0 with conflicting conditions.
+  // Same node, same group, different conditions -> reject.
   GraphBuilder b;
   b.AddNode(MakeStub("a")).AddNode(MakeStub("b")).AddNode(MakeStub("c"))
    .AddEdge("a", "c", Edge::Condition::ALL)
@@ -1913,13 +1845,32 @@ TEST(GraphCompileTest, EdgeReferencingUnknownNodeThrows) {
   EXPECT_THROW(b.Build(), GraphCompileError);
 }
 
+TEST(GraphCompileTest, NoEntryNodeThrows) {
+  // Every node has a group=0 incoming edge and no node escapes — should
+  // be rejected because the runner has no place to inject the initial state.
+  GraphBuilder b;
+  b.AddNode(MakeStub("a")).AddNode(MakeStub("b"))
+   .AddEdge("a", "b").AddEdge("b", "a");  // both group=0
+  EXPECT_THROW(b.Build(), GraphCompileError);
+}
+
+TEST(GraphCompileTest, UserGroupZeroRejected) {
+  GraphBuilder b;
+  b.AddNode(MakeStub("a")).AddNode(MakeStub("b"));
+  // Trying to set group=0 via the user-group overload is a programmer error.
+  EXPECT_THROW(b.AddEdge("a", "b", 0, Edge::Condition::ALL),
+               GraphCompileError);
+}
+
 TEST(GraphCompileTest, DotStringIncludesGroupLabels) {
   GraphBuilder b;
   b.AddNode(MakeStub("a")).AddNode(MakeStub("b"))
-   .AddEdge("a", "b").AddEdge("b", "a");
+   .AddEdge("a", "b")
+   .AddEdge("b", "a", 1, Edge::Condition::ALL);
   auto g = b.Build();
   std::string dot = g.ToDotString();
   EXPECT_NE(dot.find("g=1"), std::string::npos);
+  EXPECT_NE(dot.find("g=0"), std::string::npos);
   EXPECT_NE(dot.find("a -> b"), std::string::npos);
   EXPECT_NE(dot.find("b -> a"), std::string::npos);
 }
@@ -1939,8 +1890,8 @@ Add: `agentflow_add_test(graph_compile_test)`
 - [ ] **Step 8.7: Build and run tests**
 
 Run: `cmake --build build -j$(nproc) --target graph_compile_test`
-Run: `ctest --test-dir build -R graph_compile_test --output-on-failure`
-Expected: 9 tests PASS.
+Run: `ctest --test-dir build -R GraphCompileTest --output-on-failure`
+Expected: 11 tests PASS.
 
 - [ ] **Step 8.8: Commit**
 
@@ -1950,7 +1901,7 @@ git add agentflow/core/graph.h agentflow/core/graph.cc \
         tests/unit/core/graph_compile_test.cc \
         tests/unit/core/stub_node.h \
         tests/unit/core/CMakeLists.txt
-git commit -m "core: add Graph + GraphBuilder with Tarjan SCC compilation"
+git commit -m "core: add Graph + GraphBuilder (manual activation groups)"
 ```
 
 ---

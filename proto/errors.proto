@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package agentflow.proto;
+
+message ErrorEvent {
+  string node_id = 1;
+  string type = 2;     // e.g. "LlmAbortedError", "GraphCompileError"
+  string message = 3;
+  string trace = 4;    // optional stack trace
+}

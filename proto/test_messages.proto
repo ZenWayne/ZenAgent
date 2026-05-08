@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package agentflow.test;
+
+// Used in unit tests to populate State<T>
+message UserQuery {
+  string text = 1;
+  int32 turn = 2;
+}
+
+message AssistantReply {
+  string text = 1;
+  repeated string tools_used = 2;
+}
+
+message TestState {
+  UserQuery query = 1;
+  AssistantReply reply = 2;
+  int32 counter = 3;          // incremented by stub nodes
+  string last_node = 4;       // last node that ran
+}
