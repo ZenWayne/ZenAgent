@@ -1,7 +1,6 @@
 // agentflow/nodes/agent_node.cc
 #include "agentflow/nodes/agent_node.h"
 
-#include <algorithm>
 #include <nlohmann/json.hpp>
 
 #include "agentflow/core/errors.h"
@@ -118,14 +117,17 @@ std::string AgentNode::BuildConversationJson(const State& state) const {
     msgs.push_back(std::move(m));
   }
 
-  // Current user input
-  std::string input = ReadField(state, cfg_.input_field);
-  msgs.push_back({{"role", "user"}, {"content", input}});
+  // Current user input — only include on first iteration (before any history exists)
+  // to avoid duplicating the input on every ReAct turn.
+  if (history.empty()) {
+    std::string input = ReadField(state, cfg_.input_field);
+    msgs.push_back({{"role", "user"}, {"content", input}});
+  }
 
   json full;
   full["messages"] = msgs;
   full["max_tokens"] = cfg_.max_output_tokens;
-  full["stream"] = true;
+  full["stream"] = cfg_.stream_tokens;
 
   // Attach tool definitions if configured
   if (cfg_.tool_registry) {
@@ -185,6 +187,12 @@ asio::awaitable<State> AgentNode::Run(
     try {
       auto parsed = json::parse(accum);
       if (parsed.contains("tool_calls") && !parsed["tool_calls"].empty()) {
+        // Persist the assistant's tool-call message so the LLM sees its own
+        // choices on subsequent iterations (standard ReAct pattern).
+        json assistant_msg = parsed;
+        assistant_msg["role"] = "assistant";
+        AppendMessage(state, cfg_.messages_field, assistant_msg);
+
         for (const auto& tc : parsed["tool_calls"]) {
           std::string id = tc.value("id", "");
           std::string name = tc["function"]["name"];
@@ -193,8 +201,8 @@ asio::awaitable<State> AgentNode::Run(
         }
         continue;  // Loop back for next LLM call
       }
-    } catch (const json::parse_error&) {
-      // Not JSON = plain text output
+    } catch (const json::exception&) {
+      // Not a valid JSON tool-call response — treat as plain text output
     }
 
     // No tool call — this is the final answer

@@ -47,7 +47,8 @@ class AgentNode : public Node {
  private:
   std::string BuildConversationJson(const State& state) const;
   asio::awaitable<void> HandleToolCall(
-      State& state, const std::string& name,
+      State& state, const std::string& call_id,
+      const std::string& name,
       const std::string& args, const CancelToken& cancel);
   void WriteOutput(State& state, const std::string& text) const;
 
