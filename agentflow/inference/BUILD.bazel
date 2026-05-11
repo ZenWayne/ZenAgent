@@ -1,0 +1,18 @@
+# agentflow/inference/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "inference",
+    srcs = [
+        "litert_lm_engine.cc",
+        "litert_lm_session.cc",
+    ],
+    hdrs = [
+        "litert_lm_engine.h",
+        "litert_lm_session.h",
+    ],
+    deps = [
+        "//third_party/litert_lm:c_engine",
+        "@asio",
+    ],
+)
