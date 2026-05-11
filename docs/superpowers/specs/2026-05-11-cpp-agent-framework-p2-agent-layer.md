@@ -131,22 +131,7 @@ class LiteRtLmSession {
 };
 ```
 
-### 3.3 StubEngine / StubSession
-
-For testing AgentNode without a real model:
-
-```cpp
-class StubLiteRtLmEngine : public LiteRtLmEngine {
-  // Always creates a StubSession
-};
-
-class StubLiteRtLmSession : public LiteRtLmSession {
-  // Constructor takes a list of preset tokens to return
-  // NextTokenAsync() returns each token in sequence, then empty string
-};
-```
-
-### 3.4 CMake → Bazel Target
+### 3.3 Bazel Target
 
 ```python
 # agentflow/inference/BUILD.bazel
@@ -392,8 +377,7 @@ zen/
 │   ├── inference/                  # NEW
 │   │   ├── BUILD.bazel
 │   │   ├── litert_lm_engine.h/cc
-│   │   ├── litert_lm_session.h/cc
-│   │   └── stub_litert_lm_session.h/cc
+│   │   └── litert_lm_session.h/cc
 │   ├── tools/                      # NEW
 │   │   ├── BUILD.bazel
 │   │   ├── tool.h
@@ -423,17 +407,17 @@ zen/
 | Layer | File | Tests | What it covers |
 |---|---|---|---|
 | Core (P1) | `tests/unit/core/*` | 39 | State, Cancel, Event, Graph, Runner |
-| Inference | `tests/unit/inference/*` | ~8 | Session streaming bridge, cancel→abort, stub engine, multi-token sequence |
+| Inference | `tests/unit/inference/*` | ~8 | Session streaming bridge, cancel→abort, multi-token sequence |
 | Tools | `tests/unit/tools/*` | ~6 | NativeFnTool invoke, ToolRegistry register+invoke+error, JSON export format |
-| Nodes | `tests/unit/nodes/*` | ~8 | AgentNode with stub engine: no tool, single tool, multi-turn, max_iter, cancel, error recovery |
+| Nodes | `tests/unit/nodes/*` | ~8 | AgentNode with real small model: no-tool, single-tool, multi-turn, max_iter, cancel |
 
 **Total P2: ~22 new tests. Full suite: ~61 tests.**
 
 ### 7.1 Key Test Scenarios
 
-- **AgentNode no-tool**: stub engine returns plain text → agent writes to output_field
-- **AgentNode single tool**: stub returns tool_call → tool invoked → stub returns final answer
-- **AgentNode max_iter**: stub keeps returning tool_call → agent hits max_iter → fallback message
+- **AgentNode no-tool**: real model generates plain text → agent writes to output_field
+- **AgentNode single tool**: real model returns tool_call → tool invoked → model generates final answer
+- **AgentNode max_iter**: an agent configured to always call tools hits max_iter → fallback message
 - **AgentNode cancel**: cancel mid-stream → Abort called → state returned promptly
 - **Session bridge**: callback pushes multiple tokens → asio coroutine receives them in order
 - **Session cancel**: session.Start() → Cancel() → session.Abort() called
@@ -448,7 +432,7 @@ P2 is complete when:
 2. `agentflow/inference/` builds and links against LiteRT-LM's `c_engine` target
 3. LiteRtLmSession correctly bridges a background-thread streaming callback to asio awaitables
 4. `agentflow/tools/` provides NativeFnTool, ToolRegistry, and JSON export
-5. AgentNode runs a ReAct loop with stub engine: input → LLM → tool_call → tool → LLM → output
-6. Demo binary shows AgentNode + tools working end-to-end with a stub engine
+5. AgentNode runs a ReAct loop with a real small model: input → LLM → tool_call → tool → LLM → output
+6. Demo binary shows AgentNode + tools working end-to-end with a real model
 7. Cancellation correctly aborts the LiteRT-LM session
 8. All new code has UBSan/ASan clean builds
