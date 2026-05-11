@@ -2,6 +2,7 @@
 #include "agentflow/inference/litert_lm_session.h"
 
 #include <stdexcept>
+#include <system_error>
 
 #include <asio/as_tuple.hpp>
 #include <asio/use_awaitable.hpp>
@@ -24,9 +25,15 @@ void LiteRtLmSession::Start(std::string input_text) {
   input.data = input_text.data();
   input.size = input_text.size();
 
-  litert_lm_session_generate_content_stream(
+  int rc = litert_lm_session_generate_content_stream(
       session_, &input, 1,
       &LiteRtLmSession::StreamCallback, this);
+  if (rc != 0) {
+    channel_.try_send(
+        make_error_code(std::errc::io_error),
+        "Failed to start LiteRT-LM stream");
+    channel_.close();
+  }
 }
 
 asio::awaitable<std::string> LiteRtLmSession::NextTokenAsync() {

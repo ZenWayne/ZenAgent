@@ -131,12 +131,8 @@ std::string AgentNode::BuildConversationJson(const State& state) const {
 
   // Attach tool definitions if configured
   if (cfg_.tool_registry) {
-    std::vector<std::string> all_tools;
-    // ExportToolsJson filters by name — passing empty span returns empty array.
-    // For P2, ExportToolsJson accepts a span of names to include.
-    // Since ToolRegistry doesn't expose a "list all names" API, we use a
-    // placeholder: the caller must have set up tools correctly.
-    full["tools"] = json::parse(cfg_.tool_registry->ExportToolsJson(all_tools));
+    full["tools"] = json::parse(
+        cfg_.tool_registry->ExportToolsJson(cfg_.tool_names));
   }
 
   return full.dump();
@@ -152,19 +148,19 @@ asio::awaitable<State> AgentNode::Run(
     throw AgentflowError("AgentNode: engine and io_ctx must be configured");
   }
 
-  auto* raw_session = litert_lm_engine_create_session(
-      cfg_.engine->Get(),
-      /*session_config=*/nullptr);
-  if (!raw_session) {
-    throw AgentflowError("AgentNode: failed to create LiteRT-LM session");
-  }
-
-  LiteRtLmSession session(raw_session, *cfg_.io_ctx);
   if (cancel.IsCancelled()) co_return std::move(state);
 
   std::string final_answer;
   for (int iter = 0; iter < cfg_.max_iter; ++iter) {
     if (cancel.IsCancelled()) break;
+
+    auto* raw_session = litert_lm_engine_create_session(
+        cfg_.engine->Get(),
+        /*session_config=*/nullptr);
+    if (!raw_session) {
+      throw AgentflowError("AgentNode: failed to create LiteRT-LM session");
+    }
+    LiteRtLmSession session(raw_session, *cfg_.io_ctx);
 
     emit.EmitNodeStart(Id());
     std::string conversation_json = BuildConversationJson(state);

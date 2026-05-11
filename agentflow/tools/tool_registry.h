@@ -27,6 +27,7 @@ class ToolRegistry {
       const CancelToken& cancel);
 
   // Returns OpenAI-compatible tools JSON array for LLM function calling.
+  // If tool_names is empty, all registered tools are exported.
   std::string ExportToolsJson(
       std::span<const std::string> tool_names) const;
 

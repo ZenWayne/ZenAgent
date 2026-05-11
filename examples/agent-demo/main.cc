@@ -99,5 +99,5 @@ int main(int argc, char** argv) {
   std::cout << "\n=== Final ===\n";
   std::cout << "Assistant: " << ts.assistant_reply() << std::endl;
 
-  return ts.counter() >= 0 ? 0 : 1;
+  return ts.assistant_reply().empty() ? 1 : 0;
 }

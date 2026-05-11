@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <asio/awaitable.hpp>
 #include <asio/io_context.hpp>
@@ -31,6 +32,10 @@ struct AgentNodeConfig {
   std::string input_field;       // read user query from this field
   std::string output_field;      // write assistant reply to this field
   std::string messages_field;    // if non-empty, append to this repeated Message field
+
+  // Tool names to advertise in the LLM request.
+  // If empty, all registered tools are exported.
+  std::vector<std::string> tool_names;
 };
 
 class AgentNode : public Node {

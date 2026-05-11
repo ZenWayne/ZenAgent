@@ -45,10 +45,18 @@ std::string ToolRegistry::ExportToolsJson(
     std::span<const std::string> tool_names) const {
   nlohmann::json arr = nlohmann::json::array();
   std::lock_guard<std::mutex> lk(mu_);
-  for (const auto& name : tool_names) {
-    auto it = tools_.find(name);
-    if (it != tools_.end()) {
-      arr.push_back(SchemaToJson(it->second->Schema()));
+
+  if (tool_names.empty()) {
+    // Empty span means export all registered tools.
+    for (const auto& [name, tool] : tools_) {
+      arr.push_back(SchemaToJson(tool->Schema()));
+    }
+  } else {
+    for (const auto& name : tool_names) {
+      auto it = tools_.find(name);
+      if (it != tools_.end()) {
+        arr.push_back(SchemaToJson(it->second->Schema()));
+      }
     }
   }
   return arr.dump();
