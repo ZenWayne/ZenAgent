@@ -38,7 +38,7 @@ cc_test(
 cc_test(
     name = "graph_compile_test",
     size = "small",
-    srcs = ["graph_compile_test.cc", "stub_node.h"],
+    srcs = ["graph_compile_test.cc"],
     deps = [
         "//agentflow/core",
         "@googletest//:gtest",
@@ -62,7 +62,7 @@ cc_test(
 cc_test(
     name = "runner_test",
     size = "small",
-    srcs = ["runner_test.cc", "stub_node.h"],
+    srcs = ["runner_test.cc"],
     deps = [
         "//agentflow/core",
         "//proto:agentflow_proto",

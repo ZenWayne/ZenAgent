@@ -12,7 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "agentflow/core/graph.h"
-#include "tests/unit/core/stub_node.h"
+#include "agentflow/core/stub_node.h"
 #include "test_messages.pb.h"
 
 namespace agentflow {
