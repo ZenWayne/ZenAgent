@@ -68,6 +68,13 @@ class State {
   // State that holds a default-constructed T (and therefore IsEmpty() == false).
   [[nodiscard]] bool IsEmpty() const noexcept { return msg_ == nullptr; }
 
+  // Raw pointer to the underlying protobuf message (for reflection-based access).
+  // Returns nullptr if the State is empty. Use only when the concrete type is
+  // unknown at compile time (e.g., AgentNode's field-name-based access).
+  [[nodiscard]] const google::protobuf::Message* UnsafeMessage() const {
+    return msg_.get();
+  }
+
  private:
   std::unique_ptr<google::protobuf::Message> msg_;
 };

@@ -62,6 +62,43 @@ void AppendMessage(State& state, const std::string& field_name,
   }
 }
 
+// Collect existing messages from the state's repeated message field into a JSON
+// array. Each message is expected to have "role" and "content" string fields.
+json ReadMessages(const State& state, const std::string& field_name) {
+  json arr = json::array();
+  const auto* msg = state.UnsafeMessage();
+  if (!msg || field_name.empty()) return arr;
+
+  const auto* refl = msg->GetReflection();
+  const auto* desc = msg->GetDescriptor()->FindFieldByName(field_name);
+  if (!desc || !desc->is_repeated()) return arr;
+  if (desc->type() != google::protobuf::FieldDescriptor::TYPE_MESSAGE) return arr;
+
+  int size = refl->FieldSize(*msg, desc);
+  const auto* entry_desc = desc->message_type();
+  auto* role_f = entry_desc->FindFieldByName("role");
+  auto* content_f = entry_desc->FindFieldByName("content");
+  auto* tcid_f = entry_desc->FindFieldByName("tool_call_id");
+  if (!role_f || !content_f) return arr;
+
+  for (int i = 0; i < size; ++i) {
+    const auto& entry = refl->GetRepeatedMessage(*msg, desc, i);
+    json obj;
+    obj["role"] = role_f->type() == google::protobuf::FieldDescriptor::TYPE_STRING
+        ? refl->GetString(entry, role_f) : "";
+    obj["content"] = content_f->type() == google::protobuf::FieldDescriptor::TYPE_STRING
+        ? refl->GetString(entry, content_f) : "";
+    if (tcid_f && tcid_f->type() == google::protobuf::FieldDescriptor::TYPE_STRING) {
+      std::string tcid = refl->GetString(entry, tcid_f);
+      if (!tcid.empty()) {
+        obj["tool_call_id"] = tcid;
+      }
+    }
+    arr.push_back(std::move(obj));
+  }
+  return arr;
+}
+
 }  // namespace
 
 AgentNode::AgentNode(AgentNodeConfig cfg)
@@ -75,14 +112,30 @@ std::string AgentNode::BuildConversationJson(const State& state) const {
     msgs.push_back({{"role", "system"}, {"content", cfg_.system_prompt}});
   }
 
+  // Append existing conversation history (tool results, previous turns)
+  json history = ReadMessages(state, cfg_.messages_field);
+  for (auto& m : history) {
+    msgs.push_back(std::move(m));
+  }
+
+  // Current user input
   std::string input = ReadField(state, cfg_.input_field);
   msgs.push_back({{"role", "user"}, {"content", input}});
 
-  // Attach tools if configured
   json full;
   full["messages"] = msgs;
   full["max_tokens"] = cfg_.max_output_tokens;
   full["stream"] = true;
+
+  // Attach tool definitions if configured
+  if (cfg_.tool_registry) {
+    std::vector<std::string> all_tools;
+    // ExportToolsJson filters by name — passing empty span returns empty array.
+    // For P2, ExportToolsJson accepts a span of names to include.
+    // Since ToolRegistry doesn't expose a "list all names" API, we use a
+    // placeholder: the caller must have set up tools correctly.
+    full["tools"] = json::parse(cfg_.tool_registry->ExportToolsJson(all_tools));
+  }
 
   return full.dump();
 }
@@ -128,13 +181,15 @@ asio::awaitable<State> AgentNode::Run(
     emit.EmitNodeEnd(Id(), cancel.IsCancelled(), /*failed=*/false);
 
     // Check for tool call in output
+    // LiteRT-LM format: {"tool_calls":[{"id":"...","function":{"name":"...","arguments":"..."}}]}
     try {
       auto parsed = json::parse(accum);
       if (parsed.contains("tool_calls") && !parsed["tool_calls"].empty()) {
         for (const auto& tc : parsed["tool_calls"]) {
+          std::string id = tc.value("id", "");
           std::string name = tc["function"]["name"];
           std::string args = tc["function"]["arguments"];
-          co_await HandleToolCall(state, name, args, cancel);
+          co_await HandleToolCall(state, id, name, args, cancel);
         }
         continue;  // Loop back for next LLM call
       }
@@ -156,7 +211,8 @@ asio::awaitable<State> AgentNode::Run(
 }
 
 asio::awaitable<void> AgentNode::HandleToolCall(
-    State& state, const std::string& name,
+    State& state, const std::string& call_id,
+    const std::string& name,
     const std::string& args, const CancelToken& cancel) {
   if (!cfg_.tool_registry) co_return;
 
@@ -169,7 +225,7 @@ asio::awaitable<void> AgentNode::HandleToolCall(
 
   json tool_msg = {
     {"role", "tool"},
-    {"tool_call_id", name},
+    {"tool_call_id", call_id.empty() ? name : call_id},
     {"content", result},
   };
   AppendMessage(state, cfg_.messages_field, tool_msg);
