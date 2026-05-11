@@ -1,0 +1,15 @@
+# agentflow/nodes/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "nodes",
+    srcs = ["agent_node.cc"],
+    hdrs = ["agent_node.h"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference",
+        "//agentflow/tools",
+        "@asio",
+        "@nlohmann_json//:json",
+    ],
+)
