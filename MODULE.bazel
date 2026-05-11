@@ -30,5 +30,7 @@ cc_library(
     urls = ["https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-30-2.tar.gz"],
 )
 
-# ── LiteRT-LM (local prebuilt — updated in Task 3) ────────────────
-# Placeholder: populated after Task 3 builds the LiteRT-LM library.
+# ── LiteRT-LM (header-only stub) ──────────────────────────────────
+# Referenced as //third_party/litert_lm:c_engine (main workspace target).
+# Upgrade to @litert_lm//:c_engine with local_path_override in MODULE.bazel
+# when a prebuilt libc_engine.a is available.

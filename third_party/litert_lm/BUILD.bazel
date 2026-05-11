@@ -1,0 +1,13 @@
+# third_party/litert_lm/BUILD.bazel
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "c_engine",
+    hdrs = ["include/c/engine.h"],
+    includes = ["include"],
+    # Header-only stub (Task 3 fallback). Upgrade to link against prebuilt
+    # libc_engine.a when a CMake build is available on the target machine:
+    #   srcs = ["libc_engine.a"],
+    #   linkopts = ["-lpthread", "-ldl"],
+    #   deps = ["@nlohmann_json//:json", ...],
+)

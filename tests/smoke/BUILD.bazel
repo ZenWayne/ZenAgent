@@ -1,0 +1,10 @@
+# tests/smoke/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "litert_lm_header_test",
+    size = "small",
+    srcs = ["litert_lm_header_test.cc"],
+    deps = ["//third_party/litert_lm:c_engine"],
+    tags = ["manual"],  # requires LiteRT-LM runtime to actually link
+)
