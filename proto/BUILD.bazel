@@ -1,0 +1,32 @@
+# proto/BUILD.bazel
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@rules_cc//cc:defs.bzl", "cc_proto_library")
+
+proto_library(
+    name = "errors_proto",
+    srcs = ["errors.proto"],
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "trace_event_proto",
+    srcs = ["trace_event.proto"],
+    deps = [":errors_proto"],
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "test_messages_proto",
+    srcs = ["test_messages.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "agentflow_proto",
+    deps = [
+        ":errors_proto",
+        ":test_messages_proto",
+        ":trace_event_proto",
+    ],
+    visibility = ["//visibility:public"],
+)
