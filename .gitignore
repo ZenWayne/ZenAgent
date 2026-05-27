@@ -3,3 +3,6 @@ build/
 compile_commands.json
 *.swp
 .DS_Store
+
+# Bazel convenience symlinks
+/bazel-*
