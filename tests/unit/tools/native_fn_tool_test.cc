@@ -1,6 +1,9 @@
 // tests/unit/tools/native_fn_tool_test.cc
 #include "agentflow/tools/native_fn_tool.h"
 
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
 #include <gtest/gtest.h>
 
 namespace agentflow {

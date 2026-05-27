@@ -1,8 +1,14 @@
 // tests/unit/tools/tool_registry_test.cc
 #include "agentflow/tools/tool_registry.h"
-#include "agentflow/tools/native_fn_tool.h"
 
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
 #include <gtest/gtest.h>
+
+#include "agentflow/core/errors.h"
+#include "agentflow/tools/native_fn_tool.h"
+#include <nlohmann/json.hpp>
 
 namespace agentflow {
 namespace {
@@ -35,14 +41,17 @@ TEST(ToolRegistryTest, InvokeUnknownThrows) {
   auto reg = std::make_shared<ToolRegistry>();
   asio::io_context io;
   auto fut = asio::co_spawn(io,
-      [reg]() -> asio::awaitable<void> {
-        EXPECT_THROW(
-            co_await reg->Invoke("nobody", "{}", CancelToken{}),
-            AgentflowError);
+      [reg]() -> asio::awaitable<bool> {
+        try {
+          (void)co_await reg->Invoke("nobody", "{}", CancelToken{});
+          co_return false;
+        } catch (const AgentflowError&) {
+          co_return true;
+        }
       },
       asio::use_future);
   io.run();
-  fut.get();
+  EXPECT_TRUE(fut.get());
 }
 
 TEST(ToolRegistryTest, ExportJson) {
