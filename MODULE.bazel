@@ -1,11 +1,13 @@
 module(name = "agentflow", version = "0.1.0")
 
 # ── Dependencies (Bazel Central Registry) ──────────────────────────
-bazel_dep(name = "rules_cc", version = "0.0.9")
+# Versions bumped from plan defaults to match what BCR currently serves
+# (BCR pruned the original pins). Major lines preserved where possible.
+bazel_dep(name = "rules_cc", version = "0.2.13")
 bazel_dep(name = "rules_proto", version = "6.0.0")
-bazel_dep(name = "protobuf", version = "25.3")
-bazel_dep(name = "googletest", version = "1.14.0")
-bazel_dep(name = "abseil-cpp", version = "20240722.0")
+bazel_dep(name = "protobuf", version = "30.1", repo_name = "com_google_protobuf")
+bazel_dep(name = "googletest", version = "1.15.2")
+bazel_dep(name = "abseil-cpp", version = "20250512.0")
 bazel_dep(name = "nlohmann_json", version = "3.11.3")
 bazel_dep(name = "platforms", version = "0.0.10")
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
@@ -17,7 +19,10 @@ http_archive(
     build_file_content = """
 cc_library(
     name = "asio",
-    hdrs = glob(["asio/include/**/*.hpp"]),
+    hdrs = glob([
+        "asio/include/**/*.hpp",
+        "asio/include/**/*.ipp",
+    ]),
     includes = ["asio/include"],
     defines = [
         "ASIO_STANDALONE",

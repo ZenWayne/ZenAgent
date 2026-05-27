@@ -1,10 +1,11 @@
 # proto/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_proto_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
-load("@rules_cc//cc:defs.bzl", "cc_proto_library")
 
 proto_library(
     name = "errors_proto",
     srcs = ["errors.proto"],
+    strip_import_prefix = "/proto",
     visibility = ["//visibility:public"],
 )
 
@@ -12,21 +13,38 @@ proto_library(
     name = "trace_event_proto",
     srcs = ["trace_event.proto"],
     deps = [":errors_proto"],
+    strip_import_prefix = "/proto",
     visibility = ["//visibility:public"],
 )
 
 proto_library(
     name = "test_messages_proto",
     srcs = ["test_messages.proto"],
+    strip_import_prefix = "/proto",
     visibility = ["//visibility:public"],
 )
 
 cc_proto_library(
+    name = "errors_cc_proto",
+    deps = [":errors_proto"],
+)
+
+cc_proto_library(
+    name = "trace_event_cc_proto",
+    deps = [":trace_event_proto"],
+)
+
+cc_proto_library(
+    name = "test_messages_cc_proto",
+    deps = [":test_messages_proto"],
+)
+
+cc_library(
     name = "agentflow_proto",
     deps = [
-        ":errors_proto",
-        ":test_messages_proto",
-        ":trace_event_proto",
+        ":errors_cc_proto",
+        ":test_messages_cc_proto",
+        ":trace_event_cc_proto",
     ],
     visibility = ["//visibility:public"],
 )
