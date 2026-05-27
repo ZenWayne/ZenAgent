@@ -41,8 +41,8 @@ class State {
     const auto* typed = dynamic_cast<const ProtoT*>(msg_.get());
     if (!typed) {
       throw AgentflowError(
-          std::string("State::As<>: type mismatch (have ") +
-          (msg_ ? msg_->GetTypeName() : "null") + ")");
+          "State::As<>: type mismatch (have " +
+          std::string(msg_ ? std::string(msg_->GetTypeName()) : "null") + ")");
     }
     return *typed;
   }
@@ -52,8 +52,8 @@ class State {
     auto* typed = dynamic_cast<ProtoT*>(msg_.get());
     if (!typed) {
       throw AgentflowError(
-          std::string("State::Mutable<>: type mismatch (have ") +
-          (msg_ ? msg_->GetTypeName() : "null") + ")");
+          "State::Mutable<>: type mismatch (have " +
+          std::string(msg_ ? std::string(msg_->GetTypeName()) : "null") + ")");
     }
     return *typed;
   }
