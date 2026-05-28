@@ -1,0 +1,21 @@
+# agentflow/tools/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "tools",
+    srcs = [
+        "native_fn_tool.cc",
+        "tool_registry.cc",
+    ],
+    hdrs = [
+        "native_fn_tool.h",
+        "tool.h",
+        "tool_registry.h",
+    ],
+    deps = [
+        "//agentflow/core",
+        "@nlohmann_json//:json",
+    ],
+)

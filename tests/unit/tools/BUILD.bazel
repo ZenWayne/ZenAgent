@@ -1,0 +1,24 @@
+# tests/unit/tools/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "native_fn_tool_test",
+    size = "small",
+    srcs = ["native_fn_tool_test.cc"],
+    deps = [
+        "//agentflow/tools",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "tool_registry_test",
+    size = "small",
+    srcs = ["tool_registry_test.cc"],
+    deps = [
+        "//agentflow/tools",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

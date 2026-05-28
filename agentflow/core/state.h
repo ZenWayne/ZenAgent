@@ -41,8 +41,8 @@ class State {
     const auto* typed = dynamic_cast<const ProtoT*>(msg_.get());
     if (!typed) {
       throw AgentflowError(
-          std::string("State::As<>: type mismatch (have ") +
-          (msg_ ? msg_->GetTypeName() : "null") + ")");
+          "State::As<>: type mismatch (have " +
+          std::string(msg_ ? std::string(msg_->GetTypeName()) : "null") + ")");
     }
     return *typed;
   }
@@ -52,8 +52,8 @@ class State {
     auto* typed = dynamic_cast<ProtoT*>(msg_.get());
     if (!typed) {
       throw AgentflowError(
-          std::string("State::Mutable<>: type mismatch (have ") +
-          (msg_ ? msg_->GetTypeName() : "null") + ")");
+          "State::Mutable<>: type mismatch (have " +
+          std::string(msg_ ? std::string(msg_->GetTypeName()) : "null") + ")");
     }
     return *typed;
   }
@@ -67,6 +67,13 @@ class State {
   // Distinct from the static factory State::Empty<T>(), which constructs a
   // State that holds a default-constructed T (and therefore IsEmpty() == false).
   [[nodiscard]] bool IsEmpty() const noexcept { return msg_ == nullptr; }
+
+  // Raw pointer to the underlying protobuf message (for reflection-based access).
+  // Returns nullptr if the State is empty. Use only when the concrete type is
+  // unknown at compile time (e.g., AgentNode's field-name-based access).
+  [[nodiscard]] const google::protobuf::Message* UnsafeMessage() const {
+    return msg_.get();
+  }
 
  private:
   std::unique_ptr<google::protobuf::Message> msg_;

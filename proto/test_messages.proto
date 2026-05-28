@@ -13,9 +13,18 @@ message AssistantReply {
   repeated string tools_used = 2;
 }
 
+message Message {
+  string role = 1;
+  string content = 2;
+  string tool_call_id = 3;
+}
+
 message TestState {
   UserQuery query = 1;
   AssistantReply reply = 2;
   int32 counter = 3;          // incremented by stub nodes
   string last_node = 4;       // last node that ran
+  string user_query = 5;        // agent input field
+  string assistant_reply = 6;    // agent output field
+  repeated Message messages = 7; // agent conversation history
 }

@@ -1,0 +1,72 @@
+# tests/unit/core/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+# Tests that don't depend on test_messages.pb.h
+cc_test(
+    name = "errors_test",
+    size = "small",
+    srcs = ["errors_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "cancel_test",
+    size = "small",
+    srcs = ["cancel_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "event_test",
+    size = "small",
+    srcs = ["event_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "graph_compile_test",
+    size = "small",
+    srcs = ["graph_compile_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Tests that depend on test_messages.pb.h (generated C++ from //proto:agentflow_proto)
+cc_test(
+    name = "state_test",
+    size = "small",
+    srcs = ["state_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//proto:agentflow_proto",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "runner_test",
+    size = "small",
+    srcs = ["runner_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//proto:agentflow_proto",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
