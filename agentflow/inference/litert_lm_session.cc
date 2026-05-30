@@ -5,6 +5,7 @@
 #include <system_error>
 
 #include <asio/as_tuple.hpp>
+#include <asio/post.hpp>
 #include <asio/use_awaitable.hpp>
 
 namespace agentflow {
@@ -62,21 +63,24 @@ void LiteRtLmSession::StreamCallback(void* data, const char* chunk,
   auto* self = static_cast<LiteRtLmSession*>(data);
   if (self->aborted_) return;
 
+  // LiteRT-LM invokes this from a background worker thread. asio channels are
+  // not thread-safe, so marshal the touch onto the io_context. The C-string
+  // args are only valid for this call, so copy before posting.
   if (error_msg) {
-    self->channel_.try_send(
-        make_error_code(std::errc::io_error),
-        std::string(error_msg));
-    self->channel_.close();
+    asio::post(self->io_, [self, msg = std::string(error_msg)]() mutable {
+      self->channel_.try_send(make_error_code(std::errc::io_error),
+                              std::move(msg));
+      self->channel_.close();
+    });
     return;
   }
 
-  self->channel_.try_send(
-      asio::error_code{},
-      chunk ? std::string(chunk) : std::string{});
-
-  if (is_final) {
-    self->channel_.close();
-  }
+  asio::post(self->io_,
+             [self, tok = chunk ? std::string(chunk) : std::string{},
+              is_final]() mutable {
+               self->channel_.try_send(asio::error_code{}, std::move(tok));
+               if (is_final) self->channel_.close();
+             });
 }
 
 }  // namespace agentflow

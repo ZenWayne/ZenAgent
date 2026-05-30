@@ -1,13 +1,84 @@
 # third_party/litert_lm/BUILD.bazel
 package(default_visibility = ["//visibility:public"])
 
+# kissfft is the only non-system shared dependency of the C engine.
+cc_import(
+    name = "kissfft",
+    shared_library = "lib/libkissfft-float.so.131",
+)
+
+# Prebuilt LiteRT-LM C engine, split into two archives that mirror how
+# litert_lm_main links (built out-of-tree via CMake, see /.litert_build; .a's
+# gitignored, machine-built). abseil objects are excluded from both — the
+# binary's abseil comes from Bazel (@abseil-cpp pinned to 20260107 to match the
+# lts_2026010712 inline namespace LiteRT-LM was compiled against).
+#
+# Staging = the litert_lm component libs, whole-archived (alwayslink) so static
+# registrars survive (LITERT_LM_REGISTER_ENGINE etc.).
+cc_import(
+    name = "c_engine_staging",
+    static_library = "lib/libce_staging.a",
+    alwayslink = True,
+)
+
+# Externals (litert/tflite/protobuf/...) linked NORMALLY (no alwayslink).
+# Whole-archiving these force-includes a bogus weak `R kLiteRtRuntimeBuiltin`
+# (nullptr) from liblitert_cc_internal_extra that, under
+# --allow-multiple-definition, would win over the real `D` def and crash
+# litert::Environment::Create. On-demand linking pulls the real def first.
+cc_import(
+    name = "c_engine_external",
+    static_library = "lib/libce_external.a",
+)
+
 cc_library(
     name = "c_engine",
     hdrs = ["include/c/engine.h"],
     includes = ["include"],
-    # Header-only stub (Task 3 fallback). Upgrade to link against prebuilt
-    # libc_engine.a when a CMake build is available on the target machine:
-    #   srcs = ["libc_engine.a"],
-    #   linkopts = ["-lpthread", "-ldl"],
-    #   deps = ["@nlohmann_json//:json", ...],
+    linkopts = [
+        # The combined archive bundles LiteRT-LM's own abseil/protobuf, which
+        # collide with Bazel's copies (via //proto, @com_google_protobuf).
+        # Upstream litert_lm_main links with this same flag; first def wins.
+        "-Wl,--allow-multiple-definition",
+        "-ldl",
+        "-lm",
+        "-lpthread",
+        "-lrt",
+        "-lz",
+    ],
+    deps = [
+        ":c_engine_staging",
+        ":c_engine_external",
+        ":kissfft",
+        # abseil providing the symbols excluded from the archive above.
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        # NOT absl/log:flags — it registers an abseil "minloglevel" flag that
+        # collides with sentencepiece's gflags-style FLAGS_minloglevel (ODR).
+        # litert_lm_main works precisely because it doesn't link log:flags.
+        "@abseil-cpp//absl/log:globals",
+        "@abseil-cpp//absl/log:initialize",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:cord",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/hash",
+        "@abseil-cpp//absl/random",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/container:node_hash_map",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/base:log_severity",
+        "@abseil-cpp//absl/debugging:symbolize",
+        "@abseil-cpp//absl/debugging:failure_signal_handler",
+        "@abseil-cpp//absl/debugging:stacktrace",
+        "@abseil-cpp//absl/types:span",
+        "@abseil-cpp//absl/types:optional",
+    ],
 )
