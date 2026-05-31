@@ -6,16 +6,22 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "tools",
     srcs = [
+        "mcp_client.cc",
         "native_fn_tool.cc",
         "tool_registry.cc",
     ],
     hdrs = [
+        "mcp_client.h",
         "native_fn_tool.h",
         "tool.h",
         "tool_registry.h",
     ],
     deps = [
         "//agentflow/core",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
         "@nlohmann_json//:json",
     ],
 )
