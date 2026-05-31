@@ -24,6 +24,13 @@ proto_library(
     visibility = ["//visibility:public"],
 )
 
+proto_library(
+    name = "mcp_spec_proto",
+    srcs = ["mcp_spec.proto"],
+    strip_import_prefix = "/proto",
+    visibility = ["//visibility:public"],
+)
+
 cc_proto_library(
     name = "errors_cc_proto",
     deps = [":errors_proto"],
@@ -39,10 +46,16 @@ cc_proto_library(
     deps = [":test_messages_proto"],
 )
 
+cc_proto_library(
+    name = "mcp_spec_cc_proto",
+    deps = [":mcp_spec_proto"],
+)
+
 cc_library(
     name = "agentflow_proto",
     deps = [
         ":errors_cc_proto",
+        ":mcp_spec_cc_proto",
         ":test_messages_cc_proto",
         ":trace_event_cc_proto",
     ],

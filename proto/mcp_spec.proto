@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package agentflow.proto;
+
+// Describes how to reach (and how to talk to) one MCP server. Used by
+// ToolRegistry::AttachMcpServer and persisted in graph specs (P6 JNI).
+message McpServerSpec {
+  enum Transport {
+    TRANSPORT_UNSPECIFIED = 0;
+    STDIO = 1;       // command_or_url = executable path; args = argv[1..]
+    HTTP_SSE = 2;    // command_or_url = http(s) URL
+    WEBSOCKET = 3;   // command_or_url = ws(s) URL
+    TCP = 4;         // command_or_url = "host:port"
+  }
+  Transport transport = 1;
+  string command_or_url = 2;
+  repeated string args = 3;           // stdio only
+
+  // Filter: only register these tool names (empty = register all).
+  repeated string include_tools = 4;
+  // Filter: skip these tool names (applied after include_tools).
+  repeated string exclude_tools = 5;
+
+  // Per-call deadline (default = no deadline). 0 = use registry default.
+  int32 call_timeout_ms = 6;
+
+  // If true, defer the actual transport handshake until the first
+  // ToolRegistry::Invoke() of one of this server's tools.
+  bool lazy_start = 7;
+}
