@@ -5,7 +5,18 @@
 
 namespace agentflow::mcp {
 
-McpClientPool::McpClientPool(asio::io_context& io) : io_(io) {}
+namespace {
+std::shared_ptr<IMcpClient> DefaultFactory(const proto::McpServerSpec& spec,
+                                           asio::io_context& io) {
+  return McpClient::Create(spec, io);
+}
+}  // namespace
+
+McpClientPool::McpClientPool(asio::io_context& io)
+    : io_(io), factory_(&DefaultFactory) {}
+
+McpClientPool::McpClientPool(asio::io_context& io, ClientFactory factory)
+    : io_(io), factory_(std::move(factory)) {}
 
 McpClientPool::~McpClientPool() { Clear(); }
 
@@ -25,20 +36,20 @@ std::string McpClientPool::CanonicalKey(const proto::McpServerSpec& spec) {
   return key;
 }
 
-std::shared_ptr<McpClient> McpClientPool::GetOrCreate(
+std::shared_ptr<IMcpClient> McpClientPool::GetOrCreate(
     const proto::McpServerSpec& spec) {
   const std::string key = CanonicalKey(spec);
   std::lock_guard<std::mutex> lk(mu_);
   if (auto it = clients_.find(key); it != clients_.end()) {
     return it->second;
   }
-  auto client = McpClient::Create(spec, io_);
+  auto client = factory_(spec, io_);
   clients_.emplace(key, client);
   return client;
 }
 
 void McpClientPool::Clear() {
-  std::unordered_map<std::string, std::shared_ptr<McpClient>> taken;
+  std::unordered_map<std::string, std::shared_ptr<IMcpClient>> taken;
   {
     std::lock_guard<std::mutex> lk(mu_);
     taken.swap(clients_);
