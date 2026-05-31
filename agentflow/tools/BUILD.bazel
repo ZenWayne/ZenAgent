@@ -8,12 +8,14 @@ cc_library(
     srcs = [
         "mcp_client.cc",
         "mcp_client_pool.cc",
+        "mcp_tool_adapter.cc",
         "native_fn_tool.cc",
         "tool_registry.cc",
     ],
     hdrs = [
         "mcp_client.h",
         "mcp_client_pool.h",
+        "mcp_tool_adapter.h",
         "native_fn_tool.h",
         "tool.h",
         "tool_registry.h",
