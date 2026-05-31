@@ -276,7 +276,7 @@ class McpClient::Impl
     json msg = {
         {"jsonrpc", kJsonRpc},
         {"id", id},
-        {"method", std::move(method)},
+        {"method", method},
         {"params", std::move(params)},
     };
     WriteLine(msg.dump());
@@ -349,6 +349,7 @@ class McpClient::Impl
       auto [ec, n] = co_await asio::async_read_until(
           *child_out_, read_buf_, '\n',
           asio::as_tuple(asio::use_awaitable));
+      (void)n;
       if (ec) {
         FailPending(ec);
         state_ = State::kBroken;
@@ -436,11 +437,14 @@ class McpClient::Impl
 
 std::shared_ptr<McpClient> McpClient::Create(proto::McpServerSpec spec,
                                              asio::io_context& io) {
-  auto impl = std::make_unique<Impl>(std::move(spec), io);
+  // Impl must be shared so enable_shared_from_this works (Connect() spawns
+  // a detached ReadLoop coroutine and SendRequest registers an OnCancel
+  // callback, both of which capture shared_from_this()).
+  auto impl = std::make_shared<Impl>(std::move(spec), io);
   return std::shared_ptr<McpClient>(new McpClient(std::move(impl)));
 }
 
-McpClient::McpClient(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+McpClient::McpClient(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
 McpClient::~McpClient() = default;
 
 asio::awaitable<absl::Status> McpClient::Connect() {

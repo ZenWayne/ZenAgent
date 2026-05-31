@@ -70,6 +70,14 @@ class ToolRegistry {
   // or earlier MCP) is SKIPPED with a warning — the local/earlier tool wins.
   asio::awaitable<absl::Status> AttachMcpServer(proto::McpServerSpec spec);
 
+  // Shuts down every MCP client this registry's pool has created. The MCP
+  // adapters registered as tools stay in place but will return
+  // FailedPrecondition on subsequent Invoke. Idempotent. Necessary for the
+  // io_context-running thread to exit cleanly when all useful work is done:
+  // each McpClient owns a detached ReadLoop coroutine that holds the io_context
+  // alive until the transport is closed.
+  void ShutdownMcp();
+
   asio::awaitable<std::string> Invoke(
       std::string_view name,
       std::string_view args_json,

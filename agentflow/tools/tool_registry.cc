@@ -46,6 +46,10 @@ ToolRegistry::ToolRegistry(
 
 ToolRegistry::~ToolRegistry() = default;
 
+void ToolRegistry::ShutdownMcp() {
+  if (pool_) pool_->Clear();
+}
+
 void ToolRegistry::Register(std::shared_ptr<Tool> tool) {
   std::lock_guard<std::mutex> lk(mu_);
   tools_[tool->Schema().name] = std::move(tool);
