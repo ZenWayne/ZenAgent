@@ -35,6 +35,15 @@ ToolRegistry::ToolRegistry() = default;
 ToolRegistry::ToolRegistry(asio::io_context& io)
     : io_(&io), pool_(std::make_unique<mcp::McpClientPool>(io)) {}
 
+ToolRegistry::ToolRegistry(
+    asio::io_context& io,
+    std::function<std::shared_ptr<mcp::IMcpClient>(
+        const proto::McpServerSpec&, asio::io_context&)>
+        client_factory)
+    : io_(&io),
+      pool_(std::make_unique<mcp::McpClientPool>(io,
+                                                 std::move(client_factory))) {}
+
 ToolRegistry::~ToolRegistry() = default;
 
 void ToolRegistry::Register(std::shared_ptr<Tool> tool) {

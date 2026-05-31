@@ -2,6 +2,7 @@
 #ifndef AGENTFLOW_TOOLS_TOOL_REGISTRY_H_
 #define AGENTFLOW_TOOLS_TOOL_REGISTRY_H_
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -22,6 +23,7 @@
 namespace agentflow {
 
 namespace mcp {
+class IMcpClient;
 class McpClientPool;
 }  // namespace mcp
 
@@ -34,6 +36,13 @@ class ToolRegistry {
   // MCP-aware ctor. The io_context must outlive the registry; the McpClientPool
   // and any McpClient it creates pin themselves to this context.
   explicit ToolRegistry(asio::io_context& io);
+
+  // MCP-aware ctor with an injected client factory (used by tests to plug in
+  // a FakeMcpClient without subprocessing).
+  ToolRegistry(asio::io_context& io,
+               std::function<std::shared_ptr<mcp::IMcpClient>(
+                   const proto::McpServerSpec&, asio::io_context&)>
+                   client_factory);
 
   ~ToolRegistry();
 
