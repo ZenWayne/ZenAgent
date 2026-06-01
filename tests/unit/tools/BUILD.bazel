@@ -22,3 +22,58 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "mcp_tool_adapter_test",
+    size = "small",
+    srcs = [
+        "fake_mcp_server.h",
+        "mcp_tool_adapter_test.cc",
+    ],
+    deps = [
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "mcp_client_pool_test",
+    size = "small",
+    srcs = [
+        "fake_mcp_server.h",
+        "mcp_client_pool_test.cc",
+    ],
+    deps = [
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "tool_registry_mcp_test",
+    size = "small",
+    srcs = [
+        "fake_mcp_server.h",
+        "tool_registry_mcp_test.cc",
+    ],
+    deps = [
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
