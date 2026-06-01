@@ -1,0 +1,13 @@
+# examples/team-demo/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "team_demo",
+    srcs = ["main.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/nodes",
+        "//proto:agentflow_proto",
+        "@asio",
+    ],
+)
