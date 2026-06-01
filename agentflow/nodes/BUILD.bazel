@@ -5,8 +5,14 @@ package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "nodes",
-    srcs = ["agent_node.cc"],
-    hdrs = ["agent_node.h"],
+    srcs = [
+        "agent_node.cc",
+        "llm_node.cc",
+    ],
+    hdrs = [
+        "agent_node.h",
+        "llm_node.h",
+    ],
     deps = [
         "//agentflow/core",
         "//agentflow/inference",
