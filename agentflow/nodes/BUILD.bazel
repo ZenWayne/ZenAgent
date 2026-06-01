@@ -8,10 +8,12 @@ cc_library(
     srcs = [
         "agent_node.cc",
         "llm_node.cc",
+        "team_node.cc",
     ],
     hdrs = [
         "agent_node.h",
         "llm_node.h",
+        "team_node.h",
     ],
     deps = [
         "//agentflow/core",
