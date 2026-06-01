@@ -1,8 +1,17 @@
 // agentflow/nodes/team_node.cc
 #include "agentflow/nodes/team_node.h"
 
+#include <memory>
 #include <string>
 #include <utility>
+#include <vector>
+
+#include <asio/as_tuple.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/experimental/channel.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include "agentflow/core/errors.h"
 
@@ -61,10 +70,60 @@ asio::awaitable<State> TeamNode::RunStateRouter(State state,
   co_return std::move(state);  // max_turns reached — return whatever we have
 }
 
-asio::awaitable<State> TeamNode::RunParallelGather(
-    State /*state*/, const CancelToken& /*cancel*/, EventEmitter& /*emit*/) {
-  throw AgentflowError("TeamNode ParallelGather: not implemented (T3)");
-  co_return State{};  // unreachable; satisfies coroutine return contract
+asio::awaitable<State> TeamNode::RunParallelGather(State state,
+                                                    const CancelToken& cancel,
+                                                    EventEmitter& emit) {
+  emit.EmitNodeStart(Id());
+
+  using ResultChannel =
+      asio::experimental::channel<void(asio::error_code, State)>;
+  auto exec = co_await asio::this_coro::executor;
+
+  // Spawn one branch per member. Each branch:
+  //   (a) clones the entry state so concurrent Run()s don't race on a shared
+  //       protobuf;
+  //   (b) catches member exceptions so one bad member doesn't break gather —
+  //       the channel is closed in that case and the result is skipped.
+  std::vector<std::shared_ptr<ResultChannel>> channels;
+  channels.reserve(cfg_.members.size());
+  for (auto& member_up : cfg_.members) {
+    auto ch = std::make_shared<ResultChannel>(exec, 1);
+    channels.push_back(ch);
+    Node* member = member_up.get();
+    State input = state.Clone();
+    asio::co_spawn(
+        exec,
+        [member, input = std::move(input), &cancel, &emit,
+         ch]() mutable -> asio::awaitable<void> {
+          try {
+            State out =
+                co_await member->Run(std::move(input), cancel, emit);
+            asio::error_code ec;
+            ch->try_send(ec, std::move(out));
+          } catch (...) {
+            ch->close();
+          }
+        },
+        asio::detached);
+  }
+
+  std::vector<State> outs;
+  outs.reserve(channels.size());
+  for (auto& ch : channels) {
+    auto [ec, s] =
+        co_await ch->async_receive(asio::as_tuple(asio::use_awaitable));
+    if (!ec) outs.push_back(std::move(s));
+    // ec set (channel closed) ⇒ member threw; drop silently.
+  }
+
+  emit.EmitNodeEnd(Id(), cancel.IsCancelled(), /*failed=*/false);
+
+  if (cfg_.aggregator) {
+    co_return cfg_.aggregator(std::move(outs));
+  }
+  // Default = last-writer-wins (matches Runner's P1 fan-in default).
+  if (outs.empty()) co_return std::move(state);
+  co_return std::move(outs.back());
 }
 
 asio::awaitable<State> TeamNode::RunLlmSelect(
