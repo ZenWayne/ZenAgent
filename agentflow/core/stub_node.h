@@ -36,23 +36,19 @@ class StubNode : public Node {
   std::string_view Kind() const override { return "stub"; }
 
   asio::awaitable<State> Run(State state, const CancelToken& cancel,
-                              EventEmitter& emit) override {
-    emit.EmitNodeStart(id_);
+                              EventEmitter& /*emit*/) override {
+    // NODE_START/NODE_END are emitted by Runner; StubNode only does work.
     if (delay_.count() > 0) {
       auto exec = co_await asio::this_coro::executor;
       auto end = std::chrono::steady_clock::now() + delay_;
       while (std::chrono::steady_clock::now() < end) {
-        if (cancel.IsCancelled()) {
-          emit.EmitNodeEnd(id_, /*cancelled=*/true, /*failed=*/false);
-          co_return std::move(state);
-        }
+        if (cancel.IsCancelled()) co_return std::move(state);
         asio::steady_timer step(exec, std::chrono::milliseconds(10));
         co_await step.async_wait(asio::use_awaitable);
       }
     }
     if (body_) body_(state);
     if (counter_) order_ = counter_->fetch_add(1);
-    emit.EmitNodeEnd(id_, /*cancelled=*/false, /*failed=*/false);
     co_return std::move(state);
   }
 

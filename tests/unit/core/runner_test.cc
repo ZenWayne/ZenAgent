@@ -1,6 +1,7 @@
 // tests/unit/core/runner_test.cc
 #include "agentflow/core/runner.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -13,6 +14,7 @@
 
 #include "agentflow/core/graph.h"
 #include "agentflow/core/stub_node.h"
+#include "agentflow/observability/callback_event_emitter.h"
 #include "test_messages.pb.h"
 
 namespace agentflow {
@@ -20,14 +22,15 @@ namespace {
 
 using namespace std::chrono_literals;
 
-class CapturingEmitter : public EventEmitter {
- public:
-  void Emit(proto::TraceEvent ev) override {
-    std::lock_guard<std::mutex> l(m_);
-    events.push_back(std::move(ev));
-  }
+// Thin test helper: wraps CallbackEventEmitter so tests can read back
+// captured events without re-implementing an EventEmitter subclass.
+struct EventCapture {
   std::vector<proto::TraceEvent> events;
-  std::mutex m_;
+  std::mutex m;
+  CallbackEventEmitter emitter{[this](const proto::TraceEvent& e) {
+    std::lock_guard<std::mutex> l(m);
+    events.push_back(e);
+  }};
 };
 
 State MakeInitState() {
@@ -77,8 +80,8 @@ TEST(RunnerTest, LinearGraphRunsInOrder) {
    .AddNode(std::make_unique<StubNode>("c", 0ms, nullptr, record_for("c")))
    .AddEdge("a", "b").AddEdge("b", "c");
 
-  CapturingEmitter cap;
-  auto out = RunSync(b.Build(), Runner::Options{.trace = &cap}, MakeInitState());
+  EventCapture cap;
+  auto out = RunSync(b.Build(), Runner::Options{.trace = &cap.emitter}, MakeInitState());
 
   EXPECT_EQ(out.As<test::TestState>().counter(), 3);
   ASSERT_EQ(recorded_orders->size(), 3u);
@@ -201,8 +204,8 @@ TEST(RunnerTest, GraphDoneEmittedOnSuccess) {
   GraphBuilder b;
   b.AddNode(std::make_unique<StubNode>("only", 0ms, nullptr, nullptr));
 
-  CapturingEmitter cap;
-  (void)RunSync(b.Build(), Runner::Options{.trace = &cap}, MakeInitState());
+  EventCapture cap;
+  (void)RunSync(b.Build(), Runner::Options{.trace = &cap.emitter}, MakeInitState());
 
   ASSERT_FALSE(cap.events.empty());
   const auto& last = cap.events.back();
@@ -217,9 +220,9 @@ TEST(RunnerTest, GraphDoneEmittedOnFailure) {
   GraphBuilder b;
   b.AddNode(std::make_unique<StubNode>("a", 0ms, nullptr, throwing));
 
-  CapturingEmitter cap;
+  EventCapture cap;
   EXPECT_THROW(
-      RunSync(b.Build(), Runner::Options{.trace = &cap}, MakeInitState()),
+      RunSync(b.Build(), Runner::Options{.trace = &cap.emitter}, MakeInitState()),
       ToolError);
 
   ASSERT_FALSE(cap.events.empty());
@@ -288,6 +291,80 @@ TEST(RunnerTest, SelfCycleAgentBLoopsThenExits) {
   EXPECT_EQ((*sources)[1], "B");
   EXPECT_EQ((*sources)[2], "B");
   EXPECT_EQ((*sources)[3], "B");
+}
+
+// ── NODE_START / NODE_END emission ─────────────────────────────────────────
+
+TEST(RunnerTest, EmitsNodeStartEndForLinearGraph) {
+  GraphBuilder b;
+  b.AddNode(std::make_unique<StubNode>("a", 0ms, nullptr, nullptr))
+   .AddNode(std::make_unique<StubNode>("b", 0ms, nullptr, nullptr))
+   .AddEdge("a", "b");
+
+  EventCapture cap;
+  (void)RunSync(b.Build(), Runner::Options{.trace = &cap.emitter},
+                MakeInitState());
+
+  std::vector<std::pair<int, std::string>> seq;
+  for (const auto& e : cap.events) {
+    seq.emplace_back(e.kind(), e.node_id());
+  }
+  // Expected: NODE_START a, NODE_END a, EDGE_FIRE (a->b), NODE_START b,
+  // NODE_END b, GRAPH_DONE.
+  ASSERT_EQ(seq.size(), 6u);
+  EXPECT_EQ(seq[0].first, proto::TraceEvent::NODE_START);
+  EXPECT_EQ(seq[0].second, "a");
+  EXPECT_EQ(seq[1].first, proto::TraceEvent::NODE_END);
+  EXPECT_EQ(seq[1].second, "a");
+  EXPECT_FALSE(cap.events[1].node_end().cancelled());
+  EXPECT_FALSE(cap.events[1].node_end().failed());
+  EXPECT_EQ(seq[2].first, proto::TraceEvent::EDGE_FIRE);
+  EXPECT_EQ(seq[3].first, proto::TraceEvent::NODE_START);
+  EXPECT_EQ(seq[3].second, "b");
+  EXPECT_EQ(seq[4].first, proto::TraceEvent::NODE_END);
+  EXPECT_EQ(seq[5].first, proto::TraceEvent::GRAPH_DONE);
+}
+
+TEST(RunnerTest, EmitsNodeEndWithFailedFlag) {
+  auto throwing = [](State&) { throw ToolError("boom"); };
+
+  GraphBuilder b;
+  b.AddNode(std::make_unique<StubNode>("a", 0ms, nullptr, throwing));
+
+  EventCapture cap;
+  EXPECT_THROW(RunSync(b.Build(), Runner::Options{.trace = &cap.emitter},
+                       MakeInitState()),
+               ToolError);
+
+  // Sequence: NODE_START, NODE_FAILED, NODE_END(failed=1), GRAPH_DONE(failed=1).
+  ASSERT_GE(cap.events.size(), 4u);
+  EXPECT_EQ(cap.events[0].kind(), proto::TraceEvent::NODE_START);
+  EXPECT_EQ(cap.events[1].kind(), proto::TraceEvent::NODE_FAILED);
+  ASSERT_EQ(cap.events[2].kind(), proto::TraceEvent::NODE_END);
+  EXPECT_TRUE(cap.events[2].node_end().failed());
+  EXPECT_FALSE(cap.events[2].node_end().cancelled());
+}
+
+TEST(RunnerTest, EmitsNodeEndWithCancelledFlag) {
+  CancelSource src;
+  auto cancel_self = [&src](State&) { src.Cancel(); };
+
+  GraphBuilder b;
+  b.AddNode(std::make_unique<StubNode>("a", 0ms, nullptr, cancel_self));
+
+  EventCapture cap;
+  (void)RunSync(b.Build(), Runner::Options{.trace = &cap.emitter},
+                MakeInitState(), src.Token());
+
+  // NODE_END for "a" carries cancelled=1.
+  auto it = std::find_if(cap.events.begin(), cap.events.end(),
+                         [](const proto::TraceEvent& e) {
+                           return e.kind() == proto::TraceEvent::NODE_END &&
+                                  e.node_id() == "a";
+                         });
+  ASSERT_NE(it, cap.events.end());
+  EXPECT_TRUE(it->node_end().cancelled());
+  EXPECT_FALSE(it->node_end().failed());
 }
 
 }  // namespace
