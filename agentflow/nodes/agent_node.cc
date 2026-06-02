@@ -193,7 +193,7 @@ asio::awaitable<State> AgentNode::Run(
           std::string id = tc.value("id", "");
           std::string name = tc["function"]["name"];
           std::string args = tc["function"]["arguments"];
-          co_await HandleToolCall(state, id, name, args, cancel);
+          co_await HandleToolCall(state, id, name, args, cancel, emit);
         }
         continue;  // Loop back for next LLM call
       }
@@ -217,15 +217,18 @@ asio::awaitable<State> AgentNode::Run(
 asio::awaitable<void> AgentNode::HandleToolCall(
     State& state, const std::string& call_id,
     const std::string& name,
-    const std::string& args, const CancelToken& cancel) {
+    const std::string& args, const CancelToken& cancel,
+    EventEmitter& emit) {
   if (!cfg_.tool_registry) co_return;
 
+  emit.EmitToolCall(Id(), name, args);
   std::string result;
   try {
     result = co_await cfg_.tool_registry->Invoke(name, args, cancel);
   } catch (const std::exception& e) {
     result = std::string("Tool error: ") + e.what();
   }
+  emit.EmitToolReturn(Id(), name, result);
 
   json tool_msg = {
     {"role", "tool"},

@@ -54,7 +54,8 @@ class AgentNode : public Node {
   asio::awaitable<void> HandleToolCall(
       State& state, const std::string& call_id,
       const std::string& name,
-      const std::string& args, const CancelToken& cancel);
+      const std::string& args, const CancelToken& cancel,
+      EventEmitter& emit);
   void WriteOutput(State& state, const std::string& text) const;
 
   AgentNodeConfig cfg_;
