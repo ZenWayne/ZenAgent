@@ -78,9 +78,9 @@ class McpClient : public IMcpClient {
 
  private:
   class Impl;
-  std::unique_ptr<Impl> impl_;
+  std::shared_ptr<Impl> impl_;
 
-  explicit McpClient(std::unique_ptr<Impl> impl);
+  explicit McpClient(std::shared_ptr<Impl> impl);
 };
 
 }  // namespace agentflow::mcp
