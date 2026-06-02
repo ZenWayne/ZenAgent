@@ -6,7 +6,7 @@
 
 #include <gtest/gtest.h>
 
-#include "tests/unit/core/stub_node.h"
+#include "agentflow/core/stub_node.h"
 
 namespace agentflow {
 namespace {

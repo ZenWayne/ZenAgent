@@ -1,0 +1,10 @@
+# .bazelrc
+build --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+build --features=layering_check
+
+# Sanitizers
+build:asan --copt=-fsanitize=address --linkopt=-fsanitize=address
+build:ubsan --copt=-fsanitize=undefined --linkopt=-fsanitize=undefined
+
+# Test output
+test --test_output=errors

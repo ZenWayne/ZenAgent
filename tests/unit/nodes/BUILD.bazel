@@ -1,0 +1,70 @@
+# tests/unit/nodes/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "agent_node_test",
+    size = "large",
+    srcs = ["agent_node_test.cc"],
+    deps = [
+        "//agentflow/nodes",
+        "//proto:agentflow_proto",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+    tags = ["manual"],  # requires MODEL_PATH env
+)
+
+cc_test(
+    name = "llm_node_test",
+    size = "small",
+    srcs = ["llm_node_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/nodes",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "team_node_test",
+    size = "small",
+    srcs = ["team_node_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/nodes",
+        "//proto:agentflow_proto",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "router_node_test",
+    size = "small",
+    srcs = ["router_node_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/nodes",
+        "//proto:agentflow_proto",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "aggregator_node_test",
+    size = "small",
+    srcs = ["aggregator_node_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/nodes",
+        "//proto:agentflow_proto",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

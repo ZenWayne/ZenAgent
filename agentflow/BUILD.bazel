@@ -1,0 +1,2 @@
+# agentflow/BUILD.bazel
+package(default_visibility = ["//visibility:public"])

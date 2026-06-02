@@ -1,0 +1,31 @@
+# agentflow/tools/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "tools",
+    srcs = [
+        "mcp_client.cc",
+        "mcp_client_pool.cc",
+        "mcp_tool_adapter.cc",
+        "native_fn_tool.cc",
+        "tool_registry.cc",
+    ],
+    hdrs = [
+        "mcp_client.h",
+        "mcp_client_pool.h",
+        "mcp_tool_adapter.h",
+        "native_fn_tool.h",
+        "tool.h",
+        "tool_registry.h",
+    ],
+    deps = [
+        "//agentflow/core",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@nlohmann_json//:json",
+    ],
+)

@@ -3,3 +3,15 @@ build/
 compile_commands.json
 *.swp
 .DS_Store
+
+# Bazel convenience symlinks
+/bazel-*
+
+# LiteRT-LM out-of-tree build
+/.litert_build/
+
+# LiteRT-LM prebuilt artifacts (large, machine-built)
+/third_party/litert_lm/lib/
+
+# Local model files (large)
+/models/

@@ -156,6 +156,7 @@ asio::awaitable<State> Runner::Impl::Run(State initial, CancelToken cancel) {
         const std::string_view node_id_view = node_id;
         State out;
         bool failed = false;
+        emit_.EmitNodeStart(node_id_view);
         try {
           out = co_await node->Run(std::move(input), cancel, emit_);
         } catch (...) {
@@ -166,6 +167,8 @@ asio::awaitable<State> Runner::Impl::Run(State initial, CancelToken cancel) {
           emit_.EmitNodeFailed(node_id_view, "Exception", "node threw");
           failed = true;
         }
+        emit_.EmitNodeEnd(node_id_view, /*cancelled=*/cancel.IsCancelled(),
+                          /*failed=*/failed);
 
         // Cancellation skips fan-out: a cancelled node returns normally
         // (per Node contract — exit promptly without throwing) but its output
