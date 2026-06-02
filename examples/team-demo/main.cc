@@ -26,6 +26,7 @@
 #include "agentflow/core/state.h"
 #include "agentflow/core/stub_node.h"
 #include "agentflow/nodes/team_node.h"
+#include "agentflow/observability/jsonl_event_emitter.h"
 #include "test_messages.pb.h"
 
 namespace af = agentflow;
@@ -43,14 +44,6 @@ std::unique_ptr<af::Node> Member(std::string id) {
         m.set_counter(m.counter() + 1);
       });
 }
-
-class StdoutEmitter : public af::EventEmitter {
- public:
-  void Emit(af::proto::TraceEvent ev) override {
-    std::cout << "[trace] kind=" << ev.kind()
-              << " node=" << ev.node_id() << "\n";
-  }
-};
 
 }  // namespace
 
@@ -103,7 +96,7 @@ int main() {
   auto graph = b.Build();
   std::cout << "GRAPH:\n" << graph.ToDotString() << "---\n";
 
-  StdoutEmitter emit;
+  af::JsonlEventEmitter emit(std::cout);
   af::Runner runner(std::move(graph), af::Runner::Options{.trace = &emit});
 
   asio::io_context io;

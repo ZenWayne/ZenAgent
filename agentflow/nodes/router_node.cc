@@ -29,12 +29,10 @@ RouterNode::RouterNode(RouterNodeConfig cfg) : cfg_(std::move(cfg)) {
 }
 
 asio::awaitable<State> RouterNode::Run(State state, const CancelToken& cancel,
-                                        EventEmitter& emit) {
+                                        EventEmitter& /*emit*/) {
   if (cancel.IsCancelled()) co_return std::move(state);
-  emit.EmitNodeStart(Id());
   std::string choice = cfg_.chooser(state);
   WriteStringField(state, cfg_.output_field, choice);
-  emit.EmitNodeEnd(Id(), cancel.IsCancelled(), /*failed=*/false);
   co_return std::move(state);
 }
 

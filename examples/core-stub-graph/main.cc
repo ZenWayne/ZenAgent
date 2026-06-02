@@ -20,6 +20,7 @@
 #include "agentflow/core/graph.h"
 #include "agentflow/core/runner.h"
 #include "agentflow/core/state.h"
+#include "agentflow/observability/jsonl_event_emitter.h"
 #include "test_messages.pb.h"
 
 namespace af = agentflow;
@@ -52,23 +53,6 @@ class DemoNode : public af::Node {
   std::chrono::milliseconds delay_;
 };
 
-class StdoutEmitter : public af::EventEmitter {
- public:
-  void Emit(af::proto::TraceEvent ev) override {
-    std::lock_guard<std::mutex> l(m_);
-    std::cout << "[" << ev.unix_micros() << "] kind=" << ev.kind()
-              << " node=" << ev.node_id();
-    if (ev.has_edge_fire()) {
-      std::cout << " edge=" << ev.edge_fire().from_node()
-                << "->" << ev.edge_fire().to_node()
-                << " (g=" << ev.edge_fire().activation_group() << ")";
-    }
-    std::cout << "\n";
-  }
- private:
-  std::mutex m_;
-};
-
 int main() {
   af::GraphBuilder b;
   b.AddNode(std::make_unique<DemoNode>("start", 5ms))
@@ -88,7 +72,7 @@ int main() {
   init.mutable_query()->set_text("demo");
   init.set_counter(0);
 
-  StdoutEmitter emit;
+  af::JsonlEventEmitter emit(std::cout);
   af::Runner runner(std::move(graph), af::Runner::Options{.trace = &emit});
 
   asio::io_context io;

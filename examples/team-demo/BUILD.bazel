@@ -7,6 +7,7 @@ cc_binary(
     deps = [
         "//agentflow/core",
         "//agentflow/nodes",
+        "//agentflow/observability",
         "//proto:agentflow_proto",
         "@asio",
     ],

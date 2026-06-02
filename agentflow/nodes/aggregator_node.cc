@@ -14,13 +14,11 @@ AggregatorNode::AggregatorNode(AggregatorNodeConfig cfg)
 
 asio::awaitable<State> AggregatorNode::Run(State state,
                                             const CancelToken& cancel,
-                                            EventEmitter& emit) {
+                                            EventEmitter& /*emit*/) {
   if (cancel.IsCancelled()) co_return std::move(state);
-  emit.EmitNodeStart(Id());
   if (cfg_.merger) {
     state = cfg_.merger(std::move(state));
   }
-  emit.EmitNodeEnd(Id(), cancel.IsCancelled(), /*failed=*/false);
   co_return std::move(state);
 }
 

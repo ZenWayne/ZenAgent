@@ -162,7 +162,6 @@ asio::awaitable<State> AgentNode::Run(
     }
     LiteRtLmSession session(raw_session, *cfg_.io_ctx);
 
-    emit.EmitNodeStart(Id());
     std::string conversation_json = BuildConversationJson(state);
 
     session.Start(conversation_json);
@@ -175,8 +174,6 @@ asio::awaitable<State> AgentNode::Run(
         emit.EmitToken(Id(), token);
       }
     }
-
-    emit.EmitNodeEnd(Id(), cancel.IsCancelled(), /*failed=*/false);
 
     // Check for tool call in output
     // LiteRT-LM format: {"tool_calls":[{"id":"...","function":{"name":"...","arguments":"..."}}]}

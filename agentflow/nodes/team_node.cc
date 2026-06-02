@@ -115,9 +115,7 @@ asio::awaitable<State> TeamNode::RunStateRouter(State state,
       throw AgentflowError(
           "TeamNode: router returned unknown member id: " + next);
     }
-    emit.EmitNodeStart(Id());
     state = co_await member->Run(std::move(state), cancel, emit);
-    emit.EmitNodeEnd(Id(), cancel.IsCancelled(), /*failed=*/false);
   }
   co_return std::move(state);  // max_turns reached — return whatever we have
 }
@@ -125,8 +123,6 @@ asio::awaitable<State> TeamNode::RunStateRouter(State state,
 asio::awaitable<State> TeamNode::RunParallelGather(State state,
                                                     const CancelToken& cancel,
                                                     EventEmitter& emit) {
-  emit.EmitNodeStart(Id());
-
   using ResultChannel =
       asio::experimental::channel<void(asio::error_code, State)>;
   auto exec = co_await asio::this_coro::executor;
@@ -167,8 +163,6 @@ asio::awaitable<State> TeamNode::RunParallelGather(State state,
     if (!ec) outs.push_back(std::move(s));
     // ec set (channel closed) ⇒ member threw; drop silently.
   }
-
-  emit.EmitNodeEnd(Id(), cancel.IsCancelled(), /*failed=*/false);
 
   if (cfg_.aggregator) {
     co_return cfg_.aggregator(std::move(outs));
@@ -234,9 +228,7 @@ asio::awaitable<State> TeamNode::RunLlmSelect(State state,
       continue;
     }
 
-    emit.EmitNodeStart(Id());
     state = co_await member->Run(std::move(state), cancel, emit);
-    emit.EmitNodeEnd(Id(), cancel.IsCancelled(), /*failed=*/false);
   }
   co_return std::move(state);  // max_turns reached
 }

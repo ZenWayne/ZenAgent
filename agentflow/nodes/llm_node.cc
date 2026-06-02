@@ -88,7 +88,6 @@ asio::awaitable<State> LlmNode::Run(State state, const CancelToken& cancel,
   }
   LiteRtLmSession session(raw_session, *cfg_.io_ctx);
 
-  emit.EmitNodeStart(Id());
   session.Start(BuildConversationJson(state));
 
   std::string accum;
@@ -99,7 +98,6 @@ asio::awaitable<State> LlmNode::Run(State state, const CancelToken& cancel,
     accum += tok;
     if (cfg_.stream_tokens) emit.EmitToken(Id(), tok);
   }
-  emit.EmitNodeEnd(Id(), cancel.IsCancelled(), /*failed=*/false);
 
   WriteOutput(state, accum);
   co_return std::move(state);
