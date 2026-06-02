@@ -1,0 +1,22 @@
+# agentflow/observability/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "observability",
+    srcs = [
+        "jsonl_event_emitter.cc",
+        "multi_event_emitter.cc",
+    ],
+    hdrs = [
+        "callback_event_emitter.h",
+        "jsonl_event_emitter.h",
+        "multi_event_emitter.h",
+    ],
+    deps = [
+        "//agentflow/core:core",
+        "//proto:agentflow_proto",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
