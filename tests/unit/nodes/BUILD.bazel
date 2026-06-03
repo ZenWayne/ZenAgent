@@ -6,8 +6,12 @@ cc_test(
     size = "large",
     srcs = ["agent_node_test.cc"],
     deps = [
+        "//agentflow/core",
         "//agentflow/nodes",
+        "//agentflow/observability",
+        "//agentflow/tools",
         "//proto:agentflow_proto",
+        "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
