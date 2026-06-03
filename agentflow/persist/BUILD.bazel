@@ -1,0 +1,23 @@
+# agentflow/persist/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "persist",
+    srcs = [
+        "checkpoint_reader.cc",
+        "file_checkpoint_writer.cc",
+    ],
+    hdrs = [
+        "checkpoint_reader.h",
+        "checkpoint_writer.h",
+        "file_checkpoint_writer.h",
+    ],
+    deps = [
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
