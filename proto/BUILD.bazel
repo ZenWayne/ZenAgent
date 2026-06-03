@@ -31,6 +31,13 @@ proto_library(
     visibility = ["//visibility:public"],
 )
 
+proto_library(
+    name = "checkpoint_proto",
+    srcs = ["checkpoint.proto"],
+    strip_import_prefix = "/proto",
+    visibility = ["//visibility:public"],
+)
+
 cc_proto_library(
     name = "errors_cc_proto",
     deps = [":errors_proto"],
@@ -51,9 +58,15 @@ cc_proto_library(
     deps = [":mcp_spec_proto"],
 )
 
+cc_proto_library(
+    name = "checkpoint_cc_proto",
+    deps = [":checkpoint_proto"],
+)
+
 cc_library(
     name = "agentflow_proto",
     deps = [
+        ":checkpoint_cc_proto",
         ":errors_cc_proto",
         ":mcp_spec_cc_proto",
         ":test_messages_cc_proto",
