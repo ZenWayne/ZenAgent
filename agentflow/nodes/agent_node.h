@@ -14,6 +14,7 @@
 #include "agentflow/core/event.h"
 #include "agentflow/core/node.h"
 #include "agentflow/core/state.h"
+#include "agentflow/inference/litert_lm_conversation.h"
 #include "agentflow/inference/litert_lm_engine.h"
 #include "agentflow/tools/tool_registry.h"
 
@@ -31,7 +32,7 @@ struct AgentNodeConfig {
   // Protobuf reflection: field names on the state message.
   std::string input_field;       // read user query from this field
   std::string output_field;      // write assistant reply to this field
-  std::string messages_field;    // if non-empty, append to this repeated Message field
+  std::string messages_field;    // reserved — engine owns history as of P6.
 
   // Tool names to advertise in the LLM request.
   // If empty, all registered tools are exported.
@@ -50,12 +51,12 @@ class AgentNode : public Node {
                               EventEmitter& emit) override;
 
  private:
-  std::string BuildConversationJson(const State& state) const;
-  asio::awaitable<void> HandleToolCall(
-      State& state, const std::string& call_id,
-      const std::string& name,
-      const std::string& args, const CancelToken& cancel,
-      EventEmitter& emit);
+  std::string BuildSystemMessageJson() const;
+  std::string BuildToolsJson() const;
+  std::string BuildUserMessageJson(const State& state) const;
+  asio::awaitable<std::string> DispatchTool(
+      const std::string& name, const std::string& args,
+      const CancelToken& cancel, EventEmitter& emit);
   void WriteOutput(State& state, const std::string& text) const;
 
   AgentNodeConfig cfg_;

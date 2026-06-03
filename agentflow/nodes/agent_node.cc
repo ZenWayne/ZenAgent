@@ -4,8 +4,6 @@
 #include <nlohmann/json.hpp>
 
 #include "agentflow/core/errors.h"
-#include "agentflow/inference/litert_lm_session.h"
-#include "c/engine.h"
 
 namespace agentflow {
 
@@ -37,65 +35,20 @@ void WriteField(State& state, const std::string& field_name,
   }
 }
 
-void AppendMessage(State& state, const std::string& field_name,
-                   const json& message_obj) {
-  auto* msg = const_cast<google::protobuf::Message*>(state.UnsafeMessage());
-  if (!msg) return;
-  const auto* refl = msg->GetReflection();
-  const auto* desc = msg->GetDescriptor()->FindFieldByName(field_name);
-  if (!desc || !desc->is_repeated()) return;
-  if (desc->type() != google::protobuf::FieldDescriptor::TYPE_MESSAGE) return;
-
-  const auto* entry_desc = desc->message_type();
-  auto* entry = refl->AddMessage(msg, desc);
-  auto* role_f = entry_desc->FindFieldByName("role");
-  auto* content_f = entry_desc->FindFieldByName("content");
-  if (role_f && content_f) {
-    refl->SetString(entry, role_f, message_obj["role"].get<std::string>());
-    refl->SetString(entry, content_f, message_obj["content"].get<std::string>());
-    if (message_obj.contains("tool_call_id")) {
-      auto* tcid_f = entry_desc->FindFieldByName("tool_call_id");
-      if (tcid_f)
-        refl->SetString(entry, tcid_f, message_obj["tool_call_id"].get<std::string>());
+// Pulls the assistant's text content out of the LiteRT-LM response shape:
+//   {"role":"assistant","content":[{"type":"text","text":"..."}, ...]}
+std::string ExtractAssistantText(const json& resp) {
+  if (!resp.contains("content")) return {};
+  const auto& content = resp["content"];
+  if (!content.is_array()) return {};
+  std::string out;
+  for (const auto& item : content) {
+    if (item.value("type", "") == "text" && item.contains("text") &&
+        item["text"].is_string()) {
+      out.append(item["text"].get<std::string>());
     }
   }
-}
-
-// Collect existing messages from the state's repeated message field into a JSON
-// array. Each message is expected to have "role" and "content" string fields.
-json ReadMessages(const State& state, const std::string& field_name) {
-  json arr = json::array();
-  const auto* msg = state.UnsafeMessage();
-  if (!msg || field_name.empty()) return arr;
-
-  const auto* refl = msg->GetReflection();
-  const auto* desc = msg->GetDescriptor()->FindFieldByName(field_name);
-  if (!desc || !desc->is_repeated()) return arr;
-  if (desc->type() != google::protobuf::FieldDescriptor::TYPE_MESSAGE) return arr;
-
-  int size = refl->FieldSize(*msg, desc);
-  const auto* entry_desc = desc->message_type();
-  auto* role_f = entry_desc->FindFieldByName("role");
-  auto* content_f = entry_desc->FindFieldByName("content");
-  auto* tcid_f = entry_desc->FindFieldByName("tool_call_id");
-  if (!role_f || !content_f) return arr;
-
-  for (int i = 0; i < size; ++i) {
-    const auto& entry = refl->GetRepeatedMessage(*msg, desc, i);
-    json obj;
-    obj["role"] = role_f->type() == google::protobuf::FieldDescriptor::TYPE_STRING
-        ? refl->GetString(entry, role_f) : "";
-    obj["content"] = content_f->type() == google::protobuf::FieldDescriptor::TYPE_STRING
-        ? refl->GetString(entry, content_f) : "";
-    if (tcid_f && tcid_f->type() == google::protobuf::FieldDescriptor::TYPE_STRING) {
-      std::string tcid = refl->GetString(entry, tcid_f);
-      if (!tcid.empty()) {
-        obj["tool_call_id"] = tcid;
-      }
-    }
-    arr.push_back(std::move(obj));
-  }
-  return arr;
+  return out;
 }
 
 }  // namespace
@@ -104,38 +57,28 @@ AgentNode::AgentNode(AgentNodeConfig cfg)
     : cfg_(std::move(cfg)),
       id_("agent") {}
 
-std::string AgentNode::BuildConversationJson(const State& state) const {
-  json msgs = json::array();
+std::string AgentNode::BuildSystemMessageJson() const {
+  if (cfg_.system_prompt.empty()) return {};
+  // LiteRT-LM wraps this into {role:system, content:<this>}. The Gemma
+  // jinja template iterates content as a sequence of {type,text} items, so
+  // pass an array — a single object falls through both string and sequence
+  // branches and gets silently dropped.
+  json sys = json::array({{{"type", "text"}, {"text", cfg_.system_prompt}}});
+  return sys.dump();
+}
 
-  if (!cfg_.system_prompt.empty()) {
-    msgs.push_back({{"role", "system"}, {"content", cfg_.system_prompt}});
-  }
+std::string AgentNode::BuildToolsJson() const {
+  if (!cfg_.tool_registry) return "[]";
+  return cfg_.tool_registry->ExportToolsJson(cfg_.tool_names);
+}
 
-  // Append existing conversation history (tool results, previous turns)
-  json history = ReadMessages(state, cfg_.messages_field);
-  for (auto& m : history) {
-    msgs.push_back(std::move(m));
-  }
-
-  // Current user input — only include on first iteration (before any history exists)
-  // to avoid duplicating the input on every ReAct turn.
-  if (history.empty()) {
-    std::string input = ReadField(state, cfg_.input_field);
-    msgs.push_back({{"role", "user"}, {"content", input}});
-  }
-
-  json full;
-  full["messages"] = msgs;
-  full["max_tokens"] = cfg_.max_output_tokens;
-  full["stream"] = cfg_.stream_tokens;
-
-  // Attach tool definitions if configured
-  if (cfg_.tool_registry) {
-    full["tools"] = json::parse(
-        cfg_.tool_registry->ExportToolsJson(cfg_.tool_names));
-  }
-
-  return full.dump();
+std::string AgentNode::BuildUserMessageJson(const State& state) const {
+  std::string user_text = ReadField(state, cfg_.input_field);
+  json msg = {
+    {"role", "user"},
+    {"content", json::array({{{"type", "text"}, {"text", user_text}}})},
+  };
+  return msg.dump();
 }
 
 void AgentNode::WriteOutput(State& state, const std::string& text) const {
@@ -147,76 +90,101 @@ asio::awaitable<State> AgentNode::Run(
   if (!cfg_.engine || !cfg_.io_ctx) {
     throw AgentflowError("AgentNode: engine and io_ctx must be configured");
   }
-
   if (cancel.IsCancelled()) co_return std::move(state);
 
+  // One Conversation per Run. The engine owns history across turns within
+  // the ReAct loop; we don't need to thread message state ourselves.
+  LiteRtLmConversationOptions opts;
+  opts.system_message_json = BuildSystemMessageJson();
+  opts.tools_json = BuildToolsJson();
+  opts.max_output_tokens = cfg_.max_output_tokens;
+
+  auto conv = LiteRtLmConversation::Create(cfg_.engine, std::move(opts),
+                                            *cfg_.io_ctx);
+  if (!conv) {
+    throw AgentflowError("AgentNode: failed to create Conversation");
+  }
+
+  std::string message_json = BuildUserMessageJson(state);
   std::string final_answer;
+
   for (int iter = 0; iter < cfg_.max_iter; ++iter) {
     if (cancel.IsCancelled()) break;
 
-    auto* raw_session = litert_lm_engine_create_session(
-        cfg_.engine->Get(),
-        /*session_config=*/nullptr);
-    if (!raw_session) {
-      throw AgentflowError("AgentNode: failed to create LiteRT-LM session");
+    auto resp_or = conv->SendMessageSync(message_json);
+    if (!resp_or.ok()) {
+      throw AgentflowError("AgentNode: Conversation::SendMessageSync failed: " +
+                            std::string(resp_or.status().message()));
     }
-    LiteRtLmSession session(raw_session, *cfg_.io_ctx);
-
-    std::string conversation_json = BuildConversationJson(state);
-
-    session.Start(conversation_json);
-    std::string accum;
-    while (true) {
-      std::string token = co_await session.NextTokenAsync();
-      if (token.empty()) break;
-      accum += token;
-      if (cfg_.stream_tokens) {
-        emit.EmitToken(Id(), token);
-      }
+    const std::string& resp_str = *resp_or;
+    if (cfg_.stream_tokens && !resp_str.empty()) {
+      // No real token streaming on the sync path; emit the whole response
+      // as a single chunk for trace observability.
+      emit.EmitToken(Id(), resp_str);
     }
 
-    // Check for tool call in output
-    // LiteRT-LM format: {"tool_calls":[{"id":"...","function":{"name":"...","arguments":"..."}}]}
+    json resp;
     try {
-      auto parsed = json::parse(accum);
-      if (parsed.contains("tool_calls") && !parsed["tool_calls"].empty()) {
-        // Persist the assistant's tool-call message so the LLM sees its own
-        // choices on subsequent iterations (standard ReAct pattern).
-        json assistant_msg = parsed;
-        assistant_msg["role"] = "assistant";
-        AppendMessage(state, cfg_.messages_field, assistant_msg);
-
-        for (const auto& tc : parsed["tool_calls"]) {
-          std::string id = tc.value("id", "");
-          std::string name = tc["function"]["name"];
-          std::string args = tc["function"]["arguments"];
-          co_await HandleToolCall(state, id, name, args, cancel, emit);
-        }
-        continue;  // Loop back for next LLM call
-      }
+      resp = json::parse(resp_str);
     } catch (const json::exception&) {
-      // Not a valid JSON tool-call response — treat as plain text output
+      final_answer = resp_str;  // fall back to raw text
+      break;
     }
 
-    // No tool call — this is the final answer
-    final_answer = accum;
-    WriteOutput(state, final_answer);
+    // Tool dispatch: LiteRT-LM puts tool_calls at the top level of the
+    // assistant message when present.
+    if (resp.contains("tool_calls") && resp["tool_calls"].is_array() &&
+        !resp["tool_calls"].empty()) {
+      // Dispatch every tool call this turn, then send a single tool-role
+      // message back with each result.
+      json tool_content = json::array();
+      for (const auto& tc : resp["tool_calls"]) {
+        std::string name = tc.value("name", tc.value("function",
+                                                      json::object())
+                                                .value("name", ""));
+        std::string args;
+        if (tc.contains("arguments")) {
+          args = tc["arguments"].is_string()
+                     ? tc["arguments"].get<std::string>()
+                     : tc["arguments"].dump();
+        } else if (tc.contains("function") &&
+                   tc["function"].contains("arguments")) {
+          args = tc["function"]["arguments"].is_string()
+                     ? tc["function"]["arguments"].get<std::string>()
+                     : tc["function"]["arguments"].dump();
+        }
+        std::string result = co_await DispatchTool(name, args, cancel, emit);
+        // Per Gemma4 jinja template: each content item has `name` + `response`
+        // fields directly; engine renders <|tool_response>response:NAME{...}<tool_response|>.
+        tool_content.push_back({
+          {"name", name},
+          {"response", {{"value", result}}},
+        });
+      }
+      json tool_message = {{"role", "tool"}, {"content", tool_content}};
+      message_json = tool_message.dump();
+      continue;
+    }
+
+    // No tool calls — extract the assistant text and we're done.
+    final_answer = ExtractAssistantText(resp);
+    if (final_answer.empty()) final_answer = resp_str;
     break;
   }
 
   if (final_answer.empty() && !cancel.IsCancelled()) {
     WriteOutput(state, "Agent reached maximum iterations without a final answer.");
+  } else {
+    WriteOutput(state, final_answer);
   }
 
   co_return std::move(state);
 }
 
-asio::awaitable<void> AgentNode::HandleToolCall(
-    State& state, const std::string& call_id,
-    const std::string& name,
-    const std::string& args, const CancelToken& cancel,
-    EventEmitter& emit) {
-  if (!cfg_.tool_registry) co_return;
+asio::awaitable<std::string> AgentNode::DispatchTool(
+    const std::string& name, const std::string& args,
+    const CancelToken& cancel, EventEmitter& emit) {
+  if (!cfg_.tool_registry) co_return std::string{};
 
   emit.EmitToolCall(Id(), name, args);
   std::string result;
@@ -226,13 +194,7 @@ asio::awaitable<void> AgentNode::HandleToolCall(
     result = std::string("Tool error: ") + e.what();
   }
   emit.EmitToolReturn(Id(), name, result);
-
-  json tool_msg = {
-    {"role", "tool"},
-    {"tool_call_id", call_id.empty() ? name : call_id},
-    {"content", result},
-  };
-  AppendMessage(state, cfg_.messages_field, tool_msg);
+  co_return result;
 }
 
 }  // namespace agentflow
