@@ -25,7 +25,9 @@ cc_library(
         "stub_node.h",
     ],
     deps = [
+        "//agentflow/persist",
         "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
         "@asio",
         "@com_google_protobuf//:protobuf",
     ],
