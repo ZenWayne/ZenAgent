@@ -6,10 +6,12 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "inference",
     srcs = [
+        "litert_lm_conversation.cc",
         "litert_lm_engine.cc",
         "litert_lm_session.cc",
     ],
     hdrs = [
+        "litert_lm_conversation.h",
         "litert_lm_engine.h",
         "litert_lm_session.h",
     ],
