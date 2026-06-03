@@ -28,12 +28,23 @@ std::shared_ptr<LiteRtLmConversation> LiteRtLmConversation::Create(
     asio::io_context& io_ctx) {
   if (!engine) return nullptr;
 
+  // Pass NULL (not "") so the engine doesn't construct an empty preface
+  // entry — litert_lm_main works by NOT calling SetPreface at all, and
+  // the jinja template rendering differs when a preface is present even
+  // with empty content.
+  const char* sys = opts.system_message_json.empty()
+                        ? nullptr
+                        : opts.system_message_json.c_str();
+  const char* tools = opts.tools_json.empty() || opts.tools_json == "[]"
+                          ? nullptr
+                          : opts.tools_json.c_str();
+  const char* msgs = opts.messages_json.empty() || opts.messages_json == "[]"
+                         ? nullptr
+                         : opts.messages_json.c_str();
   ::LiteRtLmConversationConfig* cfg = litert_lm_conversation_config_create(
       engine->Get(),
       /*session_config=*/nullptr,
-      opts.system_message_json.c_str(),
-      opts.tools_json.c_str(),
-      opts.messages_json.c_str(),
+      sys, tools, msgs,
       opts.enable_constrained_decoding);
   if (!cfg) return nullptr;
 
@@ -63,6 +74,27 @@ LiteRtLmConversation::~LiteRtLmConversation() {
     litert_lm_conversation_config_delete(config_);
     config_ = nullptr;
   }
+}
+
+absl::StatusOr<std::string> LiteRtLmConversation::SendMessageSync(
+    const std::string& message_json, const std::string& extra_context) {
+  if (!conv_) {
+    return absl::FailedPreconditionError("conversation not created");
+  }
+  ::LiteRtLmJsonResponse* resp = litert_lm_conversation_send_message(
+      conv_, message_json.c_str(),
+      extra_context.empty() ? nullptr : extra_context.c_str());
+  if (!resp) {
+    return absl::InternalError("send_message returned null");
+  }
+  const char* s = litert_lm_json_response_get_string(resp);
+  std::string out = s ? std::string(s) : std::string{};
+  litert_lm_json_response_delete(resp);
+  {
+    std::lock_guard<std::mutex> lk(accum_mu_);
+    accum_ = out;
+  }
+  return out;
 }
 
 void LiteRtLmConversation::SendMessage(std::string message_json,

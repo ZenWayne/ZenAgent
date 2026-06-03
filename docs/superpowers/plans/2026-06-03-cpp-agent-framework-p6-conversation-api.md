@@ -11,9 +11,7 @@ P5 closed the trace channel. P6 closes the "we're shouting raw JSON at a chat mo
 ```json
 {"messages":[...],"max_tokens":1024,"stream":true,"tools":[...]}
 ```
-…which it then passes verbatim to `LiteRtLmSession::Start(text)`. The session treats that string as the *final* tokenizer input — no chat template is applied.
-
-Gemma was trained to see prompts that, after the jinja chat template runs, contain `<|turn>system\n...<turn|>\n<|tool>...<tool|>\n<|turn>user\n...<turn|>\n<|turn>model\n` markers. Those marker strings are literally embedded in the model's `jinja_prompt_template` field (visible in the engine-config dump). Because we skipped the template, none of those markers appear in the tokenized prompt. Gemma sees a raw JSON literal it was never trained on, so it just keeps writing JSON-shaped continuations — which is exactly the `],"name":"assistant"}]}}` tail we observed.
+…which it then passes verbatim to `LiteRtLmSession::Start(text)`. The session treats that string as raw model input. Gemma's tokenizer never sees `<|turn>system`, `<|tool>...<tool|>`, `<|turn>user`, `<|turn>model` markers — it just starts continuing the literal JSON. Hence the garbage tail in the response.
 
 Even if a real reply arrived, `AgentNode::Run` matches `accum` against `{"tool_calls":[{"id":...,"function":{"name":...,"arguments":...}}]}` (OpenAI shape), but Gemma emits `<|tool_call>call:name{k:v}<tool_call|>` per its template. The parse always misses → AgentNode never dispatches tools → the "final answer" fallback prints the garbage.
 
@@ -119,17 +117,34 @@ Add to `agentflow/inference/BUILD.bazel`'s existing target. Build alone first to
 
 Commit: `feat: LiteRtLmConversation wrapper around C engine conversation API`
 
-## Task 2: Probe the actual response shape
+## Task 2: Probe the actual response shape — RESOLVED
 
-Before refactoring nodes, write a 30-line scratch binary that drives `LiteRtLmConversation` with the get_time tool prompt and dumps:
-- The streamed chunks (raw bytes).
-- The final `FullResponseJson()` string.
+**Findings (2026-06-04):**
 
-We don't yet know the exact JSON shape LiteRT-LM returns. Likely candidates: `{"text":"...","tool_calls":[...]}`, `{"content":[{"type":"text","text":"..."}, {"type":"tool_call","name":"...","args":{...}}]}`, or something Gemma-flavored. Whatever it is, **lock the format in writing** before T3/T4 depend on it.
+1. **Streaming variant `litert_lm_conversation_send_message_stream` is broken in our linkage.** Every call fails inside `prompt_template_.Apply` with `Failed to apply template: expected value at line 1 column N`, where N tracks our input size. Repro is consistent regardless of preface contents, with/without tools, with plain-string or typed-content messages. `litert_lm_main` (which uses the C++ API directly + `engine->WaitUntilDone`) works on the same model — suggests a thread-context interaction in our archive's minijinja invocation that only manifests on the async-callback path.
 
-Output: a one-paragraph addendum to this plan documenting the observed schema. Scratch binary goes in `/tmp` and is **not** committed.
+2. **Non-streaming `litert_lm_conversation_send_message` works perfectly.** Same options, same prompt:
+   ```
+   bazel run //tmp_probe:probe → "Hello! How can I help you today? 😊"
+   ```
 
-Commit (the addendum only): `docs: P6 — document LiteRT-LM conversation response schema`
+3. **Response shape (locked in):**
+   ```json
+   {"role":"assistant","content":[{"type":"text","text":"..."}]}
+   ```
+   For tool calls the assistant message also includes `tool_calls` (shape per LiteRT-LM's standard).
+
+4. **System message takes typed-content shape**, not OpenAI `{role,content}` envelope:
+   ```json
+   {"type":"text","text":"You are a helpful assistant."}
+   ```
+   The engine wraps it into `{role:system, content:...}` internally.
+
+5. **User messages**: `{"role":"user","content":[{"type":"text","text":"..."}]}` (content is array of typed items).
+
+**Pivot for T3/T4:** Add a `SendMessageSync` method to `LiteRtLmConversation` that wraps the non-streaming C API and returns the full response JSON. Token streaming on the Conversation path is unavailable; emit one `EmitToken` with the full text after the call returns. Streaming still works via the older `LiteRtLmSession` for callers that don't need tool dispatch (LlmNode's raw single-shot path).
+
+Commit (plan update): `docs: P6 T2 findings — Conversation stream variant broken, use sync path`
 
 ## Task 3: Refactor `LlmNode` to use Conversation
 

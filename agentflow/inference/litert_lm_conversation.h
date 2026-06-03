@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 
+#include <absl/status/statusor.h>
 #include <asio/awaitable.hpp>
 #include <asio/experimental/concurrent_channel.hpp>
 #include <asio/io_context.hpp>
@@ -49,10 +50,21 @@ class LiteRtLmConversation {
   LiteRtLmConversation(const LiteRtLmConversation&) = delete;
   LiteRtLmConversation& operator=(const LiteRtLmConversation&) = delete;
 
-  // Sends a user/tool-response message and starts streaming the model's reply.
-  // Non-blocking. Subsequent NextTokenAsync() calls drain the chunks.
-  // `extra_context` is opaque to us; pass "" unless the model docs say
-  // otherwise.
+  // Sends a message synchronously and returns the model's full response JSON
+  // (shape: {"role":"assistant","content":[{"type":"text","text":"..."}],
+  // optionally "tool_calls":[...]}). Blocks until the engine is done.
+  //
+  // This is the preferred path. The streaming variant (SendMessage +
+  // NextTokenAsync below) is broken in our current linkage — it fails inside
+  // prompt_template_.Apply. The sync path goes through the same engine but
+  // works because the rendering happens on the calling thread.
+  absl::StatusOr<std::string> SendMessageSync(
+      const std::string& message_json,
+      const std::string& extra_context = "");
+
+  // [Broken in current linkage — prefer SendMessageSync.] Sends a message and
+  // starts streaming the model's reply. Subsequent NextTokenAsync() calls
+  // drain the chunks.
   void SendMessage(std::string message_json, std::string extra_context = "");
 
   // Awaits the next streamed chunk. Empty string = end of this turn. Throws
