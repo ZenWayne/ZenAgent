@@ -11,7 +11,9 @@ P5 closed the trace channel. P6 closes the "we're shouting raw JSON at a chat mo
 ```json
 {"messages":[...],"max_tokens":1024,"stream":true,"tools":[...]}
 ```
-…which it then passes verbatim to `LiteRtLmSession::Start(text)`. The session treats that string as raw model input. Gemma's tokenizer never sees `<|turn>system`, `<|tool>...<tool|>`, `<|turn>user`, `<|turn>model` markers — it just starts continuing the literal JSON. Hence the garbage tail in the response.
+…which it then passes verbatim to `LiteRtLmSession::Start(text)`. The session treats that string as the *final* tokenizer input — no chat template is applied.
+
+Gemma was trained to see prompts that, after the jinja chat template runs, contain `<|turn>system\n...<turn|>\n<|tool>...<tool|>\n<|turn>user\n...<turn|>\n<|turn>model\n` markers. Those marker strings are literally embedded in the model's `jinja_prompt_template` field (visible in the engine-config dump). Because we skipped the template, none of those markers appear in the tokenized prompt. Gemma sees a raw JSON literal it was never trained on, so it just keeps writing JSON-shaped continuations — which is exactly the `],"name":"assistant"}]}}` tail we observed.
 
 Even if a real reply arrived, `AgentNode::Run` matches `accum` against `{"tool_calls":[{"id":...,"function":{"name":...,"arguments":...}}]}` (OpenAI shape), but Gemma emits `<|tool_call>call:name{k:v}<tool_call|>` per its template. The parse always misses → AgentNode never dispatches tools → the "final answer" fallback prints the garbage.
 
