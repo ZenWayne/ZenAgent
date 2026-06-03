@@ -15,6 +15,8 @@
 #include "agentflow/core/graph.h"
 #include "agentflow/core/stub_node.h"
 #include "agentflow/observability/callback_event_emitter.h"
+#include "agentflow/persist/checkpoint_writer.h"
+#include "checkpoint.pb.h"
 #include "test_messages.pb.h"
 
 namespace agentflow {
@@ -365,6 +367,196 @@ TEST(RunnerTest, EmitsNodeEndWithCancelledFlag) {
   ASSERT_NE(it, cap.events.end());
   EXPECT_TRUE(it->node_end().cancelled());
   EXPECT_FALSE(it->node_end().failed());
+}
+
+// ── Checkpoint hook / Resume ────────────────────────────────────────────────
+
+// Test-only CheckpointWriter that captures every Write into a vector.
+struct RecordingWriter : public CheckpointWriter {
+  std::vector<proto::Checkpoint> writes;
+  std::mutex m;
+  absl::Status Write(const proto::Checkpoint& cp) override {
+    std::lock_guard<std::mutex> l(m);
+    writes.push_back(cp);
+    return absl::OkStatus();
+  }
+};
+
+namespace {
+std::unique_ptr<StubNode> BumpCounter(std::string id) {
+  return std::make_unique<StubNode>(
+      std::move(id), 0ms, nullptr, [](State& s) {
+        auto& m = s.Mutable<test::TestState>();
+        m.set_counter(m.counter() + 1);
+      });
+}
+}  // namespace
+
+TEST(RunnerCheckpointTest, NoWriteWhenPolicyIsOff) {
+  GraphBuilder b;
+  b.AddNode(BumpCounter("a")).AddNode(BumpCounter("b")).AddEdge("a", "b");
+
+  RecordingWriter w;
+  Runner::Options opts;
+  opts.checkpoint_writer = &w;  // present but policy=Off
+  opts.checkpoint_policy = Runner::CheckpointPolicy::Off;
+
+  (void)RunSync(b.Build(), opts, MakeInitState());
+  EXPECT_TRUE(w.writes.empty());
+}
+
+TEST(RunnerCheckpointTest, WritesAfterEachNode) {
+  GraphBuilder b;
+  b.AddNode(BumpCounter("a"))
+   .AddNode(BumpCounter("b"))
+   .AddNode(BumpCounter("c"))
+   .AddEdge("a", "b").AddEdge("b", "c");
+
+  RecordingWriter w;
+  Runner::Options opts;
+  opts.checkpoint_policy = Runner::CheckpointPolicy::AfterEachNode;
+  opts.checkpoint_writer = &w;
+
+  auto out = RunSync(b.Build(), opts, MakeInitState());
+  EXPECT_EQ(out.As<test::TestState>().counter(), 3);
+
+  ASSERT_EQ(w.writes.size(), 3u);
+  EXPECT_EQ(w.writes[0].completed_nodes_size(), 1);
+  EXPECT_EQ(w.writes[0].completed_nodes(0), "a");
+  EXPECT_EQ(w.writes[1].completed_nodes_size(), 2);
+  EXPECT_EQ(w.writes[1].completed_nodes(1), "b");
+  EXPECT_EQ(w.writes[2].completed_nodes_size(), 3);
+  EXPECT_EQ(w.writes[2].completed_nodes(2), "c");
+  // state_type stamped by Runner from the message's GetTypeName.
+  EXPECT_EQ(w.writes[2].state_type(), "agentflow.test.TestState");
+}
+
+TEST(RunnerCheckpointTest, AfterTerminalNodeWritesOnce) {
+  GraphBuilder b;
+  b.AddNode(BumpCounter("a")).AddNode(BumpCounter("b")).AddEdge("a", "b");
+
+  RecordingWriter w;
+  Runner::Options opts;
+  opts.checkpoint_policy = Runner::CheckpointPolicy::AfterTerminalNode;
+  opts.checkpoint_writer = &w;
+
+  (void)RunSync(b.Build(), opts, MakeInitState());
+  ASSERT_EQ(w.writes.size(), 1u);
+  EXPECT_EQ(w.writes[0].completed_nodes_size(), 2);
+  EXPECT_EQ(w.writes[0].completed_nodes(1), "b");
+}
+
+TEST(RunnerCheckpointTest, FailingNodeIsNotRecorded) {
+  GraphBuilder b;
+  b.AddNode(BumpCounter("a"))
+   .AddNode(std::make_unique<StubNode>("b", 0ms, nullptr,
+                                       [](State&) { throw ToolError("boom"); }))
+   .AddEdge("a", "b");
+
+  RecordingWriter w;
+  Runner::Options opts;
+  opts.checkpoint_policy = Runner::CheckpointPolicy::AfterEachNode;
+  opts.checkpoint_writer = &w;
+
+  EXPECT_THROW(RunSync(b.Build(), opts, MakeInitState()), ToolError);
+  // Only "a" should have been recorded; "b" threw and wasn't.
+  ASSERT_EQ(w.writes.size(), 1u);
+  ASSERT_EQ(w.writes[0].completed_nodes_size(), 1);
+  EXPECT_EQ(w.writes[0].completed_nodes(0), "a");
+}
+
+TEST(RunnerCheckpointTest, ResumeContinuesFromMidGraph) {
+  // Run a→b→c, capture the checkpoint written after b, then build a fresh
+  // Runner with the same graph and Resume from that checkpoint. Verify only
+  // c runs (counter only increments once in the resume) and final state
+  // matches a clean run.
+  GraphBuilder b1;
+  b1.AddNode(BumpCounter("a"))
+    .AddNode(BumpCounter("b"))
+    .AddNode(BumpCounter("c"))
+    .AddEdge("a", "b").AddEdge("b", "c");
+
+  RecordingWriter w;
+  Runner::Options opts;
+  opts.checkpoint_policy = Runner::CheckpointPolicy::AfterEachNode;
+  opts.checkpoint_writer = &w;
+
+  auto clean = RunSync(b1.Build(), opts, MakeInitState());
+  ASSERT_EQ(clean.As<test::TestState>().counter(), 3);
+  ASSERT_GE(w.writes.size(), 2u);
+  const proto::Checkpoint& after_b = w.writes[1];
+  ASSERT_EQ(after_b.completed_nodes_size(), 2);
+  EXPECT_EQ(after_b.completed_nodes(1), "b");
+
+  // Fresh Runner with the same graph topology — Resume from after_b.
+  GraphBuilder b2;
+  b2.AddNode(BumpCounter("a"))
+    .AddNode(BumpCounter("b"))
+    .AddNode(BumpCounter("c"))
+    .AddEdge("a", "b").AddEdge("b", "c");
+  asio::io_context io;
+  Runner r2(b2.Build(), Runner::Options{});
+
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<State> {
+        co_return co_await r2.Resume(after_b, State::From(test::TestState{}));
+      },
+      asio::use_future);
+  io.run();
+  auto resumed = fut.get();
+
+  // resumed.counter should equal after_b's counter + 1 (only c ran).
+  // after_b's state had counter==2 (a and b each bumped from 0). So resumed
+  // should be 3.
+  test::TestState saved_state;
+  ASSERT_TRUE(saved_state.ParseFromString(after_b.state_bytes()));
+  EXPECT_EQ(saved_state.counter(), 2);
+  EXPECT_EQ(resumed.As<test::TestState>().counter(), 3);
+}
+
+TEST(RunnerCheckpointTest, ResumeRejectsUnknownNodeInCheckpoint) {
+  GraphBuilder b;
+  b.AddNode(BumpCounter("a")).AddNode(BumpCounter("b")).AddEdge("a", "b");
+
+  proto::Checkpoint cp;
+  test::TestState s;
+  cp.set_state_bytes(s.SerializeAsString());
+  cp.set_state_type("agentflow.test.TestState");
+  cp.add_completed_nodes("ghost");
+
+  asio::io_context io;
+  Runner r(b.Build(), Runner::Options{});
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<State> {
+        co_return co_await r.Resume(cp, State::From(test::TestState{}));
+      },
+      asio::use_future);
+  io.run();
+  EXPECT_THROW({ (void)fut.get(); }, AgentflowError);
+}
+
+TEST(RunnerCheckpointTest, ResumeWithAllCompletedReturnsTarget) {
+  GraphBuilder b;
+  b.AddNode(BumpCounter("a"));
+
+  proto::Checkpoint cp;
+  test::TestState s;
+  s.set_counter(42);
+  cp.set_state_bytes(s.SerializeAsString());
+  cp.set_state_type("agentflow.test.TestState");
+  cp.add_completed_nodes("a");
+
+  asio::io_context io;
+  Runner r(b.Build(), Runner::Options{});
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<State> {
+        co_return co_await r.Resume(cp, State::From(test::TestState{}));
+      },
+      asio::use_future);
+  io.run();
+  auto out = fut.get();
+  // Counter stays at 42 — a never re-ran because it was already completed.
+  EXPECT_EQ(out.As<test::TestState>().counter(), 42);
 }
 
 }  // namespace
