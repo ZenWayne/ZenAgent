@@ -24,3 +24,23 @@ kt_jvm_test(
         "@agentflow_maven//:junit_junit",
     ],
 )
+
+kt_jvm_library(
+    name = "dynamic_schema",
+    srcs = ["DynamicSchema.kt"],
+    deps = [
+        ":schema",
+        "//agentflow/jni:schema_registry_jni_kt",
+    ],
+)
+
+kt_jvm_test(
+    name = "DynamicSchemaSmokeTest",
+    srcs = ["DynamicSchemaSmokeTest.kt"],
+    test_class = "com.google.ai.edge.agentflow.schema.DynamicSchemaSmokeTest",
+    data = ["//agentflow/jni:libagentflow_jni.so"],
+    deps = [
+        ":dynamic_schema",
+        "@agentflow_maven//:junit_junit",
+    ],
+)

@@ -1,5 +1,6 @@
 # agentflow/jni/BUILD.bazel
 load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -13,4 +14,9 @@ cc_binary(
         "//agentflow/dynamic",
         "@bazel_tools//tools/jdk:jni",
     ],
+)
+
+kt_jvm_library(
+    name = "schema_registry_jni_kt",
+    srcs = ["SchemaRegistryJni.kt"],
 )
