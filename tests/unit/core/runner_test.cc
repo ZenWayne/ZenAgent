@@ -559,5 +559,45 @@ TEST(RunnerCheckpointTest, ResumeWithAllCompletedReturnsTarget) {
   EXPECT_EQ(out.As<test::TestState>().counter(), 42);
 }
 
+// ── Resume cold-start ──────────────────────────────────────────────────────
+
+// Helper: mirrors RunSync but calls runner.Resume(cp, target) instead of Run.
+State ResumeSync(Graph g, Runner::Options opts, const proto::Checkpoint& cp,
+                 State target, CancelToken cancel = CancelToken()) {
+  asio::io_context io;
+  Runner runner(std::move(g), opts);
+  auto fut = asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<State> {
+        co_return co_await runner.Resume(cp, std::move(target), cancel);
+      },
+      asio::use_future);
+  io.run();
+  return fut.get();
+}
+
+TEST(RunnerCheckpointTest, ResumeColdStartSeedsEntryNodesAndRuns) {
+  // Empty completed_nodes == cold start: Resume must seed entry nodes with
+  // `target` and run the graph, exactly like Run(target).
+  GraphBuilder b;
+  b.AddNode(BumpCounter("a"))
+   .AddNode(BumpCounter("b"))
+   .AddEdge("a", "b");
+
+  test::TestState init;
+  init.set_counter(0);
+
+  proto::Checkpoint cp;
+  cp.set_state_type(init.GetTypeName());
+  cp.set_state_bytes(init.SerializeAsString());
+  // completed_nodes intentionally EMPTY — this is the cold-start case.
+
+  State out = ResumeSync(b.Build(), Runner::Options{}, cp,
+                         State::From(test::TestState{}));
+
+  // Both a and b must have run: counter incremented twice.
+  EXPECT_EQ(out.As<test::TestState>().counter(), 2);
+}
+
 }  // namespace
 }  // namespace agentflow
