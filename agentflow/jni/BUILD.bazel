@@ -1,0 +1,16 @@
+# agentflow/jni/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+# Shared library loaded by the JVM via System.loadLibrary("agentflow_jni").
+cc_binary(
+    name = "libagentflow_jni.so",
+    srcs = ["schema_registry_jni.cc"],
+    linkshared = True,
+    linkstatic = True,
+    deps = [
+        "//agentflow/dynamic",
+        "@bazel_tools//tools/jdk:jni",
+    ],
+)
