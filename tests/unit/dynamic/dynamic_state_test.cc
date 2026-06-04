@@ -78,5 +78,32 @@ TEST(MakeResumeTargetTest, UnknownTypeReturnsNotFound) {
   EXPECT_EQ(target.status().code(), absl::StatusCode::kNotFound);
 }
 
+TEST(ParseStateBytesTest, RejectsBytesExceedingSizeLimit) {
+  SchemaRegistry reg;
+  ASSERT_TRUE(reg.LoadDescriptorSet(PersonDescriptorSet()).ok());
+  auto m = reg.NewMessage("dyntest.Person");
+  ASSERT_TRUE(m.ok());
+
+  // A valid Person with a 1 KiB name, parsed under a 64-byte cap -> rejected.
+  const std::string big = PersonBytes(reg, std::string(1024, 'x'), 1);
+  absl::Status st = ParseStateBytes(**m, big, /*max_depth=*/100,
+                                    /*max_bytes=*/64);
+  EXPECT_FALSE(st.ok());
+  EXPECT_EQ(st.code(), absl::StatusCode::kInvalidArgument);
+}
+
+TEST(ParseStateBytesTest, AcceptsWellFormedBytesUnderLimits) {
+  SchemaRegistry reg;
+  ASSERT_TRUE(reg.LoadDescriptorSet(PersonDescriptorSet()).ok());
+  auto m = reg.NewMessage("dyntest.Person");
+  ASSERT_TRUE(m.ok());
+
+  const std::string bytes = PersonBytes(reg, "bob", 7);
+  ASSERT_TRUE(ParseStateBytes(**m, bytes, 100, 1 << 20).ok());
+  const auto* d = (*m)->GetDescriptor();
+  EXPECT_EQ((*m)->GetReflection()->GetString((**m),
+                                             d->FindFieldByName("name")), "bob");
+}
+
 }  // namespace
 }  // namespace agentflow

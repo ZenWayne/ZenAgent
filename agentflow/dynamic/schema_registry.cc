@@ -4,6 +4,8 @@
 #include <string>
 
 #include <google/protobuf/descriptor.pb.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
 #include "absl/strings/str_cat.h"
 
@@ -13,10 +15,18 @@ SchemaRegistry::SchemaRegistry() = default;
 
 absl::Status SchemaRegistry::LoadDescriptorSet(std::string_view serialized_fds) {
   google::protobuf::FileDescriptorSet set;
-  if (!set.ParseFromArray(serialized_fds.data(),
-                          static_cast<int>(serialized_fds.size()))) {
-    return absl::InvalidArgumentError(
-        "SchemaRegistry: not a valid FileDescriptorSet");
+  {
+    google::protobuf::io::ArrayInputStream array_in(
+        serialized_fds.data(), static_cast<int>(serialized_fds.size()));
+    google::protobuf::io::CodedInputStream coded_in(&array_in);
+    coded_in.SetRecursionLimit(100);
+    coded_in.SetTotalBytesLimit(64 * 1024 * 1024);  // 64 MiB — bound OOM on
+                                                     // untrusted descriptor sets
+    if (!set.ParseFromCodedStream(&coded_in) ||
+        !coded_in.ConsumedEntireMessage()) {
+      return absl::InvalidArgumentError(
+          "SchemaRegistry: not a valid FileDescriptorSet");
+    }
   }
   // Files must be added after their dependencies; protoc and Wire both emit in
   // topological order, so a single forward pass resolves imports.
