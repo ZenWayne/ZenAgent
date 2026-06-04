@@ -61,6 +61,7 @@ maven.install(
     name = "agentflow_maven",
     artifacts = [
         "com.squareup.wire:wire-schema:4.9.9",
+        "com.squareup.wire:wire-schema-jvm:4.9.9",
         "com.squareup.okio:okio:3.9.0",
         "com.squareup.okio:okio-fakefilesystem:3.9.0",
         "com.google.protobuf:protobuf-java:4.31.1",
