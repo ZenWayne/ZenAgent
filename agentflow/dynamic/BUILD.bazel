@@ -1,0 +1,16 @@
+# agentflow/dynamic/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "dynamic",
+    srcs = ["schema_registry.cc"],
+    hdrs = ["schema_registry.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@com_google_protobuf//:protobuf",
+    ],
+)

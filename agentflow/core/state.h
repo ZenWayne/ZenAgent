@@ -36,6 +36,17 @@ class State {
     return s;
   }
 
+  // Wraps an already-constructed protobuf message whose concrete type is not
+  // known at compile time. This is the entry point for the dynamic-schema path:
+  // a DynamicMessage built from a runtime-loaded descriptor (see
+  // agentflow/dynamic/SchemaRegistry) is handed in as a base-class pointer.
+  [[nodiscard]] static State FromMessage(
+      std::unique_ptr<google::protobuf::Message> msg) {
+    State s;
+    s.msg_ = std::move(msg);
+    return s;
+  }
+
   template <typename ProtoT>
   [[nodiscard]] const ProtoT& As() const {
     const auto* typed = dynamic_cast<const ProtoT*>(msg_.get());
