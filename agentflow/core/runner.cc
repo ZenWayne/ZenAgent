@@ -349,8 +349,8 @@ asio::awaitable<State> Runner::Impl::Resume(const proto::Checkpoint& cp,
         "' does not match target='" +
         std::string(target.UnsafeMessage()->GetTypeName()) + "'");
   }
-  if (!target.ParseFromString(cp.state_bytes())) {
-    throw AgentflowError("Runner::Resume: ParseFromString failed");
+  if (auto st = target.ParseFromStringBounded(cp.state_bytes()); !st.ok()) {
+    throw AgentflowError("Runner::Resume: " + std::string(st.message()));
   }
 
   InitActivations();

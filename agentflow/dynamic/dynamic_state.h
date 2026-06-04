@@ -26,14 +26,12 @@ namespace proto { class Checkpoint; }  // proto/checkpoint.proto
 absl::StatusOr<State> MakeResumeTarget(SchemaRegistry& reg,
                                        const proto::Checkpoint& cp);
 
-// Default bounds for parsing untrusted serialized State.
-inline constexpr int kDefaultMaxParseDepth = 100;
-inline constexpr int kDefaultMaxParseBytes = 64 * 1024 * 1024;  // 64 MiB
-
 // Parses `bytes` into `msg` with bounded recursion depth and total size, and
 // requires the entire input to be consumed. Use for untrusted State payloads
 // (e.g. a checkpoint from disk or a third party). Returns InvalidArgument on a
-// malformed message, a limit breach, or trailing garbage.
+// malformed message, a limit breach, or trailing garbage. Delegates to
+// agentflow::ParseBoundedIntoMessage; the kDefaultMaxParse* bounds are defined
+// in agentflow/core/state.h.
 absl::Status ParseStateBytes(google::protobuf::Message& msg,
                              std::string_view bytes,
                              int max_depth = kDefaultMaxParseDepth,

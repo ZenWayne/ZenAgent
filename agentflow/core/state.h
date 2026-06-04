@@ -9,9 +9,21 @@
 
 #include <google/protobuf/message.h>
 
+#include "absl/status/status.h"
 #include "agentflow/core/errors.h"
 
 namespace agentflow {
+
+inline constexpr int kDefaultMaxParseDepth = 100;
+inline constexpr int kDefaultMaxParseBytes = 64 * 1024 * 1024;  // 64 MiB
+
+// Parses `bytes` into `msg` with bounded recursion depth and total size, and
+// requires the entire input consumed. For untrusted serialized State. Returns
+// InvalidArgument on a malformed message, limit breach, or trailing garbage.
+absl::Status ParseBoundedIntoMessage(
+    google::protobuf::Message& msg, std::string_view bytes,
+    int max_depth = kDefaultMaxParseDepth,
+    int max_bytes = kDefaultMaxParseBytes);
 
 // Type-erased holder for a single protobuf message representing graph state.
 //
@@ -71,6 +83,10 @@ class State {
 
   [[nodiscard]] std::string SerializeAsString() const;
   bool ParseFromString(std::string_view data);
+
+  [[nodiscard]] absl::Status ParseFromStringBounded(
+      std::string_view data, int max_depth = kDefaultMaxParseDepth,
+      int max_bytes = kDefaultMaxParseBytes);
 
   [[nodiscard]] State Clone() const;
 

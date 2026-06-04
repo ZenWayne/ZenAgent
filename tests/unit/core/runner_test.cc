@@ -55,6 +55,20 @@ State RunSync(Graph g, Runner::Options opts, State initial,
   return fut.get();
 }
 
+State ResumeSync(Graph g, Runner::Options opts, const proto::Checkpoint& cp,
+                 State target) {
+  asio::io_context io;
+  Runner runner(std::move(g), opts);
+  auto fut = asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<State> {
+        co_return co_await runner.Resume(cp, std::move(target));
+      },
+      asio::use_future);
+  io.run();
+  return fut.get();
+}
+
 TEST(RunnerTest, LinearGraphRunsInOrder) {
   auto counter = std::make_shared<std::atomic<int>>(0);
 
@@ -557,6 +571,21 @@ TEST(RunnerCheckpointTest, ResumeWithAllCompletedReturnsTarget) {
   auto out = fut.get();
   // Counter stays at 42 — a never re-ran because it was already completed.
   EXPECT_EQ(out.As<test::TestState>().counter(), 42);
+}
+
+TEST(RunnerCheckpointTest, ResumeRejectsMalformedStateBytes) {
+  auto counter = std::make_shared<std::atomic<int>>(0);
+  GraphBuilder b;
+  b.AddNode(std::make_unique<StubNode>("a", 0ms, counter, nullptr));
+
+  proto::Checkpoint cp;
+  cp.set_state_type("agentflow.test.TestState");
+  cp.set_state_bytes("\xFF\xFF\xFF not valid TestState wire bytes");
+
+  EXPECT_THROW(
+      ResumeSync(b.Build(), Runner::Options{}, cp,
+                 State::Empty<test::TestState>()),
+      AgentflowError);
 }
 
 }  // namespace

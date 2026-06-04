@@ -55,6 +55,7 @@ cc_test(
     deps = [
         "//agentflow/core",
         "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
