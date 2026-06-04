@@ -1,0 +1,31 @@
+// proto/checkpoint.proto
+//
+// Serialized Runner checkpoint. Written by FileCheckpointWriter at NODE_END
+// boundaries when Runner::Options::checkpoint_policy != Off. Read back by
+// the caller and handed to Runner::Resume for manual resumption.
+
+syntax = "proto3";
+
+package agentflow.proto;
+
+message Checkpoint {
+  // The user's State protobuf, serialized exactly as State::SerializeAsString.
+  bytes state_bytes = 1;
+
+  // Fully-qualified protobuf message type of the state, e.g.
+  // "agentflow.test.TestState". Used at resume time to verify the caller's
+  // target State matches the checkpoint's. Resume fails fast on mismatch.
+  string state_type = 2;
+
+  // Node IDs (in completion order) that have already finished. Resume marks
+  // these as done and seeds their successors with `state_bytes` as input.
+  repeated string completed_nodes = 3;
+
+  // Wall-clock when this snapshot was written, useful for debugging stale
+  // checkpoints from prior runs.
+  int64 unix_micros = 4;
+
+  // Bumped if the checkpoint format changes incompatibly. Resume rejects
+  // checkpoints with schema_version > kCurrentCheckpointSchemaVersion.
+  uint32 schema_version = 5;
+}
