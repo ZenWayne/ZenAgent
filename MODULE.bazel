@@ -49,3 +49,22 @@ cc_library(
 # Referenced as //third_party/litert_lm:c_engine (main workspace target).
 # Upgrade to @litert_lm//:c_engine with local_path_override in MODULE.bazel
 # when a prebuilt libc_engine.a is available.
+
+# ── Kotlin + JVM deps (dynamic schema / Wire codegen) ─────────────
+bazel_dep(name = "rules_kotlin", version = "1.9.6")
+
+# rules_kotlin@1.9.6 already pulls in rules_jvm_external@6.7 transitively;
+# declare it explicitly so we can use the maven extension directly.
+bazel_dep(name = "rules_jvm_external", version = "6.7")
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    name = "agentflow_maven",
+    artifacts = [
+        "com.squareup.wire:wire-schema:4.9.9",
+        "com.squareup.okio:okio:3.9.0",
+        "com.squareup.okio:okio-fakefilesystem:3.9.0",
+        "com.google.protobuf:protobuf-java:4.31.1",
+        "junit:junit:4.13.2",
+    ],
+)
+use_repo(maven, "agentflow_maven")
