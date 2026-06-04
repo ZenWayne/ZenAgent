@@ -5,9 +5,11 @@ package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "dynamic",
-    srcs = ["schema_registry.cc"],
-    hdrs = ["schema_registry.h"],
+    srcs = ["dynamic_state.cc", "schema_registry.cc"],
+    hdrs = ["dynamic_state.h", "schema_registry.h"],
     deps = [
+        "//agentflow/core",
+        "//proto:agentflow_proto",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",

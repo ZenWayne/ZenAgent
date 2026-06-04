@@ -13,3 +13,16 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "dynamic_state_test",
+    size = "small",
+    srcs = ["dynamic_state_test.cc"],
+    deps = [
+        "//agentflow/dynamic",
+        "//proto:agentflow_proto",
+        "@com_google_protobuf//:protobuf",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
