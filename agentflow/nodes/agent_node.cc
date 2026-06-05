@@ -11,30 +11,6 @@ namespace {
 
 using json = nlohmann::json;
 
-std::string ReadField(const State& state, const std::string& field_name) {
-  const auto* msg = state.UnsafeMessage();
-  if (!msg) return {};
-  const auto* refl = msg->GetReflection();
-  const auto* desc = msg->GetDescriptor()->FindFieldByName(field_name);
-  if (!desc) return {};
-  if (desc->type() == google::protobuf::FieldDescriptor::TYPE_STRING) {
-    return refl->GetString(*msg, desc);
-  }
-  return {};
-}
-
-void WriteField(State& state, const std::string& field_name,
-                const std::string& value) {
-  auto* msg = const_cast<google::protobuf::Message*>(state.UnsafeMessage());
-  if (!msg) return;
-  const auto* refl = msg->GetReflection();
-  const auto* desc = msg->GetDescriptor()->FindFieldByName(field_name);
-  if (!desc) return;
-  if (desc->type() == google::protobuf::FieldDescriptor::TYPE_STRING) {
-    refl->SetString(msg, desc, value);
-  }
-}
-
 // Pulls the assistant's text content out of the LiteRT-LM response shape:
 //   {"role":"assistant","content":[{"type":"text","text":"..."}, ...]}
 std::string ExtractAssistantText(const json& resp) {
@@ -73,7 +49,7 @@ std::string AgentNode::BuildToolsJson() const {
 }
 
 std::string AgentNode::BuildUserMessageJson(const State& state) const {
-  std::string user_text = ReadField(state, cfg_.input_field);
+  std::string user_text = ReadStringField(state, cfg_.input_field);
   json msg = {
     {"role", "user"},
     {"content", json::array({{{"type", "text"}, {"text", user_text}}})},
@@ -82,7 +58,7 @@ std::string AgentNode::BuildUserMessageJson(const State& state) const {
 }
 
 void AgentNode::WriteOutput(State& state, const std::string& text) const {
-  WriteField(state, cfg_.output_field, text);
+  WriteStringField(state, cfg_.output_field, text);
 }
 
 asio::awaitable<State> AgentNode::Run(

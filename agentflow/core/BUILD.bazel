@@ -30,5 +30,6 @@ cc_library(
         "@abseil-cpp//absl/status",
         "@asio",
         "@com_google_protobuf//:protobuf",
+        "@nlohmann_json//:json",
     ],
 )
