@@ -88,6 +88,17 @@ cc_library(
 )
 
 cc_library(
+    name = "delegate_tool",
+    srcs = ["delegate_tool.cc"],
+    hdrs = ["delegate_tool.h"],
+    deps = [
+        ":sub_agent_runtime",
+        "//agentflow/tools",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
     name = "workflow_loader",
     srcs = ["workflow_loader.cc"],
     hdrs = ["workflow_loader.h"],

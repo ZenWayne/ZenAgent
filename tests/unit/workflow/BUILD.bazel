@@ -68,6 +68,19 @@ cc_test(
 )
 
 cc_test(
+    name = "delegate_tool_test",
+    size = "small",
+    srcs = ["delegate_tool_test.cc"],
+    deps = [
+        "//agentflow/tools",
+        "//agentflow/workflow:delegate_tool",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
     name = "workflow_registry_test",
     size = "small",
     srcs = ["workflow_registry_test.cc"],
