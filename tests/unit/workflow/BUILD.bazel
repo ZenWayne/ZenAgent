@@ -53,6 +53,21 @@ cc_test(
 )
 
 cc_test(
+    name = "sub_agent_runtime_test",
+    size = "small",
+    srcs = ["sub_agent_runtime_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/tools",
+        "//agentflow/workflow:sub_agent_runtime",
+        "//agentflow/workflow:workflow_loader",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "workflow_registry_test",
     size = "small",
     srcs = ["workflow_registry_test.cc"],
