@@ -71,6 +71,9 @@ int main(int argc, char** argv) {
   agent_cfg.messages_field = "messages";
   agent_cfg.max_iter = 5;
   agent_cfg.stream_tokens = true;
+  // P8 C-bridge: force tool-call output to match the get_time schema via
+  // LLGuidance Lark grammar.
+  agent_cfg.constrained_tool_calls = true;
 
   // ── Graph ───────────────────────────────────────────────
   af::GraphBuilder b;

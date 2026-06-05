@@ -24,7 +24,15 @@ struct LiteRtLmConversationOptions {
   std::string system_message_json;  // e.g. {"role":"system","content":"..."}
   std::string tools_json = "[]";    // e.g. [{"type":"function",...}, ...]
   std::string messages_json = "[]"; // initial history
-  bool enable_constrained_decoding = false;
+
+  // When true, the conversation is built via
+  // litert_lm_engine_create_constrained_conversation (P8 C bridge) which
+  // attaches an LLGuidance Lark grammar derived from `tools_json` to every
+  // send. The model's tool-call output is then constrained to match the
+  // tools' parameter schemas. Requires tools_json to be a non-empty array
+  // to take effect.
+  bool constrained_tool_calls = false;
+
   int max_output_tokens = 1024;
 };
 
@@ -91,7 +99,12 @@ class LiteRtLmConversation {
 
   std::shared_ptr<LiteRtLmEngine> engine_;  // keep engine alive
   ::LiteRtLmConversation* conv_;            // owned
-  ::LiteRtLmConversationConfig* config_;    // owned
+  ::LiteRtLmConversationConfig* config_;    // owned; null when conv_ was
+                                            // built via the constrained C
+                                            // factory which doesn't take a
+                                            // separate config handle.
+  bool constrained_ = false;                // routes SendMessageSync to the
+                                            // C bridge's constrained send.
   asio::io_context& io_;
   asio::experimental::concurrent_channel<void(asio::error_code, std::string)> channel_;
   std::atomic<bool> cancelled_{false};

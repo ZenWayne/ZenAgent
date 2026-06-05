@@ -14,6 +14,7 @@ cc_test(
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
     ],
     tags = ["manual"],  # requires MODEL_PATH env
 )

@@ -37,6 +37,13 @@ struct AgentNodeConfig {
   // Tool names to advertise in the LLM request.
   // If empty, all registered tools are exported.
   std::vector<std::string> tool_names;
+
+  // When true AND tool_registry is set, drive the LiteRT-LM Conversation
+  // through the constrained C bridge (LiteRT-LM/c/engine.h §
+  // litert_lm_engine_create_constrained_conversation). The model's tool-call
+  // arguments are then forced by an LLGuidance Lark grammar derived from
+  // the tools' parameter schemas to match the schema exactly.
+  bool constrained_tool_calls = false;
 };
 
 class AgentNode : public Node {
