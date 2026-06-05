@@ -98,6 +98,7 @@ asio::awaitable<State> AgentNode::Run(
   opts.system_message_json = BuildSystemMessageJson();
   opts.tools_json = BuildToolsJson();
   opts.max_output_tokens = cfg_.max_output_tokens;
+  opts.constrained_tool_calls = cfg_.constrained_tool_calls;
 
   auto conv = LiteRtLmConversation::Create(cfg_.engine, std::move(opts),
                                             *cfg_.io_ctx);
