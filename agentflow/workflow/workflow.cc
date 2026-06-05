@@ -9,9 +9,10 @@ namespace agentflow::workflow {
 Workflow::Workflow(proto::WorkflowSpec spec) : spec_(std::move(spec)) {}
 
 ::agentflow::State Workflow::NewEmptyState() const {
-  if (spec_.state().kind() == "dynamic_json") {
+  const auto& st = spec_.state();
+  if (st.kind() == "dynamic_json") {
     nlohmann::ordered_json fields;
-    for (const auto& [name, decl] : spec_.state().fields()) {
+    for (const auto& [name, decl] : st.fields()) {
       nlohmann::ordered_json f = nlohmann::ordered_json::object();
       f["type"] = decl.type();
       if (!decl.default_value_json().empty()) {
@@ -23,7 +24,9 @@ Workflow::Workflow(proto::WorkflowSpec spec) : spec_(std::move(spec)) {}
     }
     return ::agentflow::State::FromJson(fields);
   }
-  // tier 2/3 land in P14+.
+  if (st.kind() == "proto_dynamic" && state_pool_) {
+    return ::agentflow::State::FromDynamicProto(state_pool_, st.message_type());
+  }
   return {};
 }
 
