@@ -50,10 +50,17 @@ cc_library(
 )
 
 cc_library(
+    name = "hmac_sha256",
+    srcs = ["hmac_sha256.cc"],
+    hdrs = ["hmac_sha256.h"],
+)
+
+cc_library(
     name = "workflow_loader",
     srcs = ["workflow_loader.cc"],
     hdrs = ["workflow_loader.h"],
     deps = [
+        ":hmac_sha256",
         ":template_engine",
         ":workflow",
         "//agentflow/core",
