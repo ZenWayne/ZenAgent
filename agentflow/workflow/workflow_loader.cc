@@ -1,8 +1,11 @@
 #include "agentflow/workflow/workflow_loader.h"
 
 #include <fstream>
+#include <functional>
+#include <map>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -11,6 +14,7 @@
 #include <absl/strings/str_cat.h>
 #include <nlohmann/json.hpp>
 
+#include "agentflow/workflow/hmac_sha256.h"
 #include "agentflow/workflow/template_engine.h"
 #include "workflow_spec.pb.h"
 
@@ -375,6 +379,57 @@ absl::Status CheckAcyclic(const proto::WorkflowSpec& spec) {
   return absl::OkStatus();
 }
 
+// Canonical JSON: recursively sort object keys, strip top-level "signing".
+// Used as the signed payload — the signature is computed over this canonical
+// form, not over the author's original bytes, so reformatting/reordering of
+// the author's JSON doesn't invalidate the signature.
+std::string CanonicalForm(const nlohmann::ordered_json& root_in) {
+  std::function<nlohmann::json(const nlohmann::ordered_json&, bool)> canon =
+      [&](const nlohmann::ordered_json& v, bool is_root) -> nlohmann::json {
+    if (v.is_object()) {
+      std::map<std::string, nlohmann::json> sorted;
+      for (auto it = v.begin(); it != v.end(); ++it) {
+        if (is_root && it.key() == "signing") continue;
+        sorted[it.key()] = canon(it.value(), false);
+      }
+      nlohmann::json out = nlohmann::json::object();
+      for (auto& [k, val] : sorted) out[k] = std::move(val);
+      return out;
+    }
+    if (v.is_array()) {
+      nlohmann::json out = nlohmann::json::array();
+      for (const auto& el : v) out.push_back(canon(el, false));
+      return out;
+    }
+    return v;
+  };
+  return canon(root_in, /*is_root=*/true).dump();
+}
+
+absl::Status VerifySignature(const std::string& canonical,
+                              const proto::WorkflowSpec& spec,
+                              KeyResolver& resolver) {
+  const auto& sig = spec.signing();
+  if (sig.algo() != "HMAC-SHA256") {
+    return absl::InvalidArgumentError(
+        absl::StrCat("unsupported signing algo '", sig.algo(), "'"));
+  }
+  auto key_or = resolver.Resolve(sig.key_id());
+  if (!key_or.ok()) return key_or.status();
+  std::string expected = HmacSha256Base64(*key_or, canonical);
+  // Compare as raw strings. Constant-time isn't strictly needed for control-
+  // plane workflows but a length-first guard is cheap.
+  std::string_view supplied(reinterpret_cast<const char*>(sig.signature().data()),
+                            sig.signature().size());
+  if (expected.size() != supplied.size()) {
+    return absl::InvalidArgumentError("signature_invalid");
+  }
+  unsigned diff = 0;
+  for (size_t i = 0; i < expected.size(); ++i) diff |= expected[i] ^ supplied[i];
+  if (diff != 0) return absl::InvalidArgumentError("signature_invalid");
+  return absl::OkStatus();
+}
+
 }  // namespace
 
 absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
@@ -408,7 +463,32 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
   if (auto s = CheckReferences(spec, host_tools); !s.ok()) return s;
   if (auto s = CheckAcyclic(spec); !s.ok()) return s;
   if (auto s = CheckTemplates(spec); !s.ok()) return s;
-  // Signing verification lands in Task 3.6.
+
+  // Signing verification. The signature is computed over a canonical JSON
+  // form (sorted keys, no whitespace, top-level "signing" stripped) — this
+  // decouples the verifier from author-side formatting.
+  //
+  // Three cases:
+  //   1. has_signing && opts.key_resolver  → verify, must match.
+  //   2. has_signing && !opts.key_resolver → permissive (signature ignored).
+  //      This is the dev-host escape hatch; production hosts must wire a
+  //      resolver and (typically) set require_signed=true.
+  //   3. !has_signing && opts.require_signed → reject.
+  const bool has_signing = spec.has_signing() &&
+                           (!spec.signing().algo().empty() ||
+                            !spec.signing().signature().empty());
+  if (has_signing) {
+    if (opts.key_resolver != nullptr) {
+      const std::string canon = CanonicalForm(root);
+      if (auto s = VerifySignature(canon, spec, *opts.key_resolver); !s.ok()) {
+        return s;
+      }
+    }
+    // else: permissive — accept without verification. A future change may
+    // emit SIGNED_WORKFLOW_UNVERIFIED via opts.trace.
+  } else if (opts.require_signed) {
+    return absl::FailedPreconditionError("signature_required");
+  }
 
   return std::make_shared<Workflow>(std::move(spec));
 }

@@ -42,10 +42,12 @@ cc_test(
     srcs = ["workflow_loader_test.cc"],
     deps = [
         "//agentflow/tools",
+        "//agentflow/workflow:hmac_sha256",
         "//agentflow/workflow:workflow_loader",
         "@abseil-cpp//absl/strings",
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
     ],
 )
