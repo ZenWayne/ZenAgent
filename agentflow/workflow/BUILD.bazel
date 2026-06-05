@@ -37,3 +37,30 @@ cc_library(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_library(
+    name = "workflow",
+    srcs = ["workflow.cc"],
+    hdrs = ["workflow.h"],
+    deps = [
+        "//agentflow/core",
+        "//proto:agentflow_proto",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "workflow_loader",
+    srcs = ["workflow_loader.cc"],
+    hdrs = ["workflow_loader.h"],
+    deps = [
+        ":workflow",
+        "//agentflow/core",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
