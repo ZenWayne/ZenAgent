@@ -1,0 +1,26 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "json_path_test",
+    size = "small",
+    srcs = ["json_path_test.cc"],
+    deps = [
+        "//agentflow/workflow:json_path",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "template_engine_test",
+    size = "small",
+    srcs = ["template_engine_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/workflow:template_engine",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)

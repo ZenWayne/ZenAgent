@@ -1,0 +1,39 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "eval_context",
+    hdrs = ["eval_context.h"],
+    deps = [
+        "//agentflow/core",
+        "@abseil-cpp//absl/time",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "json_path",
+    srcs = ["json_path.cc"],
+    hdrs = ["json_path.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "template_engine",
+    srcs = ["template_engine.cc"],
+    hdrs = ["template_engine.h"],
+    deps = [
+        ":eval_context",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@nlohmann_json//:json",
+    ],
+)
