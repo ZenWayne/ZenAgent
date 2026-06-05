@@ -1,0 +1,67 @@
+# jni/BUILD.bazel
+#
+# Builds libagentflow_jni.so — the JNI shared library that the Kotlin/JVM
+# layer loads via System.loadLibrary("agentflow_jni"). Pulls in all the
+# C++ agentflow surface needed for the MVP runAgent path.
+
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_binary(
+    name = "libagentflow_jni.so",
+    srcs = ["agentflow_jni.cc"],
+    linkshared = True,
+    # `-z notext` allows text relocations in the .so. Needed because some
+    # objects in libce_external.a (vendored RE2 in particular) weren't
+    # compiled with -fPIC and would otherwise fail to link with ld.gold.
+    # JVMs load such .so's fine at the cost of one mprotect at load time.
+    linkopts = [
+        "-Wl,-z,notext",
+    ],
+    deps = [
+        ":jdk_headers",
+        "//agentflow/core",
+        "//agentflow/inference",
+        "//agentflow/nodes",
+        "//proto:agentflow_proto",
+        "@asio",
+    ],
+)
+
+# System JDK header exposure. We can't use absolute -I copts in Bazel's
+# sandbox, and Bazel's @local_jdk doesn't work without rules_java setup.
+# Workaround: symlink the system jni.h tree into our package at config time
+# and expose it as a normal cc_library.
+genrule(
+    name = "copy_jni_headers",
+    outs = [
+        "jdk/jni.h",
+        "jdk/linux/jni_md.h",
+    ],
+    cmd = """
+        # /usr/lib/jvm/default is the Arch convention. Other distros differ
+        # (Debian/Ubuntu: /usr/lib/jvm/default-java). We probe a small set.
+        for base in /usr/lib/jvm/default /usr/lib/jvm/default-java /usr/lib/jvm/java-17-openjdk; do
+            if [ -f "$$base/include/jni.h" ]; then
+                cp "$$base/include/jni.h" $(location jdk/jni.h)
+                cp "$$base/include/linux/jni_md.h" $(location jdk/linux/jni_md.h)
+                exit 0
+            fi
+        done
+        echo "Could not find system jni.h" >&2
+        exit 1
+    """,
+)
+
+cc_library(
+    name = "jdk_headers",
+    hdrs = [
+        "jdk/jni.h",
+        "jdk/linux/jni_md.h",
+    ],
+    includes = [
+        "jdk",
+        "jdk/linux",
+    ],
+)
