@@ -38,6 +38,29 @@ std::shared_ptr<LiteRtLmConversation> LiteRtLmConversation::Create(
   const char* tools = opts.tools_json.empty() || opts.tools_json == "[]"
                           ? nullptr
                           : opts.tools_json.c_str();
+
+  struct Enabler : LiteRtLmConversation {
+    Enabler(::LiteRtLmConversation* c, ::LiteRtLmConversationConfig* cfg,
+            std::shared_ptr<LiteRtLmEngine> e, asio::io_context& io)
+        : LiteRtLmConversation(c, cfg, std::move(e), io) {}
+  };
+
+  // ── P8 constrained decoding path: LLGuidance + auto Lark grammar ─────────
+  // The constrained C bridge owns its own config internally, so we pass
+  // nullptr for the config_ field. The bridge requires tools to be useful
+  // (no tools → empty grammar → behaves as if unconstrained).
+  if (opts.constrained_tool_calls && tools != nullptr) {
+    ::LiteRtLmConversation* conv =
+        litert_lm_engine_create_constrained_conversation(
+            engine->Get(), sys, tools);
+    if (!conv) return nullptr;
+    auto self = std::make_shared<Enabler>(conv, /*cfg=*/nullptr,
+                                            std::move(engine), io_ctx);
+    self->constrained_ = true;
+    return self;
+  }
+
+  // ── Standard path ────────────────────────────────────────────────────────
   const char* msgs = opts.messages_json.empty() || opts.messages_json == "[]"
                          ? nullptr
                          : opts.messages_json.c_str();
@@ -45,7 +68,7 @@ std::shared_ptr<LiteRtLmConversation> LiteRtLmConversation::Create(
       engine->Get(),
       /*session_config=*/nullptr,
       sys, tools, msgs,
-      opts.enable_constrained_decoding);
+      /*enable_constrained_decoding=*/false);
   if (!cfg) return nullptr;
 
   ::LiteRtLmConversation* conv = litert_lm_conversation_create(
@@ -54,13 +77,6 @@ std::shared_ptr<LiteRtLmConversation> LiteRtLmConversation::Create(
     litert_lm_conversation_config_delete(cfg);
     return nullptr;
   }
-
-  // shared_ptr aliased to private ctor via make_shared trick.
-  struct Enabler : LiteRtLmConversation {
-    Enabler(::LiteRtLmConversation* c, ::LiteRtLmConversationConfig* cfg,
-            std::shared_ptr<LiteRtLmEngine> e, asio::io_context& io)
-        : LiteRtLmConversation(c, cfg, std::move(e), io) {}
-  };
   return std::make_shared<Enabler>(conv, cfg, std::move(engine), io_ctx);
 }
 
@@ -80,6 +96,24 @@ absl::StatusOr<std::string> LiteRtLmConversation::SendMessageSync(
     const std::string& message_json, const std::string& extra_context) {
   if (!conv_) {
     return absl::FailedPreconditionError("conversation not created");
+  }
+  // Constrained conversations go through the P8 bridge — it attaches the
+  // pre-built Lark grammar as the decoding constraint for this turn.
+  if (constrained_) {
+    ::LiteRtLmJsonResponse* resp =
+        litert_lm_conversation_send_message_constrained(
+            conv_, message_json.c_str());
+    if (!resp) {
+      return absl::InternalError("constrained send_message returned null");
+    }
+    const char* s = litert_lm_json_response_get_string(resp);
+    std::string out = s ? std::string(s) : std::string{};
+    litert_lm_json_response_delete(resp);
+    {
+      std::lock_guard<std::mutex> lk(accum_mu_);
+      accum_ = out;
+    }
+    return out;
   }
   ::LiteRtLmJsonResponse* resp = litert_lm_conversation_send_message(
       conv_, message_json.c_str(),
