@@ -109,7 +109,6 @@ absl::StatusOr<TemplateString> TemplateString::Parse(std::string_view expr) {
             "unknown path head '", parts.empty() ? "" : parts[0],
             "' (allowed: state, parent, tool, workflow, now)"));
       }
-      out.paths_.push_back(parts);
       out.segs_.emplace_back(PathSeg{std::move(parts)});
       ++subst_count;
       i = close + 2;
@@ -123,6 +122,14 @@ absl::StatusOr<TemplateString> TemplateString::Parse(std::string_view expr) {
   }
   if (!lit.empty()) out.segs_.emplace_back(LiteralSeg{std::move(lit)});
   out.single_substitution_ = subst_count == 1 && out.segs_.size() == 1;
+  return out;
+}
+
+std::vector<std::vector<std::string>> TemplateString::paths() const {
+  std::vector<std::vector<std::string>> out;
+  for (const auto& seg : segs_) {
+    if (const auto* p = std::get_if<PathSeg>(&seg)) out.push_back(p->parts);
+  }
   return out;
 }
 

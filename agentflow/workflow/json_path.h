@@ -15,8 +15,9 @@ namespace agentflow::workflow {
 // JSONPath subset: $.field[N].field. No filters, no wildcards, no recursive descent.
 class JsonPath {
  public:
-  static absl::StatusOr<JsonPath> Parse(std::string_view expr);
-  std::optional<nlohmann::ordered_json> Resolve(const nlohmann::ordered_json& root) const;
+  [[nodiscard]] static absl::StatusOr<JsonPath> Parse(std::string_view expr);
+  [[nodiscard]] std::optional<nlohmann::ordered_json> Resolve(
+      const nlohmann::ordered_json& root) const;
  private:
   using Segment = std::variant<std::string, int>;
   std::vector<Segment> segments_;

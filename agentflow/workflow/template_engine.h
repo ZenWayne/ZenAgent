@@ -19,11 +19,14 @@ namespace agentflow::workflow {
 // or a string (interpolation mode).
 class TemplateString {
  public:
-  static absl::StatusOr<TemplateString> Parse(std::string_view expr);
+  [[nodiscard]] static absl::StatusOr<TemplateString> Parse(std::string_view expr);
   std::string_view source() const { return source_; }
-  const std::vector<std::vector<std::string>>& paths() const { return paths_; }
+  // Materialize the list of substitution path heads/parts on demand from the
+  // parsed segments. Phase 3's loader uses this to validate that referenced
+  // {{state.X}} paths exist in the agent's state schema.
+  std::vector<std::vector<std::string>> paths() const;
   bool single_substitution() const { return single_substitution_; }
-  nlohmann::ordered_json Evaluate(const EvalContext& ctx) const;
+  [[nodiscard]] nlohmann::ordered_json Evaluate(const EvalContext& ctx) const;
 
  private:
   struct LiteralSeg { std::string text; };
@@ -31,7 +34,6 @@ class TemplateString {
   using Segment = std::variant<LiteralSeg, PathSeg>;
   std::string source_;
   std::vector<Segment> segs_;
-  std::vector<std::vector<std::string>> paths_;
   bool single_substitution_ = false;
 };
 
