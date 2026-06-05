@@ -51,3 +51,17 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "workflow_registry_test",
+    size = "small",
+    srcs = ["workflow_registry_test.cc"],
+    deps = [
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow_loader",
+        "//agentflow/workflow:workflow_registry",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
