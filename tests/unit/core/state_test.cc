@@ -57,5 +57,39 @@ TEST(StateTest, ClonePreservesData) {
   EXPECT_EQ(s.As<test::TestState>().counter(), 11);  // original untouched
 }
 
+// Cross-arm parity: ReadStringField/WriteStringField against a proto-backed
+// State must round-trip a TYPE_STRING field, mirroring the JSON-arm contract
+// covered in state_json_test.cc.
+TEST(StateProtoTest, ReadWriteStringFieldRoundTrip) {
+  State s = State::Empty<test::TestState>();
+  WriteStringField(s, "last_node", "hello");
+
+  EXPECT_EQ(ReadStringField(s, "last_node"), "hello");
+  // And confirm the proto field really got set, not just an out-of-band cache.
+  EXPECT_EQ(s.As<test::TestState>().last_node(), "hello");
+}
+
+// Per the header contract: read on a missing/non-string field returns "";
+// write on a missing/non-string field silently noops.
+TEST(StateProtoTest, ReadMissingFieldReturnsEmptyWriteNonStringNoops) {
+  State s = State::Empty<test::TestState>();
+  s.Mutable<test::TestState>().set_counter(7);
+
+  // Unknown field name -> empty read.
+  EXPECT_EQ(ReadStringField(s, "no_such_field"), "");
+  // Non-string field (int32) -> empty read.
+  EXPECT_EQ(ReadStringField(s, "counter"), "");
+  // Submessage field -> empty read.
+  EXPECT_EQ(ReadStringField(s, "query"), "");
+
+  // Writes to unknown / non-string fields must be silent noops; counter must
+  // remain unchanged and no exception may escape.
+  WriteStringField(s, "no_such_field", "ignored");
+  WriteStringField(s, "counter", "99");
+  WriteStringField(s, "query", "also-ignored");
+  EXPECT_EQ(s.As<test::TestState>().counter(), 7);
+  EXPECT_FALSE(s.As<test::TestState>().has_query());
+}
+
 }  // namespace
 }  // namespace agentflow

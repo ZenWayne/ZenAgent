@@ -50,6 +50,9 @@ class State {
   [[nodiscard]] static State FromJson(
       const nlohmann::ordered_json& fields_decl);
 
+  // Returns the active variant arm. A default-constructed State returns
+  // Kind::Proto with a null underlying pointer; callers should check
+  // IsEmpty() first before relying on the arm's contents.
   [[nodiscard]] Kind kind() const noexcept;
 
   template <typename ProtoT>
