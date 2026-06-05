@@ -54,6 +54,7 @@ cc_library(
     srcs = ["workflow_loader.cc"],
     hdrs = ["workflow_loader.h"],
     deps = [
+        ":template_engine",
         ":workflow",
         "//agentflow/core",
         "//agentflow/tools",

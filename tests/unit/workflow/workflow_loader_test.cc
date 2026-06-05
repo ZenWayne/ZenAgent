@@ -86,5 +86,25 @@ TEST(WorkflowLoaderTest, RejectMalformedJson) {
   EXPECT_FALSE(WorkflowLoader::Load("{not json", host_tools).ok());
 }
 
+TEST(WorkflowLoaderTest, RejectTemplateReferencingUnknownStateField) {
+  std::string bad = R"({
+    "schema_version": 1,
+    "name":"x","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{"only_field":{"type":"string"}}},
+    "agents":{
+      "a":{"system_prompt":"","model":{},"tools":[],
+           "delegates":{"agents":["b"],"max_depth":2,
+                         "input_template":{"u":"{{state.does_not_exist}}"}}},
+      "b":{"system_prompt":"","model":{},"tools":[]}
+    },
+    "main":"a"
+  })";
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(bad, host_tools);
+  EXPECT_FALSE(wf_or.ok());
+  EXPECT_TRUE(absl::StrContains(wf_or.status().message(), "does_not_exist"));
+}
+
 }  // namespace
 }  // namespace agentflow::workflow

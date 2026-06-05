@@ -11,6 +11,7 @@
 #include <absl/strings/str_cat.h>
 #include <nlohmann/json.hpp>
 
+#include "agentflow/workflow/template_engine.h"
 #include "workflow_spec.pb.h"
 
 namespace agentflow::workflow {
@@ -285,6 +286,57 @@ absl::Status CheckReferences(const proto::WorkflowSpec& spec,
   return absl::OkStatus();
 }
 
+absl::Status CheckOneTemplate(const std::string& agent_name,
+                                const std::string& location,
+                                const std::string& source,
+                                const std::unordered_set<std::string>&
+                                    state_field_names) {
+  auto parsed = TemplateString::Parse(source);
+  if (!parsed.ok()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "agent '", agent_name, "' ", location, ": ",
+        parsed.status().message()));
+  }
+  for (const auto& parts : parsed->paths()) {
+    if (parts.empty()) continue;
+    if (parts[0] != "state") continue;  // runtime-resolved heads checked later.
+    if (parts.size() < 2) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "agent '", agent_name, "' ", location,
+          ": template '{{state}}' missing field name"));
+    }
+    if (state_field_names.find(parts[1]) == state_field_names.end()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "agent '", agent_name, "' ", location, ": references unknown state field '",
+          parts[1], "'"));
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status CheckTemplates(const proto::WorkflowSpec& spec) {
+  std::unordered_set<std::string> state_field_names;
+  for (const auto& [k, _] : spec.state().fields()) state_field_names.insert(k);
+  for (const auto& [agent_name, def] : spec.agents()) {
+    if (!def.has_delegates()) continue;
+    const auto& d = def.delegates();
+    if (!d.goal_template().empty()) {
+      if (auto s = CheckOneTemplate(agent_name, "delegates.goal_template",
+                                      d.goal_template(), state_field_names);
+          !s.ok())
+        return s;
+    }
+    for (const auto& [key, tmpl] : d.input_template()) {
+      if (auto s = CheckOneTemplate(
+              agent_name, absl::StrCat("delegates.input_template[", key, "]"),
+              tmpl, state_field_names);
+          !s.ok())
+        return s;
+    }
+  }
+  return absl::OkStatus();
+}
+
 absl::Status CheckAcyclic(const proto::WorkflowSpec& spec) {
   // Iterative DFS with white/gray/black coloring rooted at every agent.
   enum Color : uint8_t { kWhite = 0, kGray, kBlack };
@@ -355,7 +407,7 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
     return s;
   if (auto s = CheckReferences(spec, host_tools); !s.ok()) return s;
   if (auto s = CheckAcyclic(spec); !s.ok()) return s;
-  // Template validation lands in Task 3.5.
+  if (auto s = CheckTemplates(spec); !s.ok()) return s;
   // Signing verification lands in Task 3.6.
 
   return std::make_shared<Workflow>(std::move(spec));
