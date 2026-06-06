@@ -28,6 +28,9 @@ class EventEmitter {
   void EmitNodeFailed(std::string_view node_id, std::string_view type,
                        std::string_view message);
   void EmitGraphDone(bool failed);
+  void EmitWorkflowRegistered(std::string_view name, std::string_view version,
+                                bool signed_value, std::string_view key_id);
+  void EmitWorkflowUnregistered(std::string_view name, std::string_view version);
 
  protected:
   static int64_t NowMicros();

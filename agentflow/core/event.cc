@@ -103,4 +103,30 @@ void EventEmitter::EmitGraphDone(bool failed) {
   Emit(std::move(ev));
 }
 
+void EventEmitter::EmitWorkflowRegistered(std::string_view name,
+                                            std::string_view version,
+                                            bool signed_value,
+                                            std::string_view key_id) {
+  proto::TraceEvent ev;
+  ev.set_kind(proto::TraceEvent::WORKFLOW_REGISTERED);
+  ev.set_unix_micros(NowMicros());
+  auto* p = ev.mutable_workflow_registered();
+  p->set_name(std::string(name));
+  p->set_version(std::string(version));
+  p->set_signed_(signed_value);
+  p->set_key_id(std::string(key_id));
+  Emit(std::move(ev));
+}
+
+void EventEmitter::EmitWorkflowUnregistered(std::string_view name,
+                                              std::string_view version) {
+  proto::TraceEvent ev;
+  ev.set_kind(proto::TraceEvent::WORKFLOW_UNREGISTERED);
+  ev.set_unix_micros(NowMicros());
+  auto* p = ev.mutable_workflow_unregistered();
+  p->set_name(std::string(name));
+  p->set_version(std::string(version));
+  Emit(std::move(ev));
+}
+
 }  // namespace agentflow
