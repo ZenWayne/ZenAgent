@@ -61,6 +61,20 @@ cc_test(
 )
 
 cc_test(
+    name = "agent_node_extras_test",
+    size = "small",
+    srcs = ["agent_node_extras_test.cc"],
+    deps = [
+        "//agentflow/nodes",
+        "//agentflow/tools",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
     name = "aggregator_node_test",
     size = "small",
     srcs = ["aggregator_node_test.cc"],

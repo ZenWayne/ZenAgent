@@ -44,8 +44,24 @@ std::string AgentNode::BuildSystemMessageJson() const {
 }
 
 std::string AgentNode::BuildToolsJson() const {
-  if (!cfg_.tool_registry) return "[]";
-  return cfg_.tool_registry->ExportToolsJson(cfg_.tool_names);
+  if (!cfg_.tool_registry && cfg_.extra_tools.empty()) return "[]";
+  json arr;
+  if (cfg_.tool_registry) {
+    arr = json::parse(cfg_.tool_registry->ExportToolsJson(cfg_.tool_names));
+  } else {
+    arr = json::array();
+  }
+  for (const auto& tool : cfg_.extra_tools) {
+    if (!tool) continue;
+    const auto& schema = tool->Schema();
+    json entry = {{"type", "function"},
+                  {"function", {{"name", schema.name},
+                                {"description", schema.description},
+                                {"parameters",
+                                 json::parse(schema.params_json_schema)}}}};
+    arr.push_back(std::move(entry));
+  }
+  return arr.dump();
 }
 
 std::string AgentNode::BuildUserMessageJson(const State& state) const {
@@ -161,6 +177,21 @@ asio::awaitable<State> AgentNode::Run(
 asio::awaitable<std::string> AgentNode::DispatchTool(
     const std::string& name, const std::string& args,
     const CancelToken& cancel, EventEmitter& emit) {
+  // Extras take precedence over the registry on name collisions.
+  for (const auto& tool : cfg_.extra_tools) {
+    if (!tool) continue;
+    if (tool->Schema().name == name) {
+      emit.EmitToolCall(Id(), name, args);
+      std::string result;
+      try {
+        result = co_await tool->Invoke(args, cancel);
+      } catch (const std::exception& e) {
+        result = std::string("Tool error: ") + e.what();
+      }
+      emit.EmitToolReturn(Id(), name, result);
+      co_return result;
+    }
+  }
   if (!cfg_.tool_registry) co_return std::string{};
 
   emit.EmitToolCall(Id(), name, args);

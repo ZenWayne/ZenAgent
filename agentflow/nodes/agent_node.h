@@ -16,6 +16,7 @@
 #include "agentflow/core/state.h"
 #include "agentflow/inference/litert_lm_conversation.h"
 #include "agentflow/inference/litert_lm_engine.h"
+#include "agentflow/tools/tool.h"
 #include "agentflow/tools/tool_registry.h"
 
 namespace agentflow {
@@ -37,6 +38,12 @@ struct AgentNodeConfig {
   // Tool names to advertise in the LLM request.
   // If empty, all registered tools are exported.
   std::vector<std::string> tool_names;
+
+  // Tools added inline (not through the shared ToolRegistry). Used by the
+  // workflow runner to inject the auto-generated `delegate` tool for an
+  // agent with a delegates block, without mutating the host's registry.
+  // Extras take precedence over registry tools when names collide.
+  std::vector<std::shared_ptr<Tool>> extra_tools;
 
   // When true AND tool_registry is set, drive the LiteRT-LM Conversation
   // through the constrained C bridge (LiteRT-LM/c/engine.h §
