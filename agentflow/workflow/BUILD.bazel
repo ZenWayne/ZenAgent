@@ -45,6 +45,7 @@ cc_library(
     deps = [
         "//agentflow/core",
         "//proto:agentflow_proto",
+        "@com_google_protobuf//:protobuf",
         "@nlohmann_json//:json",
     ],
 )
@@ -106,6 +107,7 @@ cc_library(
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@boringssl//:crypto",
+        "@com_google_protobuf//:protobuf",
         "@nlohmann_json//:json",
     ],
 )

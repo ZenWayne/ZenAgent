@@ -6,15 +6,20 @@
 #include <string_view>
 
 #include <gtest/gtest.h>
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <asio/io_context.hpp>
+#include <google/protobuf/descriptor.h>
+#include <google/protobuf/descriptor.pb.h>
 #include <nlohmann/json.hpp>
 
 #include <openssl/base64.h>
 #include <openssl/digest.h>
 #include <openssl/hmac.h>
 
+#include "agentflow/core/state.h"
 #include "agentflow/tools/tool_registry.h"
+#include "test_messages.pb.h"
 
 namespace agentflow::workflow {
 namespace {
@@ -223,6 +228,80 @@ TEST(WorkflowLoaderTest, BadSignatureRejected) {
   auto wf_or = WorkflowLoader::Load(j.dump(), host_tools, opts);
   EXPECT_FALSE(wf_or.ok());
   EXPECT_TRUE(absl::StrContains(wf_or.status().message(), "signature"));
+}
+
+// ---- Tier-3 (proto_dynamic) -------------------------------------------------
+
+TEST(WorkflowLoaderTest, Tier3LoadsAndProducesProtoDynamicState) {
+  google::protobuf::FileDescriptorProto fdp;
+  agentflow::test::TestState::descriptor()->file()->CopyTo(&fdp);
+  google::protobuf::FileDescriptorSet fds;
+  *fds.add_file() = fdp;
+  std::string desc_bytes;
+  fds.SerializeToString(&desc_bytes);
+  std::string b64;
+  absl::Base64Escape(desc_bytes, &b64);
+
+  std::string json = std::string(R"({
+    "schema_version":1,"name":"x","version":"v1",
+    "state":{"kind":"proto_dynamic",
+              "message_type":"agentflow.test.TestState",
+              "descriptor_set_b64":")") + b64 + std::string(R"("},
+    "agents":{"a":{"system_prompt":"","model":{},"tools":[]}},
+    "main":"a"
+  })");
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(json, host_tools);
+  ASSERT_TRUE(wf_or.ok()) << wf_or.status();
+
+  // Don't trust ok() alone: the loaded workflow must actually carry the
+  // descriptor pool + factory and mint a usable tier-3 message. Verify by
+  // exercising the produced state's fields, not just its kind tag.
+  ::agentflow::State s = (*wf_or)->NewEmptyState();
+  ASSERT_EQ(s.kind(), ::agentflow::State::Kind::ProtoDynamic);
+
+  // A freshly minted dynamic message starts empty.
+  EXPECT_EQ(ReadStringField(s, "user_query"), "");
+
+  // Reflection-based read/write must round-trip through the dynamic message
+  // that the loader's descriptor pool produced.
+  WriteStringField(s, "user_query", "hello");
+  WriteStringField(s, "last_node", "node-7");
+  EXPECT_EQ(ReadStringField(s, "user_query"), "hello");
+  EXPECT_EQ(ReadStringField(s, "last_node"), "node-7");
+
+  // Independent states from the same workflow don't share field storage.
+  ::agentflow::State s2 = (*wf_or)->NewEmptyState();
+  EXPECT_EQ(ReadStringField(s2, "user_query"), "");
+  EXPECT_EQ(ReadStringField(s, "user_query"), "hello");
+}
+
+TEST(WorkflowLoaderTest, Tier3RejectsMissingDescriptorSet) {
+  std::string json = R"({
+    "schema_version":1,"name":"x","version":"v1",
+    "state":{"kind":"proto_dynamic","message_type":"agentflow.test.TestState"},
+    "agents":{"a":{"system_prompt":"","model":{},"tools":[]}},
+    "main":"a"
+  })";
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(json, host_tools);
+  EXPECT_FALSE(wf_or.ok());
+}
+
+TEST(WorkflowLoaderTest, Tier3RejectsBadDescriptorSet) {
+  std::string json = R"({
+    "schema_version":1,"name":"x","version":"v1",
+    "state":{"kind":"proto_dynamic","message_type":"agentflow.test.TestState",
+              "descriptor_set_b64":"!!!not_base64!!!"},
+    "agents":{"a":{"system_prompt":"","model":{},"tools":[]}},
+    "main":"a"
+  })";
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(json, host_tools);
+  EXPECT_FALSE(wf_or.ok());
 }
 
 }  // namespace

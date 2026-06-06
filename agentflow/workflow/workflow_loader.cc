@@ -11,7 +11,10 @@
 #include <vector>
 
 #include <absl/status/status.h>
+#include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
+#include <google/protobuf/descriptor.h>
+#include <google/protobuf/descriptor.pb.h>
 #include <nlohmann/json.hpp>
 #include <openssl/base64.h>
 #include <openssl/digest.h>
@@ -41,6 +44,10 @@ absl::Status ParseStateSpec(const ordered_json& j,
   if (auto it = j.find("descriptor_set_path");
       it != j.end() && it->is_string()) {
     out->set_descriptor_set_path(it->get<std::string>());
+  }
+  if (auto it = j.find("descriptor_set_b64");
+      it != j.end() && it->is_string()) {
+    out->set_descriptor_set_b64(it->get<std::string>());
   }
   if (auto it = j.find("fields"); it != j.end()) {
     if (!it->is_object()) {
@@ -511,7 +518,59 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
     return absl::FailedPreconditionError("signature_required");
   }
 
-  return std::make_shared<Workflow>(std::move(spec));
+  // Tier-3 (proto_dynamic) state: build a DescriptorPool from the supplied
+  // FileDescriptorSet (preferred: descriptor_set_b64 inline; fallback:
+  // descriptor_set_path on disk). The pool is held on the Workflow so any
+  // State produced by NewEmptyState() remains valid for the workflow's
+  // lifetime. Reflection (ReadStringField/WriteStringField) on the resulting
+  // Message works unchanged.
+  std::shared_ptr<google::protobuf::DescriptorPool> state_pool;
+  if (spec.state().kind() == "proto_dynamic") {
+    std::string desc_bytes;
+    if (!spec.state().descriptor_set_b64().empty()) {
+      if (!absl::Base64Unescape(spec.state().descriptor_set_b64(),
+                                  &desc_bytes)) {
+        return absl::InvalidArgumentError("descriptor_set_b64 decode failed");
+      }
+    } else if (!spec.state().descriptor_set_path().empty()) {
+      std::ifstream in(spec.state().descriptor_set_path(), std::ios::binary);
+      if (!in) {
+        return absl::NotFoundError(absl::StrCat(
+            "descriptor_set_path not readable: ",
+            spec.state().descriptor_set_path()));
+      }
+      std::stringstream ss;
+      ss << in.rdbuf();
+      desc_bytes = ss.str();
+    } else {
+      return absl::InvalidArgumentError(
+          "proto_dynamic requires descriptor_set_path or descriptor_set_b64");
+    }
+    google::protobuf::FileDescriptorSet fds;
+    if (!fds.ParseFromString(desc_bytes)) {
+      return absl::InvalidArgumentError("descriptor_set parse failed");
+    }
+    state_pool = std::make_shared<google::protobuf::DescriptorPool>();
+    for (const auto& fdp : fds.file()) {
+      if (state_pool->BuildFile(fdp) == nullptr) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("BuildFile failed for ", fdp.name()));
+      }
+    }
+    if (spec.state().message_type().empty()) {
+      return absl::InvalidArgumentError(
+          "proto_dynamic requires message_type");
+    }
+    if (!state_pool->FindMessageTypeByName(spec.state().message_type())) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "descriptor for ", spec.state().message_type(),
+          " not found in supplied set"));
+    }
+  }
+
+  auto workflow = std::make_shared<Workflow>(std::move(spec));
+  if (state_pool) workflow->SetStatePool(std::move(state_pool));
+  return workflow;
 }
 
 absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::LoadFromFile(
