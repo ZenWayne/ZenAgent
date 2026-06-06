@@ -50,12 +50,6 @@ cc_library(
 )
 
 cc_library(
-    name = "hmac_sha256",
-    srcs = ["hmac_sha256.cc"],
-    hdrs = ["hmac_sha256.h"],
-)
-
-cc_library(
     name = "workflow_registry",
     srcs = ["workflow_registry.cc"],
     hdrs = ["workflow_registry.h"],
@@ -103,7 +97,6 @@ cc_library(
     srcs = ["workflow_loader.cc"],
     hdrs = ["workflow_loader.h"],
     deps = [
-        ":hmac_sha256",
         ":template_engine",
         ":workflow",
         "//agentflow/core",
@@ -112,6 +105,7 @@ cc_library(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
+        "@boringssl//:crypto",
         "@nlohmann_json//:json",
     ],
 )

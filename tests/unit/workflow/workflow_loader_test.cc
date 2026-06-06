@@ -10,11 +10,31 @@
 #include <asio/io_context.hpp>
 #include <nlohmann/json.hpp>
 
+#include <openssl/base64.h>
+#include <openssl/digest.h>
+#include <openssl/hmac.h>
+
 #include "agentflow/tools/tool_registry.h"
-#include "agentflow/workflow/hmac_sha256.h"
 
 namespace agentflow::workflow {
 namespace {
+
+// Local copy of the loader's HMAC helper so the AcceptValidSignature test
+// can compute the expected signature exactly the way Load() will.
+std::string HmacSha256Base64(std::string_view key, std::string_view data) {
+  uint8_t mac[EVP_MAX_MD_SIZE];
+  unsigned int mac_len = 0;
+  HMAC(EVP_sha256(),
+       key.data(), key.size(),
+       reinterpret_cast<const uint8_t*>(data.data()), data.size(),
+       mac, &mac_len);
+  std::string out;
+  out.resize(((mac_len + 2) / 3) * 4 + 1);
+  int written = EVP_EncodeBlock(
+      reinterpret_cast<uint8_t*>(out.data()), mac, mac_len);
+  out.resize(static_cast<size_t>(written));
+  return out;
+}
 
 constexpr char kMinimalJson[] = R"({
   "schema_version": 1,
