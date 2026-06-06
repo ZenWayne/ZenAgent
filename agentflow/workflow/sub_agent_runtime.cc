@@ -8,8 +8,11 @@
 #include <vector>
 
 #include <absl/strings/str_cat.h>
+#include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
 
+#include "agentflow/core/cancel.h"
 #include "agentflow/inference/litert_lm_conversation.h"
 #include "agentflow/inference/litert_lm_engine.h"
 #include "agentflow/workflow/json_path.h"
@@ -155,12 +158,89 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
       {"role", "user"},
       {"content", nlohmann::ordered_json::array(
                        {{{"type", "text"}, {"text", std::string(goal)}}})}};
-  auto resp_or = conv->SendMessageSync(user_msg.dump());
-  if (!resp_or.ok()) {
-    emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
-    return nlohmann::ordered_json{{"error", "engine_error"}};
+
+  // Multi-turn tool dispatch. The sub-agent's tool slice is host_tools_ +
+  // child.tools[]. The LiteRtLmConversation carries history server-side.
+  std::string message_json = user_msg.dump();
+  std::string raw_response;
+  constexpr int kSubAgentMaxIter = 8;
+  // CancelToken sourced once for the whole loop — used when parent_cancel
+  // is null.
+  ::agentflow::CancelSource local_src;
+  ::agentflow::CancelToken local_tok = local_src.Token();
+  const ::agentflow::CancelToken& cancel_ref =
+      ctx.parent_cancel ? *ctx.parent_cancel : local_tok;
+  for (int iter = 0; iter < kSubAgentMaxIter; ++iter) {
+    if (ctx.parent_cancel && ctx.parent_cancel->IsCancelled()) {
+      emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "cancelled", 0);
+      return nlohmann::ordered_json{{"error", "cancelled"}};
+    }
+    auto resp_or = conv->SendMessageSync(message_json);
+    if (!resp_or.ok()) {
+      emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
+      return nlohmann::ordered_json{{"error", "engine_error"}};
+    }
+    raw_response = *resp_or;
+
+    auto resp_json =
+        nlohmann::ordered_json::parse(raw_response, nullptr, false);
+    if (resp_json.is_discarded()) break;  // raw text — no further dispatch
+
+    if (resp_json.contains("tool_calls") &&
+        resp_json["tool_calls"].is_array() &&
+        !resp_json["tool_calls"].empty()) {
+      nlohmann::ordered_json tool_content =
+          nlohmann::ordered_json::array();
+      for (const auto& tc : resp_json["tool_calls"]) {
+        std::string name = tc.value(
+            "name", tc.value("function", nlohmann::ordered_json::object())
+                         .value("name", ""));
+        std::string args;
+        if (tc.contains("arguments")) {
+          args = tc["arguments"].is_string()
+                     ? tc["arguments"].get<std::string>()
+                     : tc["arguments"].dump();
+        } else if (tc.contains("function") &&
+                   tc["function"].contains("arguments")) {
+          args = tc["function"]["arguments"].is_string()
+                     ? tc["function"]["arguments"].get<std::string>()
+                     : tc["function"]["arguments"].dump();
+        }
+        // Sub-agents dispatch tools through the host registry. The host
+        // is responsible for restricting which tools exist; the per-child
+        // tools_json slice scopes what the LLM sees but the dispatcher
+        // can technically call any host tool. We rely on the LLM
+        // respecting the schema; defense-in-depth filtering is a future
+        // improvement.
+        std::string result;
+        // ToolRegistry::Invoke is not const (its mutex is mutable but the
+        // method signature isn't); we hold a const& as a member. Cast away
+        // const for the dispatch — safe given the registry's internal
+        // locking.
+        auto& reg = const_cast<ToolRegistry&>(host_tools_);
+        auto fut = asio::co_spawn(
+            *io_,
+            [&]() -> asio::awaitable<std::string> {
+              co_return co_await reg.Invoke(name, args, cancel_ref);
+            },
+            asio::use_future);
+        io_->run();
+        io_->restart();
+        try {
+          result = fut.get();
+        } catch (const std::exception& e) {
+          result = std::string("Tool error: ") + e.what();
+        }
+        tool_content.push_back(
+            {{"name", name}, {"response", {{"value", result}}}});
+      }
+      nlohmann::ordered_json tool_msg = {{"role", "tool"},
+                                           {"content", tool_content}};
+      message_json = tool_msg.dump();
+      continue;
+    }
+    break;  // No tool calls — done.
   }
-  std::string raw_response = std::move(*resp_or);
 
   // Output extraction.
   std::string extract = parent_def->delegates().output_extract().empty()
