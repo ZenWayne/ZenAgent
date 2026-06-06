@@ -254,8 +254,27 @@ TEST(WorkflowLoaderTest, Tier3LoadsAndProducesProtoDynamicState) {
   ToolRegistry host_tools(io);
   auto wf_or = WorkflowLoader::Load(json, host_tools);
   ASSERT_TRUE(wf_or.ok()) << wf_or.status();
+
+  // Don't trust ok() alone: the loaded workflow must actually carry the
+  // descriptor pool + factory and mint a usable tier-3 message. Verify by
+  // exercising the produced state's fields, not just its kind tag.
   ::agentflow::State s = (*wf_or)->NewEmptyState();
-  EXPECT_EQ(s.kind(), ::agentflow::State::Kind::ProtoDynamic);
+  ASSERT_EQ(s.kind(), ::agentflow::State::Kind::ProtoDynamic);
+
+  // A freshly minted dynamic message starts empty.
+  EXPECT_EQ(ReadStringField(s, "user_query"), "");
+
+  // Reflection-based read/write must round-trip through the dynamic message
+  // that the loader's descriptor pool produced.
+  WriteStringField(s, "user_query", "hello");
+  WriteStringField(s, "last_node", "node-7");
+  EXPECT_EQ(ReadStringField(s, "user_query"), "hello");
+  EXPECT_EQ(ReadStringField(s, "last_node"), "node-7");
+
+  // Independent states from the same workflow don't share field storage.
+  ::agentflow::State s2 = (*wf_or)->NewEmptyState();
+  EXPECT_EQ(ReadStringField(s2, "user_query"), "");
+  EXPECT_EQ(ReadStringField(s, "user_query"), "hello");
 }
 
 TEST(WorkflowLoaderTest, Tier3RejectsMissingDescriptorSet) {
