@@ -26,26 +26,15 @@ cc_test(
 )
 
 cc_test(
-    name = "hmac_sha256_test",
-    size = "small",
-    srcs = ["hmac_sha256_test.cc"],
-    deps = [
-        "//agentflow/workflow:hmac_sha256",
-        "@googletest//:gtest",
-        "@googletest//:gtest_main",
-    ],
-)
-
-cc_test(
     name = "workflow_loader_test",
     size = "small",
     srcs = ["workflow_loader_test.cc"],
     deps = [
         "//agentflow/tools",
-        "//agentflow/workflow:hmac_sha256",
         "//agentflow/workflow:workflow_loader",
         "@abseil-cpp//absl/strings",
         "@asio",
+        "@boringssl//:crypto",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
         "@nlohmann_json//:json",
