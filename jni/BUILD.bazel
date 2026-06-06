@@ -1,0 +1,39 @@
+# jni/BUILD.bazel
+#
+# Builds libagentflow_jni.so — the JNI shared library that the Kotlin/JVM
+# layer loads via System.loadLibrary("agentflow_jni"). Pulls in all the
+# C++ agentflow surface needed for the MVP runAgent path.
+
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_binary(
+    name = "libagentflow_jni.so",
+    srcs = ["agentflow_jni.cc"],
+    linkshared = True,
+    # `-z notext` is a defensive belt, NOT currently required. Verified on
+    # GNU ld 2.46: the .so links clean without it and carries no DT_TEXTREL.
+    # RE2 in libce_external.a is already PIC; the only absolute relocs come
+    # from the Rust tokenizer's std/compiler_builtins objects and live
+    # entirely in .debug_* (non-alloc) sections, so they never become runtime
+    # text relocations. Kept cheap in case a future non-PIC object with real
+    # .text relocs ever slips into the combined archive.
+    linkopts = [
+        "-Wl,-z,notext",
+    ],
+    deps = [
+        # Official JNI headers. Bazel auto-detects the system JDK (via JAVA_HOME
+        # or `java` on PATH) and materializes @local_jdk locally — no network,
+        # no rules_java entry in MODULE.bazel needed on Bazel 7.
+        "@bazel_tools//tools/jdk:jni",
+        "//agentflow/core",
+        "//agentflow/inference",
+        "//agentflow/nodes",
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow",
+        "//agentflow/workflow:workflow_loader",
+        "//proto:agentflow_proto",
+        "@asio",
+    ],
+)
