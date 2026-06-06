@@ -29,6 +29,9 @@
 #include "agentflow/core/stub_node.h"
 #include "agentflow/inference/litert_lm_engine.h"
 #include "agentflow/nodes/agent_node.h"
+#include "agentflow/tools/tool_registry.h"
+#include "agentflow/workflow/workflow.h"
+#include "agentflow/workflow/workflow_loader.h"
 #include "test_messages.pb.h"
 
 namespace af = agentflow;
@@ -125,6 +128,88 @@ Java_agentflow_jni_NativeBridge_runAgent(
     io.run();
     auto out = fut.get();
 
+    const std::string& reply = out.As<af::test::TestState>().assistant_reply();
+    return env->NewStringUTF(reply.c_str());
+  } catch (const std::exception& e) {
+    ThrowJava(env, e.what());
+    return nullptr;
+  } catch (...) {
+    ThrowJava(env, "unknown C++ exception");
+    return nullptr;
+  }
+}
+
+// Java signature:
+//   external fun runJsonWorkflow(
+//       modelPath: String,
+//       workflowJson: String,
+//       userQuery: String,
+//   ): String
+//
+// MVP routes the workflow's main agent through the same single-AgentNode
+// pipeline as runAgent. Multi-agent + sub-agent + streaming are P16+.
+JNIEXPORT jstring JNICALL
+Java_agentflow_jni_NativeBridge_runJsonWorkflow(
+    JNIEnv* env, jobject /*self*/,
+    jstring model_path_j,
+    jstring workflow_json_j,
+    jstring user_query_j) {
+  try {
+    const std::string model_path    = JString(env, model_path_j).str();
+    const std::string workflow_json = JString(env, workflow_json_j).str();
+    const std::string user_query    = JString(env, user_query_j).str();
+
+    auto engine = af::LiteRtLmEngine::Create(
+        af::LiteRtLmEngineOptions{.model_path = model_path});
+    if (!engine) {
+      ThrowJava(env, "LiteRtLmEngine::Create failed");
+      return nullptr;
+    }
+
+    asio::io_context io;
+    af::ToolRegistry host_tools(io);
+
+    auto wf_or = af::workflow::WorkflowLoader::Load(workflow_json, host_tools);
+    if (!wf_or.ok()) {
+      ThrowJava(env, std::string(wf_or.status().message()).c_str());
+      return nullptr;
+    }
+    auto wf = *wf_or;
+
+    const auto& agents = wf->spec().agents();
+    auto main_it = agents.find(wf->spec().main());
+    if (main_it == agents.end()) {
+      ThrowJava(env, "main agent not in roster");
+      return nullptr;
+    }
+    const auto& main_def = main_it->second;
+
+    af::AgentNodeConfig cfg;
+    cfg.engine                  = engine;
+    cfg.io_ctx                  = &io;
+    cfg.system_prompt           = main_def.system_prompt();
+    cfg.input_field             = "user_query";
+    cfg.output_field            = "assistant_reply";
+    cfg.max_iter                = 5;
+    cfg.stream_tokens           = false;
+    cfg.constrained_tool_calls  = main_def.model().constrained_tool_calls();
+
+    af::GraphBuilder b;
+    b.AddNode(std::make_unique<af::AgentNode>(std::move(cfg)))
+     .AddNode(std::make_unique<af::StubNode>("sink", 0ms, nullptr, nullptr))
+     .AddEdge("agent", "sink");
+    auto graph = b.Build();
+
+    af::test::TestState init;
+    init.set_user_query(user_query);
+    af::Runner runner(std::move(graph), af::Runner::Options{});
+    auto fut = asio::co_spawn(io,
+        [&]() -> asio::awaitable<af::State> {
+          co_return co_await runner.Run(af::State::From(init));
+        },
+        asio::use_future);
+    io.run();
+    auto out = fut.get();
     const std::string& reply = out.As<af::test::TestState>().assistant_reply();
     return env->NewStringUTF(reply.c_str());
   } catch (const std::exception& e) {

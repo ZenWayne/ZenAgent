@@ -84,3 +84,16 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "state_dynamic_proto_test",
+    size = "small",
+    srcs = ["state_dynamic_proto_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//proto:agentflow_proto",
+        "@com_google_protobuf//:protobuf",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

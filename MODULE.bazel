@@ -21,6 +21,9 @@ bazel_dep(name = "abseil-cpp", version = "20260107.0")  # match LiteRT-LM's abse
 bazel_dep(name = "nlohmann_json", version = "3.11.3")
 bazel_dep(name = "platforms", version = "0.0.10")
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
+# BoringSSL provides HMAC-SHA256 + SHA-256 for workflow signing (Spec §9.4).
+# Replaces the prior vendored impl with a maintained, audited crypto lib.
+bazel_dep(name = "boringssl", version = "0.20260526.0")
 
 # ── asio (header-only, not in BCR — use http_archive) ─────────────
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")

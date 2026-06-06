@@ -83,6 +83,9 @@ class ToolRegistry {
       std::string_view args_json,
       const CancelToken& cancel);
 
+  // True iff a tool with the given name is currently registered.
+  bool Has(std::string_view name) const;
+
   // OpenAI-compatible tools JSON array. Empty span → all registered tools.
   std::string ExportToolsJson(
       std::span<const std::string> tool_names) const;

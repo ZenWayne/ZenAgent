@@ -1,0 +1,113 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "eval_context",
+    hdrs = ["eval_context.h"],
+    deps = [
+        "//agentflow/core",
+        "@abseil-cpp//absl/time",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "json_path",
+    srcs = ["json_path.cc"],
+    hdrs = ["json_path.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "template_engine",
+    srcs = ["template_engine.cc"],
+    hdrs = ["template_engine.h"],
+    deps = [
+        ":eval_context",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "workflow",
+    srcs = ["workflow.cc"],
+    hdrs = ["workflow.h"],
+    deps = [
+        "//agentflow/core",
+        "//proto:agentflow_proto",
+        "@com_google_protobuf//:protobuf",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "workflow_registry",
+    srcs = ["workflow_registry.cc"],
+    hdrs = ["workflow_registry.h"],
+    deps = [
+        ":workflow",
+        "//agentflow/core",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_library(
+    name = "sub_agent_runtime",
+    srcs = ["sub_agent_runtime.cc"],
+    hdrs = [
+        "sub_agent_context.h",
+        "sub_agent_runtime.h",
+    ],
+    deps = [
+        ":json_path",
+        ":template_engine",
+        ":workflow",
+        "//agentflow/core",
+        "//agentflow/inference",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/strings",
+        "@asio",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "delegate_tool",
+    srcs = ["delegate_tool.cc"],
+    hdrs = ["delegate_tool.h"],
+    deps = [
+        ":sub_agent_runtime",
+        "//agentflow/tools",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "workflow_loader",
+    srcs = ["workflow_loader.cc"],
+    hdrs = ["workflow_loader.h"],
+    deps = [
+        ":template_engine",
+        ":workflow",
+        "//agentflow/core",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@boringssl//:crypto",
+        "@com_google_protobuf//:protobuf",
+        "@nlohmann_json//:json",
+    ],
+)

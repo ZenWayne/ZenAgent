@@ -26,4 +26,15 @@ internal object NativeBridge {
         userQuery: String,
         constrainedToolCalls: Boolean,
     ): String
+
+    /**
+     * Runs a JSON-defined workflow's main agent. MVP routes through the same
+     * single-AgentNode pipeline as runAgent; multi-agent / sub-agent /
+     * streaming are tracked as P16+.
+     */
+    external fun runJsonWorkflow(
+        modelPath: String,
+        workflowJson: String,
+        userQuery: String,
+    ): String
 }

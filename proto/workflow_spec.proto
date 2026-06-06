@@ -1,0 +1,57 @@
+// proto/workflow_spec.proto
+syntax = "proto3";
+package agentflow.proto;
+
+// Mirror of the JSON workflow schema described in Spec §3. Authors write
+// JSON; the loader parses into this proto for typed downstream use.
+message WorkflowSpec {
+  uint32 schema_version = 1;
+  string name           = 2;
+  string version        = 3;
+
+  message StateFieldDecl {
+    string type    = 1;   // string|integer|number|boolean|array|object
+    string default_value_json = 2;  // optional, raw JSON literal
+  }
+  message StateSpec {
+    string kind = 1;      // dynamic_json | proto | proto_dynamic
+    // For dynamic_json:
+    map<string, StateFieldDecl> fields = 2;
+    // For proto / proto_dynamic:
+    string message_type = 3;
+    // For proto_dynamic only (Phase 5):
+    string descriptor_set_path = 4;
+    bytes  descriptor_set_b64  = 5;
+  }
+  StateSpec state = 4;
+
+  message ModelSpec {
+    int32 max_output_tokens     = 1;
+    bool  constrained_tool_calls = 2;
+  }
+
+  message DelegateSpec {
+    repeated string agents = 1;
+    uint32 max_depth       = 2;
+    bool   parallel        = 3;
+    map<string, string> input_template = 4;  // each value is a template
+    string goal_template   = 5;   // optional override; default "{{tool.goal}}"
+    string output_extract  = 6;   // JSONPath; default "$.assistant_reply"
+  }
+
+  message AgentDef {
+    string system_prompt = 1;
+    ModelSpec model      = 2;
+    repeated string tools = 3;
+    DelegateSpec delegates = 4;  // optional
+  }
+  map<string, AgentDef> agents = 5;
+  string main = 6;
+
+  message Signing {
+    string algo      = 1;  // "HMAC-SHA256"
+    string key_id    = 2;
+    string signature = 3;  // base64
+  }
+  Signing signing = 7;
+}

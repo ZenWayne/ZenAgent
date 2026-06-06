@@ -4,6 +4,9 @@
 #include <string>
 #include <vector>
 
+#include <google/protobuf/descriptor.h>
+#include <google/protobuf/dynamic_message.h>
+
 namespace agentflow {
 
 namespace {
@@ -58,9 +61,35 @@ State State::FromJson(const nlohmann::ordered_json& fields_decl) {
   return s;
 }
 
+State::DynamicEnv::~DynamicEnv() = default;
+
 State::Kind State::kind() const noexcept {
   if (std::holds_alternative<JsonArm>(backing_)) return Kind::Json;
-  return Kind::Proto;
+  return pool_ ? Kind::ProtoDynamic : Kind::Proto;
+}
+
+State State::FromDynamicProto(
+    std::shared_ptr<google::protobuf::DescriptorPool> pool,
+    std::string_view message_type) {
+  State s;
+  if (!pool) return s;
+  const auto* desc =
+      pool->FindMessageTypeByName(std::string(message_type));
+  if (!desc) return s;
+
+  // Bundle the pool and a factory bound to it; both must outlive any Message
+  // instance derived from that factory (the Message holds non-owning
+  // pointers to factory-owned vtable data and pool-owned descriptors).
+  auto env = std::make_shared<DynamicEnv>();
+  env->pool = std::move(pool);
+  env->factory =
+      std::make_unique<google::protobuf::DynamicMessageFactory>(env->pool.get());
+  const auto* prototype = env->factory->GetPrototype(desc);
+  if (!prototype) return s;
+  std::unique_ptr<google::protobuf::Message> instance(prototype->New());
+  s.backing_ = std::move(instance);
+  s.pool_ = std::move(env);
+  return s;
 }
 
 bool State::IsEmpty() const noexcept {
@@ -119,6 +148,7 @@ State State::Clone() const {
       copy->CopyFrom(**p);
       out.backing_ = std::move(copy);
     }
+    out.pool_ = pool_;  // keepalive carries forward (no-op for tier 1)
     return out;
   }
   if (const auto* j = std::get_if<JsonArm>(&backing_)) {
