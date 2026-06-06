@@ -16,8 +16,10 @@
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/descriptor.pb.h>
 #include <nlohmann/json.hpp>
+#include <openssl/base64.h>
+#include <openssl/digest.h>
+#include <openssl/hmac.h>
 
-#include "agentflow/workflow/hmac_sha256.h"
 #include "agentflow/workflow/template_engine.h"
 #include "workflow_spec.pb.h"
 
@@ -411,6 +413,25 @@ std::string CanonicalForm(const nlohmann::ordered_json& root_in) {
     return v;
   };
   return canon(root_in, /*is_root=*/true).dump();
+}
+
+// Returns base64-encoded HMAC-SHA256(data, key). Backed by boringssl —
+// signing isn't security-critical for control-plane workflows but using a
+// maintained crypto runtime beats vendoring one.
+std::string HmacSha256Base64(std::string_view key, std::string_view data) {
+  uint8_t mac[EVP_MAX_MD_SIZE];
+  unsigned int mac_len = 0;
+  HMAC(EVP_sha256(),
+       key.data(), key.size(),
+       reinterpret_cast<const uint8_t*>(data.data()), data.size(),
+       mac, &mac_len);
+  if (mac_len == 0) return {};
+  std::string out;
+  out.resize(((mac_len + 2) / 3) * 4 + 1);  // +1 for the NUL EVP_EncodeBlock writes
+  int written = EVP_EncodeBlock(
+      reinterpret_cast<uint8_t*>(out.data()), mac, mac_len);
+  out.resize(static_cast<size_t>(written));
+  return out;
 }
 
 absl::Status VerifySignature(const std::string& canonical,
