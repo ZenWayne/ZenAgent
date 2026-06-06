@@ -7,7 +7,6 @@
 #include <utility>
 #include <vector>
 
-#include <absl/strings/str_cat.h>
 #include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
 #include <asio/use_future.hpp>
@@ -39,21 +38,31 @@ const proto::WorkflowSpec::AgentDef* FindAgent(const Workflow& wf,
 
 }  // namespace
 
-SubAgentRuntime::SubAgentRuntime(std::shared_ptr<Workflow> wf,
-                                    const ToolRegistry& host_tools,
-                                    EventEmitter& emit)
-    : wf_(std::move(wf)), host_tools_(host_tools), emit_(emit) {}
-
 SubAgentRuntime::SubAgentRuntime(
     std::shared_ptr<Workflow> wf, const ToolRegistry& host_tools,
-    EventEmitter& emit,
-    std::shared_ptr<::agentflow::LiteRtLmEngine> engine,
+    EventEmitter& emit, ConversationFactory conv_factory,
     ::asio::io_context& io)
     : wf_(std::move(wf)),
       host_tools_(host_tools),
       emit_(emit),
-      engine_(std::move(engine)),
+      conv_factory_(std::move(conv_factory)),
       io_(&io) {}
+
+SubAgentRuntime::ConversationFactory
+SubAgentRuntime::DefaultConversationFactory(
+    std::shared_ptr<::agentflow::LiteRtLmEngine> engine,
+    ::asio::io_context& io) {
+  return [engine = std::move(engine), &io](
+             LiteRtLmConversationOptions opts) -> SendFn {
+    auto conv = LiteRtLmConversation::Create(engine, std::move(opts), io);
+    if (!conv) return SendFn{};
+    // The conversation owns history server-side; capture it so successive
+    // SendFn calls form a multi-turn exchange.
+    return [conv](const std::string& message_json) {
+      return conv->SendMessageSync(message_json);
+    };
+  };
+}
 
 nlohmann::ordered_json SubAgentRuntime::RunSync(
     std::string_view parent_agent, std::string_view child_agent,
@@ -94,20 +103,10 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
 
   const auto& child = wf_->spec().agents().at(std::string(child_agent));
 
-  // No engine = skeleton mode (hermetic tests). Return a stub success.
-  if (!engine_ || !io_) {
-    std::string result = absl::StrCat("[stub:", child_agent, "] ", goal);
-    emit_.EmitSubAgentEnd(invocation_id, ctx.depth, true, "",
-                            static_cast<uint32_t>(result.size()));
-    return nlohmann::ordered_json(result);
-  }
-
-  // ── Real-LLM path ───────────────────────────────────────────────────────
   // Build system message + per-child tool slice + send the goal as the
-  // initial user message. This PR wires a single-turn conversation; the
-  // multi-turn tool dispatch loop is left for a follow-up — the conversation
-  // already carries history server-side so additional turns can be added
-  // incrementally without API changes here.
+  // initial user message, then run the multi-turn tool dispatch loop. The
+  // conversation is obtained through the injected factory so tests can drive
+  // this path with a fake; there is no test-only branch here.
   EvalContext sys_ctx;
   sys_ctx.workflow_name = wf_->name();
   sys_ctx.workflow_version = wf_->version();
@@ -148,8 +147,8 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
     opts.max_output_tokens = 512;
   }
 
-  auto conv = LiteRtLmConversation::Create(engine_, std::move(opts), *io_);
-  if (!conv) {
+  SendFn send = conv_factory_ ? conv_factory_(std::move(opts)) : SendFn{};
+  if (!send) {
     emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
     return nlohmann::ordered_json{{"error", "engine_error"}};
   }
@@ -175,7 +174,7 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
       emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "cancelled", 0);
       return nlohmann::ordered_json{{"error", "cancelled"}};
     }
-    auto resp_or = conv->SendMessageSync(message_json);
+    auto resp_or = send(message_json);
     if (!resp_or.ok()) {
       emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
       return nlohmann::ordered_json{{"error", "engine_error"}};

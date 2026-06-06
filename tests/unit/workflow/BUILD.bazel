@@ -53,9 +53,11 @@ cc_test(
         "//agentflow/tools",
         "//agentflow/workflow:sub_agent_runtime",
         "//agentflow/workflow:workflow_loader",
+        "@abseil-cpp//absl/status:statusor",
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
     ],
 )
 

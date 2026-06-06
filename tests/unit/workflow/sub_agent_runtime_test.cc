@@ -1,6 +1,9 @@
 #include "agentflow/workflow/sub_agent_runtime.h"
 
+#include <string>
+
 #include <gtest/gtest.h>
+#include <absl/status/statusor.h>
 #include <asio/io_context.hpp>
 
 #include "agentflow/core/event.h"
@@ -9,6 +12,15 @@
 
 namespace agentflow::workflow {
 namespace {
+
+// Factory whose conversation must never be created — the gating checks
+// (depth/roster) return before RunSync reaches the LLM path.
+SubAgentRuntime::ConversationFactory NoLlmFactory() {
+  return [](LiteRtLmConversationOptions) -> SubAgentRuntime::SendFn {
+    ADD_FAILURE() << "conversation factory should not be invoked";
+    return {};
+  };
+}
 
 constexpr char kRosterJson[] = R"({
   "schema_version":1,"name":"t","version":"v1",
@@ -27,7 +39,7 @@ TEST(SubAgentRuntimeTest, MaxDepthEnforced) {
   auto wf = *WorkflowLoader::Load(kRosterJson, host_tools);
 
   NullEventEmitter emit;
-  SubAgentRuntime rt(wf, host_tools, emit);
+  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory(), io);
   SubAgentContext ctx;
   ctx.depth = 2;
   CancelSource cs;
@@ -44,23 +56,56 @@ TEST(SubAgentRuntimeTest, UnknownChildRejected) {
   ToolRegistry host_tools(io);
   auto wf = *WorkflowLoader::Load(kRosterJson, host_tools);
   NullEventEmitter emit;
-  SubAgentRuntime rt(wf, host_tools, emit);
+  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory(), io);
   SubAgentContext ctx;
   auto result = rt.RunSync("parent", "ghost", "do thing", ctx);
   ASSERT_TRUE(result.is_object());
   EXPECT_EQ(result.value("error", ""), "unknown_agent");
 }
 
-TEST(SubAgentRuntimeTest, SkeletonStubReturnsString) {
+// An injected fake conversation drives the real RunSync path (no engine,
+// no test-only branch inside the runtime). The fake returns a canned
+// assistant message; RunSync extracts it via the default output path.
+TEST(SubAgentRuntimeTest, InjectedConversationDrivesRun) {
   asio::io_context io;
   ToolRegistry host_tools(io);
   auto wf = *WorkflowLoader::Load(kRosterJson, host_tools);
   NullEventEmitter emit;
-  SubAgentRuntime rt(wf, host_tools, emit);
+
+  SubAgentRuntime::ConversationFactory fake =
+      [](LiteRtLmConversationOptions) -> SubAgentRuntime::SendFn {
+    return [](const std::string&) -> absl::StatusOr<std::string> {
+      return std::string(
+          R"({"role":"assistant",)"
+          R"("content":[{"type":"text","text":"pong"}]})");
+    };
+  };
+
+  SubAgentRuntime rt(wf, host_tools, emit, std::move(fake), io);
   SubAgentContext ctx;
-  auto result = rt.RunSync("parent", "child", "hello", ctx);
+  auto result = rt.RunSync("parent", "child", "ping", ctx);
   ASSERT_TRUE(result.is_string());
-  EXPECT_NE(result.get<std::string>().find("child"), std::string::npos);
+  EXPECT_EQ(result.get<std::string>(), "pong");
+}
+
+// An empty SendFn from the factory means the conversation could not be
+// built — RunSync surfaces engine_error rather than crashing.
+TEST(SubAgentRuntimeTest, ConversationCreationFailureIsEngineError) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kRosterJson, host_tools);
+  NullEventEmitter emit;
+
+  SubAgentRuntime::ConversationFactory broken =
+      [](LiteRtLmConversationOptions) -> SubAgentRuntime::SendFn {
+    return {};
+  };
+
+  SubAgentRuntime rt(wf, host_tools, emit, std::move(broken), io);
+  SubAgentContext ctx;
+  auto result = rt.RunSync("parent", "child", "ping", ctx);
+  ASSERT_TRUE(result.is_object());
+  EXPECT_EQ(result.value("error", ""), "engine_error");
 }
 
 TEST(SubAgentRuntimeTest, ParentWithoutDelegatesRejected) {
@@ -75,7 +120,7 @@ TEST(SubAgentRuntimeTest, ParentWithoutDelegatesRejected) {
   })";
   auto wf = *WorkflowLoader::Load(kNoDelegate, host_tools);
   NullEventEmitter emit;
-  SubAgentRuntime rt(wf, host_tools, emit);
+  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory(), io);
   SubAgentContext ctx;
   auto result = rt.RunSync("solo", "anything", "x", ctx);
   EXPECT_EQ(result.value("error", ""), "unknown_agent");

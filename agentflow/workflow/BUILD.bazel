@@ -76,7 +76,7 @@ cc_library(
         "//agentflow/inference",
         "//agentflow/tools",
         "//proto:agentflow_proto",
-        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/status:statusor",
         "@asio",
         "@nlohmann_json//:json",
     ],
