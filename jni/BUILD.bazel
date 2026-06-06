@@ -2,7 +2,7 @@
 #
 # Builds libagentflow_jni.so — the JNI shared library that the Kotlin/JVM
 # layer loads via System.loadLibrary("agentflow_jni"). Pulls in all the
-# C++ agentflow surface needed for the MVP runAgent path.
+# C++ agentflow surface needed for the MVP runAgent + runJsonWorkflow paths.
 
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 
