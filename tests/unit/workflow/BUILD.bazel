@@ -73,6 +73,21 @@ cc_test(
 )
 
 cc_test(
+    name = "workflow_runner_test",
+    size = "small",
+    srcs = ["workflow_runner_test.cc"],
+    deps = [
+        "//agentflow/inference",
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow_loader",
+        "//agentflow/workflow:workflow_runner",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "workflow_registry_test",
     size = "small",
     srcs = ["workflow_registry_test.cc"],
