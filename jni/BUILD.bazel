@@ -33,6 +33,7 @@ cc_binary(
         "//agentflow/tools",
         "//agentflow/workflow:workflow",
         "//agentflow/workflow:workflow_loader",
+        "//agentflow/workflow:workflow_runner",
         "//proto:agentflow_proto",
         "@asio",
     ],

@@ -15,6 +15,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
@@ -32,6 +33,7 @@
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/workflow.h"
 #include "agentflow/workflow/workflow_loader.h"
+#include "agentflow/workflow/workflow_runner.h"
 #include "test_messages.pb.h"
 
 namespace af = agentflow;
@@ -167,35 +169,37 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflow(
     }
 
     asio::io_context io;
-    af::ToolRegistry host_tools(io);
+    // ToolRegistry must be a shared_ptr for the workflow runner.
+    auto host_tools = std::make_shared<af::ToolRegistry>(io);
 
-    auto wf_or = af::workflow::WorkflowLoader::Load(workflow_json, host_tools);
+    auto wf_or =
+        af::workflow::WorkflowLoader::Load(workflow_json, *host_tools);
     if (!wf_or.ok()) {
       ThrowJava(env, std::string(wf_or.status().message()).c_str());
       return nullptr;
     }
     auto wf = *wf_or;
 
-    const auto& agents = wf->spec().agents();
-    auto main_it = agents.find(wf->spec().main());
-    if (main_it == agents.end()) {
+    af::workflow::AgentNodeBuildSpec build_spec;
+    build_spec.workflow     = wf;
+    build_spec.agent_name   = wf->spec().main();
+    build_spec.host_tools   = host_tools;
+    build_spec.engine       = engine;
+    build_spec.io_ctx       = &io;
+    build_spec.input_field  = "user_query";
+    build_spec.output_field = "assistant_reply";
+    build_spec.max_iter     = 5;
+    auto built = af::workflow::BuildAgentNode(build_spec);
+    if (built.cfg.system_prompt.empty() && !built.cfg.engine) {
       ThrowJava(env, "main agent not in roster");
       return nullptr;
     }
-    const auto& main_def = main_it->second;
-
-    af::AgentNodeConfig cfg;
-    cfg.engine                  = engine;
-    cfg.io_ctx                  = &io;
-    cfg.system_prompt           = main_def.system_prompt();
-    cfg.input_field             = "user_query";
-    cfg.output_field            = "assistant_reply";
-    cfg.max_iter                = 5;
-    cfg.stream_tokens           = false;
-    cfg.constrained_tool_calls  = main_def.model().constrained_tool_calls();
+    // SubAgentRuntime + delegate tool must outlive the Runner.
+    std::vector<std::shared_ptr<void>> keepalive =
+        std::move(built.keepalive);
 
     af::GraphBuilder b;
-    b.AddNode(std::make_unique<af::AgentNode>(std::move(cfg)))
+    b.AddNode(std::make_unique<af::AgentNode>(std::move(built.cfg)))
      .AddNode(std::make_unique<af::StubNode>("sink", 0ms, nullptr, nullptr))
      .AddEdge("agent", "sink");
     auto graph = b.Build();
