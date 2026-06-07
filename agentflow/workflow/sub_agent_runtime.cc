@@ -1,6 +1,8 @@
 #include "agentflow/workflow/sub_agent_runtime.h"
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -75,9 +77,16 @@ SubAgentRuntime::DefaultConversationFactory(
     if (!conv) return SendFn{};
     // The conversation owns history server-side; capture it so successive
     // SendFn calls form a multi-turn exchange.
-    return [conv, constrained](const std::string& message_json,
-                               const TokenSink& on_token)
+    return [conv, constrained,
+            registered = std::make_shared<std::atomic_bool>(false)](
+               const std::string& message_json, const TokenSink& on_token,
+               const ::agentflow::CancelToken& cancel)
                -> asio::awaitable<absl::StatusOr<std::string>> {
+      // Register the in-flight cancel hook once: a cancel breaks the engine
+      // request (streaming or sync) mid-decode, not just at turn boundaries.
+      if (!registered->exchange(true)) {
+        cancel.OnCancel([conv]() { conv->Cancel(); });
+      }
       // Non-streaming path: constrained conversations have no streaming C
       // bridge, and a missing sink means nobody wants deltas. SendMessageSync
       // blocks the io thread for the turn (same as the constrained AgentNode
@@ -252,7 +261,7 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
       emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "cancelled", 0);
       co_return nlohmann::ordered_json{{"error", "cancelled"}};
     }
-    auto resp_or = co_await send(message_json, on_token);
+    auto resp_or = co_await send(message_json, on_token, cancel_ref);
     if (!resp_or.ok()) {
       emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
       co_return nlohmann::ordered_json{{"error", "engine_error"}};

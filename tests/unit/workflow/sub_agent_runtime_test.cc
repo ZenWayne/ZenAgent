@@ -101,7 +101,8 @@ TEST(SubAgentRuntimeTest, InjectedConversationDrivesRun) {
 
   SubAgentRuntime::ConversationFactory fake =
       [](LiteRtLmConversationOptions) -> SubAgentRuntime::SendFn {
-    return [](const std::string&, const SubAgentRuntime::TokenSink&)
+    return [](const std::string&, const SubAgentRuntime::TokenSink&,
+              const CancelToken&)
                -> asio::awaitable<absl::StatusOr<std::string>> {
       co_return std::string(
           R"({"role":"assistant",)"
@@ -148,7 +149,8 @@ TEST(SubAgentRuntimeTest, StreamsDeltasToChannel) {
 
   SubAgentRuntime::ConversationFactory streaming_fake =
       [](LiteRtLmConversationOptions) -> SubAgentRuntime::SendFn {
-    return [](const std::string&, const SubAgentRuntime::TokenSink& on_token)
+    return [](const std::string&, const SubAgentRuntime::TokenSink& on_token,
+              const CancelToken&)
                -> asio::awaitable<absl::StatusOr<std::string>> {
       if (on_token) {
         on_token("Hel");

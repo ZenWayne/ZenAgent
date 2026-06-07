@@ -35,10 +35,13 @@ class SubAgentRuntime {
   // JSON. Async so RunAsync co_awaits it under the caller's io_context without
   // driving the loop itself. When `on_token` is set and the conversation is
   // unconstrained, each text delta is delivered to it as it streams; the
-  // returned string is always the full (canonical) response JSON. This is the
-  // only LLM operation RunAsync performs — the entire injected surface.
+  // returned string is always the full (canonical) response JSON. `cancel`
+  // lets the conversation register its in-flight cancel hook so the sub-agent
+  // stops mid-decode (not just at turn boundaries). This is the only LLM
+  // operation RunAsync performs — the entire injected surface.
   using SendFn = std::function<asio::awaitable<absl::StatusOr<std::string>>(
-      const std::string& message_json, const TokenSink& on_token)>;
+      const std::string& message_json, const TokenSink& on_token,
+      const ::agentflow::CancelToken& cancel)>;
 
   // Builds a conversation for a child agent from the prepared options and
   // returns its bound SendFn. An empty (falsy) SendFn means the conversation
