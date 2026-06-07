@@ -13,6 +13,19 @@ class JsonWorkflow internal constructor(
 ) {
     fun run(userQuery: String): String =
         NativeBridge.runJsonWorkflow(modelPath, json, userQuery)
+
+    /**
+     * Streaming run: [onToken] is invoked with each generated text delta as it
+     * arrives; the full assistant reply is returned when the run completes.
+     *
+     * ```
+     * wf.runStreaming("hello") { delta -> print(delta) }
+     * ```
+     */
+    fun runStreaming(userQuery: String, onToken: (String) -> Unit): String =
+        NativeBridge.runJsonWorkflowStreaming(modelPath, json, userQuery) { delta ->
+            onToken(delta)
+        }
 }
 
 /**

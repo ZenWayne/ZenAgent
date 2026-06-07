@@ -3,6 +3,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <asio/as_tuple.hpp>
+#include <asio/use_awaitable.hpp>
+
 #include "agentflow/core/errors.h"
 
 namespace agentflow {
@@ -151,6 +154,15 @@ asio::awaitable<State> AgentNode::Run(
         std::string delta = ExtractAssistantText(cj);
         if (!delta.empty()) {
           emit.EmitToken(Id(), delta);  // clean text delta, not the envelope
+          if (cfg_.token_channel) {
+            // Direct streaming path to the top of the stack. as_tuple so a
+            // closed channel (consumer gone) yields an error instead of
+            // throwing — we just stop forwarding in that case.
+            auto [ec] = co_await cfg_.token_channel->async_send(
+                asio::error_code{}, delta,
+                asio::as_tuple(asio::use_awaitable));
+            (void)ec;
+          }
           acc_text += delta;
         }
       }
