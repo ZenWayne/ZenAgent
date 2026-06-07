@@ -286,15 +286,21 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     }
     auto wf = *wf_or;
 
+    // Run-wide token stream, created BEFORE BuildAgentNode so it can be wired
+    // into both the main agent and the delegate tool (each sub-agent gets its
+    // own per-call channel that drains up to this one).
+    af::TokenChannel channel(io, /*capacity=*/4096);
+
     af::workflow::AgentNodeBuildSpec build_spec;
-    build_spec.workflow     = wf;
-    build_spec.agent_name   = wf->spec().main();
-    build_spec.host_tools   = host_tools;
-    build_spec.engine       = engine;
-    build_spec.io_ctx       = &io;
-    build_spec.input_field  = "user_query";
-    build_spec.output_field = "assistant_reply";
-    build_spec.max_iter     = 5;
+    build_spec.workflow      = wf;
+    build_spec.agent_name    = wf->spec().main();
+    build_spec.host_tools    = host_tools;
+    build_spec.engine        = engine;
+    build_spec.io_ctx        = &io;
+    build_spec.input_field   = "user_query";
+    build_spec.output_field  = "assistant_reply";
+    build_spec.max_iter      = 5;
+    build_spec.token_channel = &channel;
     auto built = af::workflow::BuildAgentNode(build_spec);
     if (built.cfg.system_prompt.empty() && !built.cfg.engine) {
       ThrowJava(env, "main agent not in roster");
@@ -302,11 +308,9 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     }
     std::vector<std::shared_ptr<void>> keepalive = std::move(built.keepalive);
 
-    // Wire the direct token stream + force the streaming (unconstrained) path.
-    af::TokenChannel channel(io, /*capacity=*/4096);
-    built.cfg.stream_tokens = true;
+    // Streaming requires the unconstrained path (no streaming constrained C
+    // bridge). BuildAgentNode already set stream_tokens + token_channel.
     built.cfg.constrained_tool_calls = false;
-    built.cfg.token_channel = &channel;
 
     af::GraphBuilder b;
     b.AddNode(std::make_unique<af::AgentNode>(std::move(built.cfg)))

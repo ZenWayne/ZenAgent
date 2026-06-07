@@ -21,7 +21,9 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   cfg.input_field = spec.input_field;
   cfg.output_field = spec.output_field;
   cfg.max_iter = spec.max_iter;
-  cfg.stream_tokens = false;
+  // Stream the main agent when a run-wide channel is provided.
+  cfg.token_channel = spec.token_channel;
+  cfg.stream_tokens = spec.token_channel != nullptr;
 
   const auto& agents = spec.workflow->spec().agents();
   auto it = agents.find(spec.agent_name);
@@ -61,7 +63,8 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
     sub_ctx.root_invocation_id.clear();
 
     auto delegate = MakeDelegateTool(runtime, spec.agent_name,
-                                       std::move(allowed), sub_ctx);
+                                       std::move(allowed), sub_ctx,
+                                       spec.io_ctx, spec.token_channel);
     cfg.extra_tools.push_back(delegate);
     out.keepalive.push_back(runtime);
     out.keepalive.push_back(delegate);

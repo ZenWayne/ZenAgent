@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "agentflow/core/event.h"
+#include "agentflow/core/token_channel.h"
 #include "agentflow/nodes/agent_node.h"
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/workflow.h"
@@ -26,6 +27,11 @@ struct AgentNodeBuildSpec {
   std::string input_field  = "user_query";
   std::string output_field = "assistant_reply";
   int max_iter = 8;
+
+  // Optional run-wide token stream. When set, the main agent streams onto it
+  // and each delegated sub-agent gets its own per-call channel that drains up
+  // to this one. Null → no streaming (default).
+  TokenChannel* token_channel = nullptr;
 };
 
 // Result: configured AgentNodeConfig + keepalive holders (SubAgentRuntime

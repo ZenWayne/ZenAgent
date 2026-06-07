@@ -36,6 +36,22 @@ const proto::WorkflowSpec::AgentDef* FindAgent(const Workflow& wf,
   return &it->second;
 }
 
+// Pulls the text out of an assistant message-JSON envelope:
+//   {"role":"assistant","content":[{"type":"text","text":"..."}, ...]}
+std::string ExtractTextDelta(const nlohmann::ordered_json& msg) {
+  if (!msg.contains("content")) return {};
+  const auto& content = msg["content"];
+  if (!content.is_array()) return {};
+  std::string out;
+  for (const auto& item : content) {
+    if (item.value("type", "") == "text" && item.contains("text") &&
+        item["text"].is_string()) {
+      out += item["text"].get<std::string>();
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 SubAgentRuntime::SubAgentRuntime(
@@ -54,19 +70,69 @@ SubAgentRuntime::DefaultConversationFactory(
     ::asio::io_context& io) {
   return [engine = std::move(engine), &io](
              LiteRtLmConversationOptions opts) -> SendFn {
+    const bool constrained = opts.constrained_tool_calls;
     auto conv = LiteRtLmConversation::Create(engine, std::move(opts), io);
     if (!conv) return SendFn{};
     // The conversation owns history server-side; capture it so successive
     // SendFn calls form a multi-turn exchange.
-    return [conv](const std::string& message_json) {
-      return conv->SendMessageSync(message_json);
+    return [conv, constrained](const std::string& message_json,
+                               const TokenSink& on_token)
+               -> asio::awaitable<absl::StatusOr<std::string>> {
+      // Non-streaming path: constrained conversations have no streaming C
+      // bridge, and a missing sink means nobody wants deltas. SendMessageSync
+      // blocks the io thread for the turn (same as the constrained AgentNode
+      // path).
+      if (constrained || !on_token) {
+        co_return conv->SendMessageSync(message_json);
+      }
+      // Streaming path: drive the async stream, forward each text delta, and
+      // rebuild ONE canonical response JSON (each chunk is a full message-JSON
+      // envelope; raw concatenation would be invalid). Mirrors AgentNode.
+      conv->SendMessage(message_json);
+      std::string acc_text;
+      nlohmann::ordered_json tool_call_msg;
+      bool saw_tool_calls = false;
+      for (;;) {
+        std::string chunk;
+        try {
+          chunk = co_await conv->NextTokenAsync();
+        } catch (const std::exception&) {
+          co_return absl::InternalError("sub-agent streaming send failed");
+        }
+        if (chunk.empty()) break;  // end of turn
+        auto cj = nlohmann::ordered_json::parse(chunk, nullptr, false);
+        if (cj.is_discarded()) {
+          on_token(chunk);
+          acc_text += chunk;
+          continue;
+        }
+        if (cj.contains("tool_calls") && cj["tool_calls"].is_array() &&
+            !cj["tool_calls"].empty()) {
+          saw_tool_calls = true;
+          tool_call_msg = std::move(cj);
+          continue;
+        }
+        std::string delta = ExtractTextDelta(cj);
+        if (!delta.empty()) {
+          on_token(delta);
+          acc_text += delta;
+        }
+      }
+      if (saw_tool_calls) {
+        co_return tool_call_msg.dump();
+      }
+      nlohmann::ordered_json msg = {
+          {"role", "assistant"},
+          {"content", nlohmann::ordered_json::array(
+                          {{{"type", "text"}, {"text", acc_text}}})}};
+      co_return msg.dump();
     };
   };
 }
 
-nlohmann::ordered_json SubAgentRuntime::RunSync(
+asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
     std::string_view parent_agent, std::string_view child_agent,
-    std::string_view goal, const SubAgentContext& ctx) {
+    std::string_view goal, SubAgentContext ctx) {
   std::string invocation_id = GenUuidLike();
   std::string root_id =
       ctx.depth == 0 ? invocation_id : ctx.root_invocation_id;
@@ -74,14 +140,14 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
   const auto* parent_def = FindAgent(*wf_, parent_agent);
   if (!parent_def || !parent_def->has_delegates()) {
     emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "unknown_agent", 0);
-    return nlohmann::ordered_json{{"error", "unknown_agent"}};
+    co_return nlohmann::ordered_json{{"error", "unknown_agent"}};
   }
   if (ctx.depth >= parent_def->delegates().max_depth()) {
     emit_.EmitSubAgentStart(parent_agent, child_agent, invocation_id, root_id,
                               ctx.depth, goal);
     emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false,
                            "max_depth_exceeded", 0);
-    return nlohmann::ordered_json{
+    co_return nlohmann::ordered_json{
         {"error", "max_depth_exceeded"},
         {"depth", static_cast<uint32_t>(ctx.depth)}};
   }
@@ -95,7 +161,7 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
   }
   if (!in_roster) {
     emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "unknown_agent", 0);
-    return nlohmann::ordered_json{{"error", "unknown_agent"}};
+    co_return nlohmann::ordered_json{{"error", "unknown_agent"}};
   }
 
   emit_.EmitSubAgentStart(parent_agent, child_agent, invocation_id, root_id,
@@ -116,7 +182,7 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
     if (!tmpl_or.ok()) {
       emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "bad_template",
                               0);
-      return nlohmann::ordered_json{{"error", "bad_template"}};
+      co_return nlohmann::ordered_json{{"error", "bad_template"}};
     }
     auto v = tmpl_or->Evaluate(sys_ctx);
     system_text = v.is_string() ? v.get<std::string>() : v.dump();
@@ -150,7 +216,19 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
   SendFn send = conv_factory_ ? conv_factory_(std::move(opts)) : SendFn{};
   if (!send) {
     emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
-    return nlohmann::ordered_json{{"error", "engine_error"}};
+    co_return nlohmann::ordered_json{{"error", "engine_error"}};
+  }
+
+  // Per-invocation token forwarding: push each streamed delta onto the
+  // caller-provided channel (set by the delegate tool, one per call). Unset →
+  // no-op (non-streaming or nobody listening). The conversation also won't
+  // stream when the child is constrained (handled inside the SendFn).
+  TokenSink on_token;
+  if (ctx.token_channel != nullptr) {
+    auto* ch = ctx.token_channel;
+    on_token = [ch](std::string_view delta) {
+      ch->try_send(asio::error_code{}, std::string(delta));
+    };
   }
 
   nlohmann::ordered_json user_msg = {
@@ -172,12 +250,12 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
   for (int iter = 0; iter < kSubAgentMaxIter; ++iter) {
     if (ctx.parent_cancel && ctx.parent_cancel->IsCancelled()) {
       emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "cancelled", 0);
-      return nlohmann::ordered_json{{"error", "cancelled"}};
+      co_return nlohmann::ordered_json{{"error", "cancelled"}};
     }
-    auto resp_or = send(message_json);
+    auto resp_or = co_await send(message_json, on_token);
     if (!resp_or.ok()) {
       emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
-      return nlohmann::ordered_json{{"error", "engine_error"}};
+      co_return nlohmann::ordered_json{{"error", "engine_error"}};
     }
     raw_response = *resp_or;
 
@@ -215,18 +293,12 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
         // ToolRegistry::Invoke is not const (its mutex is mutable but the
         // method signature isn't); we hold a const& as a member. Cast away
         // const for the dispatch — safe given the registry's internal
-        // locking.
+        // locking. Direct co_await — RunAsync runs under the caller's
+        // io_context, so no nested io.run() (that would deadlock a concurrent
+        // token-channel drain).
         auto& reg = const_cast<ToolRegistry&>(host_tools_);
-        auto fut = asio::co_spawn(
-            *io_,
-            [&]() -> asio::awaitable<std::string> {
-              co_return co_await reg.Invoke(name, args, cancel_ref);
-            },
-            asio::use_future);
-        io_->run();
-        io_->restart();
         try {
-          result = fut.get();
+          result = co_await reg.Invoke(name, args, cancel_ref);
         } catch (const std::exception& e) {
           result = std::string("Tool error: ") + e.what();
         }
@@ -266,7 +338,7 @@ nlohmann::ordered_json SubAgentRuntime::RunSync(
 
   emit_.EmitSubAgentEnd(invocation_id, ctx.depth, true, "",
                           static_cast<uint32_t>(final_str.size()));
-  return nlohmann::ordered_json(final_str);
+  co_return nlohmann::ordered_json(final_str);
 }
 
 }  // namespace agentflow::workflow
