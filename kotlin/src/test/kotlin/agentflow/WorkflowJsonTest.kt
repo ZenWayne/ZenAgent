@@ -1,6 +1,8 @@
 package agentflow
 
 import agentflow.dsl.loadWorkflow
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -66,5 +68,31 @@ class WorkflowJsonTest {
             reply.contains(deltas.joinToString("").trim().take(8)),
             "reply should contain the streamed token text",
         )
+    }
+
+    @Test
+    fun jsonWorkflowStreamsTokensAsFlow() {
+        val modelPath = System.getenv("MODEL_PATH")
+        assumeTrue(modelPath != null, "MODEL_PATH not set — skipping")
+
+        val json = """
+        {
+          "schema_version":1,"name":"jvm_flow_test","version":"v1",
+          "state":{"kind":"dynamic_json","fields":{}},
+          "agents":{
+            "main":{"system_prompt":"Reply in one short sentence.",
+                    "model":{"max_output_tokens":64},
+                    "tools":[]}
+          },
+          "main":"main"
+        }
+        """.trimIndent()
+
+        val wf = loadWorkflow(modelPath!!, json)
+        val deltas = runBlocking { wf.streamTokens("Say hello.").toList() }
+        val text = deltas.joinToString("")
+        println("Flow streamed ${deltas.size} deltas: $text")
+        assertTrue(deltas.size > 1, "expected real per-token streaming via Flow")
+        assertFalse(text.isBlank(), "expected non-empty streamed text")
     }
 }
