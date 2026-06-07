@@ -101,6 +101,12 @@ asio::awaitable<State> AgentNode::Run(
     throw AgentflowError("AgentNode: failed to create Conversation");
   }
 
+  // Cooperative cancellation: when the run is cancelled (e.g. a Flow collector
+  // at the top of the stack cancelled), break the in-flight engine request so
+  // a streaming turn stops mid-decode instead of only at the next turn
+  // boundary. conv->Cancel() is safe to call from any thread.
+  cancel.OnCancel([conv]() { conv->Cancel(); });
+
   std::string message_json = BuildUserMessageJson(state);
   std::string final_answer;
 

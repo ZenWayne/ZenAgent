@@ -13,7 +13,9 @@
 #include <chrono>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -73,6 +75,16 @@ void ThrowJava(JNIEnv* env, const char* msg) {
   jclass cls = env->FindClass("java/lang/RuntimeException");
   if (cls != nullptr) env->ThrowNew(cls, msg);
 }
+
+// Cancellation registry. A streaming run is a blocking JNI call that owns its
+// thread, so cancellation must come from a DIFFERENT thread (the Flow's
+// awaitClose). We hand Kotlin an opaque id; the run takes the source's Token
+// (which holds the shared state independently of the source), and a separate
+// nativeCancel(id) flips it. The global mutex serializes cancel vs free so a
+// concurrent free can't dangle a cancel.
+std::mutex g_cancel_mu;
+std::unordered_map<jlong, std::unique_ptr<::agentflow::CancelSource>> g_cancels;
+jlong g_next_cancel_id = 1;
 
 }  // namespace
 
@@ -250,11 +262,22 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     jstring model_path_j,
     jstring workflow_json_j,
     jstring user_query_j,
-    jobject on_token_j) {
+    jobject on_token_j,
+    jlong cancel_id_j) {
   try {
     const std::string model_path    = JString(env, model_path_j).str();
     const std::string workflow_json = JString(env, workflow_json_j).str();
     const std::string user_query    = JString(env, user_query_j).str();
+
+    // Take the cancel token for this run (0 = no cancellation). The token
+    // holds the shared state independently of the source, so it stays valid
+    // even if Kotlin frees the source after the run.
+    ::agentflow::CancelToken cancel_tok;
+    if (cancel_id_j != 0) {
+      std::lock_guard<std::mutex> lk(g_cancel_mu);
+      auto it = g_cancels.find(cancel_id_j);
+      if (it != g_cancels.end()) cancel_tok = it->second->Token();
+    }
 
     // Resolve the callback's onToken(String):void method up front.
     jmethodID on_token_mid = nullptr;
@@ -329,7 +352,7 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     // to signal the drain loop that the stream is finished.
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
       try {
-        auto out = co_await runner.Run(af::State::From(init));
+        auto out = co_await runner.Run(af::State::From(init), cancel_tok);
         reply = out.As<af::test::TestState>().assistant_reply();
       } catch (...) {
         run_exc = std::current_exception();
@@ -372,6 +395,39 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     ThrowJava(env, "unknown C++ exception");
     return nullptr;
   }
+}
+
+// ── Cancellation handle (see g_cancels) ──────────────────────────────────────
+
+// Creates a cancel source and returns its opaque id (pass to
+// runJsonWorkflowStreaming, then to nativeCancel/nativeFreeCancel).
+JNIEXPORT jlong JNICALL
+Java_agentflow_jni_NativeBridge_nativeNewCancel(JNIEnv* /*env*/,
+                                                jobject /*self*/) {
+  std::lock_guard<std::mutex> lk(g_cancel_mu);
+  jlong id = g_next_cancel_id++;
+  g_cancels[id] = std::make_unique<::agentflow::CancelSource>();
+  return id;
+}
+
+// Signals cancellation for a running streaming call. Safe to call from any
+// thread; no-op if the id was already freed.
+JNIEXPORT void JNICALL
+Java_agentflow_jni_NativeBridge_nativeCancel(JNIEnv* /*env*/, jobject /*self*/,
+                                             jlong cancel_id_j) {
+  std::lock_guard<std::mutex> lk(g_cancel_mu);
+  auto it = g_cancels.find(cancel_id_j);
+  if (it != g_cancels.end()) it->second->Cancel();
+}
+
+// Releases a cancel source. The run's already-taken CancelToken stays valid
+// (it holds the shared state), so this is safe once the run has finished.
+JNIEXPORT void JNICALL
+Java_agentflow_jni_NativeBridge_nativeFreeCancel(JNIEnv* /*env*/,
+                                                 jobject /*self*/,
+                                                 jlong cancel_id_j) {
+  std::lock_guard<std::mutex> lk(g_cancel_mu);
+  g_cancels.erase(cancel_id_j);
 }
 
 }  // extern "C"

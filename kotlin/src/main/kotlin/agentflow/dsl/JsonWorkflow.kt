@@ -28,9 +28,10 @@ class JsonWorkflow internal constructor(
      * ```
      */
     fun runStreaming(userQuery: String, onToken: (String) -> Unit): String =
-        NativeBridge.runJsonWorkflowStreaming(modelPath, json, userQuery) { delta ->
+        // cancelId 0 = no cancellation handle (blocking call, no external handle).
+        NativeBridge.runJsonWorkflowStreaming(modelPath, json, userQuery, { delta ->
             onToken(delta)
-        }
+        }, 0L)
 
     /**
      * Streaming run exposed as a cold [Flow] of text deltas.
@@ -44,23 +45,33 @@ class JsonWorkflow internal constructor(
      * wf.streamTokens("hello").collect { delta -> print(delta) }
      * ```
      *
-     * Note: the underlying native run has no cancellation hook yet, so
-     * cancelling the collector stops delivery but the run continues in the
-     * background until it completes.
+     * Cooperative cancellation: cancelling the collector (or e.g. `take(n)`)
+     * signals the native run via a cancel handle, which breaks the in-flight
+     * engine request so the run stops promptly instead of finishing in the
+     * background.
      */
     fun streamTokens(userQuery: String): Flow<String> = callbackFlow {
+        val cancelId = NativeBridge.nativeNewCancel()
         val job = launch(Dispatchers.IO) {
             try {
-                NativeBridge.runJsonWorkflowStreaming(modelPath, json, userQuery) {
+                NativeBridge.runJsonWorkflowStreaming(modelPath, json, userQuery, {
                     delta ->
                     trySend(delta)
-                }
+                }, cancelId)
                 close()
             } catch (t: Throwable) {
                 close(t)
+            } finally {
+                // Token already taken by the run; safe to release the source.
+                NativeBridge.nativeFreeCancel(cancelId)
             }
         }
-        awaitClose { job.cancel() }
+        awaitClose {
+            // Signal the (possibly still-running) native call to stop. No-op if
+            // already finished/freed — registry guards against a dangling id.
+            NativeBridge.nativeCancel(cancelId)
+            job.cancel()
+        }
     }
 }
 

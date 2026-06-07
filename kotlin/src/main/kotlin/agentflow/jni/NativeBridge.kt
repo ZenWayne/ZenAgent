@@ -62,5 +62,15 @@ internal object NativeBridge {
         workflowJson: String,
         userQuery: String,
         onToken: TokenCallback,
+        cancelId: Long,
     ): String
+
+    /** Allocates a cancel handle. Returns its opaque id (0 means "none"). */
+    external fun nativeNewCancel(): Long
+
+    /** Signals cancellation for a running streaming call. Any thread; no-op if freed. */
+    external fun nativeCancel(cancelId: Long)
+
+    /** Releases a cancel handle. Call after the run has finished. */
+    external fun nativeFreeCancel(cancelId: Long)
 }

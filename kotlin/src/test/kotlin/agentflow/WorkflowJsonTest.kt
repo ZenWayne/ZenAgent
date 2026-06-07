@@ -1,8 +1,10 @@
 package agentflow
 
 import agentflow.dsl.loadWorkflow
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -94,5 +96,33 @@ class WorkflowJsonTest {
         println("Flow streamed ${deltas.size} deltas: $text")
         assertTrue(deltas.size > 1, "expected real per-token streaming via Flow")
         assertFalse(text.isBlank(), "expected non-empty streamed text")
+    }
+
+    @Test
+    fun jsonWorkflowStreamingCancels() {
+        val modelPath = System.getenv("MODEL_PATH")
+        assumeTrue(modelPath != null, "MODEL_PATH not set — skipping")
+
+        val json = """
+        {
+          "schema_version":1,"name":"jvm_cancel_test","version":"v1",
+          "state":{"kind":"dynamic_json","fields":{}},
+          "agents":{
+            "main":{"system_prompt":"Reply in one long paragraph.",
+                    "model":{"max_output_tokens":256},
+                    "tools":[]}
+          },
+          "main":"main"
+        }
+        """.trimIndent()
+
+        val wf = loadWorkflow(modelPath!!, json)
+        // take(1) cancels the flow after the first delta, which signals the
+        // native run to stop. The test passing (not hanging) exercises the
+        // cooperative-cancellation path end to end.
+        val first = runBlocking { wf.streamTokens("Tell me a long story.").take(1).toList() }
+        println("Cancelled after ${first.size} delta(s): ${first.joinToString("")}")
+        assertEquals(1, first.size, "take(1) should yield exactly one delta")
+        assertFalse(first[0].isBlank(), "first delta should be non-empty")
     }
 }
