@@ -3,6 +3,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <asio/as_tuple.hpp>
+#include <asio/use_awaitable.hpp>
+
 #include "agentflow/core/errors.h"
 
 namespace agentflow {
@@ -44,8 +47,24 @@ std::string AgentNode::BuildSystemMessageJson() const {
 }
 
 std::string AgentNode::BuildToolsJson() const {
-  if (!cfg_.tool_registry) return "[]";
-  return cfg_.tool_registry->ExportToolsJson(cfg_.tool_names);
+  if (!cfg_.tool_registry && cfg_.extra_tools.empty()) return "[]";
+  json arr;
+  if (cfg_.tool_registry) {
+    arr = json::parse(cfg_.tool_registry->ExportToolsJson(cfg_.tool_names));
+  } else {
+    arr = json::array();
+  }
+  for (const auto& tool : cfg_.extra_tools) {
+    if (!tool) continue;
+    const auto& schema = tool->Schema();
+    json entry = {{"type", "function"},
+                  {"function", {{"name", schema.name},
+                                {"description", schema.description},
+                                {"parameters",
+                                 json::parse(schema.params_json_schema)}}}};
+    arr.push_back(std::move(entry));
+  }
+  return arr.dump();
 }
 
 std::string AgentNode::BuildUserMessageJson(const State& state) const {
@@ -82,22 +101,102 @@ asio::awaitable<State> AgentNode::Run(
     throw AgentflowError("AgentNode: failed to create Conversation");
   }
 
+  // Cooperative cancellation: when the run is cancelled (e.g. a Flow collector
+  // at the top of the stack cancelled), break the in-flight engine request so
+  // a streaming turn stops mid-decode instead of only at the next turn
+  // boundary. conv->Cancel() is safe to call from any thread.
+  cancel.OnCancel([conv]() { conv->Cancel(); });
+
   std::string message_json = BuildUserMessageJson(state);
   std::string final_answer;
 
   for (int iter = 0; iter < cfg_.max_iter; ++iter) {
     if (cancel.IsCancelled()) break;
 
-    auto resp_or = conv->SendMessageSync(message_json);
-    if (!resp_or.ok()) {
-      throw AgentflowError("AgentNode: Conversation::SendMessageSync failed: " +
-                            std::string(resp_or.status().message()));
-    }
-    const std::string& resp_str = *resp_or;
-    if (cfg_.stream_tokens && !resp_str.empty()) {
-      // No real token streaming on the sync path; emit the whole response
-      // as a single chunk for trace observability.
-      emit.EmitToken(Id(), resp_str);
+    std::string resp_str;
+    if (cfg_.stream_tokens && !cfg_.constrained_tool_calls) {
+      // Real token streaming. Drives the engine's async stream and forwards
+      // each chunk as it arrives. AgentNode::Run is a coroutine on the io
+      // context, so co_await NextTokenAsync() naturally pumps the worker
+      // thread's posted chunks. NOTE: the constrained C bridge has no
+      // streaming variant (litert_lm_conversation_send_message_stream ignores
+      // the grammar), so streaming is gated to the unconstrained path.
+      // Each streamed chunk is a FULL message-JSON envelope wrapping one
+      // incremental piece, e.g.
+      //   {"role":"assistant","content":[{"type":"text","text":"The"}]}
+      // for text deltas, or a complete
+      //   {"role":"assistant","tool_calls":[...]}
+      // for a tool call. We extract the text delta from each chunk, emit it as
+      // a clean token, and accumulate; tool-call chunks are captured whole.
+      // Then we rebuild a single canonical response JSON for the dispatch logic
+      // below (raw concatenation of the envelopes would be invalid JSON).
+      conv->SendMessage(message_json);
+      bool stream_failed = false;
+      std::string acc_text;
+      json tool_call_msg;
+      bool saw_tool_calls = false;
+      for (;;) {
+        std::string chunk;
+        try {
+          chunk = co_await conv->NextTokenAsync();
+        } catch (const std::exception&) {
+          stream_failed = true;
+          break;
+        }
+        if (chunk.empty()) break;  // end of this turn
+        json cj = json::parse(chunk, nullptr, /*allow_exceptions=*/false);
+        if (cj.is_discarded()) {
+          // Raw (non-JSON) chunk — treat as a plain text delta.
+          emit.EmitToken(Id(), chunk);
+          acc_text += chunk;
+          continue;
+        }
+        if (cj.contains("tool_calls") && cj["tool_calls"].is_array() &&
+            !cj["tool_calls"].empty()) {
+          saw_tool_calls = true;
+          tool_call_msg = std::move(cj);
+          continue;
+        }
+        std::string delta = ExtractAssistantText(cj);
+        if (!delta.empty()) {
+          emit.EmitToken(Id(), delta);  // clean text delta, not the envelope
+          if (cfg_.token_channel) {
+            // Direct streaming path to the top of the stack. as_tuple so a
+            // closed channel (consumer gone) yields an error instead of
+            // throwing — we just stop forwarding in that case.
+            auto [ec] = co_await cfg_.token_channel->async_send(
+                asio::error_code{}, delta,
+                asio::as_tuple(asio::use_awaitable));
+            (void)ec;
+          }
+          acc_text += delta;
+        }
+      }
+      if (stream_failed) {
+        throw AgentflowError("AgentNode: streaming SendMessage failed");
+      }
+      // Rebuild one canonical response JSON for the dispatch/extract logic.
+      if (saw_tool_calls) {
+        resp_str = tool_call_msg.dump();
+      } else {
+        json msg = {{"role", "assistant"},
+                    {"content", json::array({{{"type", "text"},
+                                              {"text", acc_text}}})}};
+        resp_str = msg.dump();
+      }
+    } else {
+      auto resp_or = conv->SendMessageSync(message_json);
+      if (!resp_or.ok()) {
+        throw AgentflowError(
+            "AgentNode: Conversation::SendMessageSync failed: " +
+            std::string(resp_or.status().message()));
+      }
+      resp_str = *resp_or;
+      if (cfg_.stream_tokens && !resp_str.empty()) {
+        // Constrained path has no real streaming; emit the whole response as a
+        // single chunk for trace observability.
+        emit.EmitToken(Id(), resp_str);
+      }
     }
 
     json resp;
@@ -161,6 +260,21 @@ asio::awaitable<State> AgentNode::Run(
 asio::awaitable<std::string> AgentNode::DispatchTool(
     const std::string& name, const std::string& args,
     const CancelToken& cancel, EventEmitter& emit) {
+  // Extras take precedence over the registry on name collisions.
+  for (const auto& tool : cfg_.extra_tools) {
+    if (!tool) continue;
+    if (tool->Schema().name == name) {
+      emit.EmitToolCall(Id(), name, args);
+      std::string result;
+      try {
+        result = co_await tool->Invoke(args, cancel);
+      } catch (const std::exception& e) {
+        result = std::string("Tool error: ") + e.what();
+      }
+      emit.EmitToolReturn(Id(), name, result);
+      co_return result;
+    }
+  }
   if (!cfg_.tool_registry) co_return std::string{};
 
   emit.EmitToolCall(Id(), name, args);

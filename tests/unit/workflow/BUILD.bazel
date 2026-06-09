@@ -53,9 +53,11 @@ cc_test(
         "//agentflow/tools",
         "//agentflow/workflow:sub_agent_runtime",
         "//agentflow/workflow:workflow_loader",
+        "@abseil-cpp//absl/status:statusor",
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -69,6 +71,21 @@ cc_test(
         "@googletest//:gtest",
         "@googletest//:gtest_main",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "workflow_runner_test",
+    size = "small",
+    srcs = ["workflow_runner_test.cc"],
+    deps = [
+        "//agentflow/inference",
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow_loader",
+        "//agentflow/workflow:workflow_runner",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 

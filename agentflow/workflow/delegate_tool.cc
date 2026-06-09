@@ -1,8 +1,15 @@
 #include "agentflow/workflow/delegate_tool.h"
 
+#include <memory>
 #include <utility>
 
 #include <nlohmann/json.hpp>
+
+#include <asio/as_tuple.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include "agentflow/tools/native_fn_tool.h"
 #include "agentflow/workflow/sub_agent_runtime.h"
@@ -34,15 +41,17 @@ std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
     std::shared_ptr<SubAgentRuntime> runtime,
     std::string parent_agent,
     std::vector<std::string> allowed_children,
-    SubAgentContext ctx) {
+    SubAgentContext ctx,
+    ::asio::io_context* io,
+    TokenChannel* top_channel) {
   ::agentflow::ToolSchema schema{
       "delegate",
       "Hand a sub-task to another agent. The chosen agent runs with clean "
       "context and returns a result string.",
       BuildSchema(allowed_children)};
-  auto fn = [runtime, parent_agent = std::move(parent_agent), ctx](
-                std::string_view args_json,
-                const ::agentflow::CancelToken& cancel)
+  auto fn = [runtime, parent_agent = std::move(parent_agent), ctx, io,
+             top_channel](std::string_view args_json,
+                          const ::agentflow::CancelToken& cancel)
                 -> asio::awaitable<std::string> {
     auto args = nlohmann::ordered_json::parse(args_json, nullptr, false);
     if (args.is_discarded()) {
@@ -56,7 +65,44 @@ std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
     if (!runtime) {
       co_return std::string(R"({"error":"no_runtime"})");
     }
-    auto result = runtime->RunSync(parent_agent, agent, goal, ctx);
+
+    SubAgentContext sub_ctx = ctx;
+
+    // Per-invocation token stream: one fresh channel per delegate call (so
+    // concurrent/sequential sub-agents never share a channel). A drain
+    // coroutine forwards each delta up to the run-wide top_channel; an
+    // empty-string sentinel (sent after the sub-agent finishes) ends it
+    // cleanly so no buffered token is dropped.
+    std::shared_ptr<TokenChannel> sub_ch;
+    if (io != nullptr && top_channel != nullptr) {
+      sub_ch = std::make_shared<TokenChannel>(*io, /*capacity=*/4096);
+      sub_ctx.token_channel = sub_ch.get();
+      TokenChannel* top = top_channel;
+      asio::co_spawn(*io, [sub_ch, top]() -> asio::awaitable<void> {
+        for (;;) {
+          auto [rec_ec, tok] = co_await sub_ch->async_receive(
+              asio::as_tuple(asio::use_awaitable));
+          if (rec_ec || tok.empty()) break;  // closed or end-of-stream sentinel
+          auto [snd_ec] = co_await top->async_send(
+              asio::error_code{}, std::move(tok),
+              asio::as_tuple(asio::use_awaitable));
+          if (snd_ec) break;  // top consumer gone
+        }
+        co_return;
+      }, asio::detached);
+    }
+
+    auto result =
+        co_await runtime->RunAsync(parent_agent, agent, goal, sub_ctx);
+
+    if (sub_ch) {
+      // End-of-stream sentinel — drains after all real deltas (FIFO).
+      auto [ec] = co_await sub_ch->async_send(
+          asio::error_code{}, std::string{},
+          asio::as_tuple(asio::use_awaitable));
+      (void)ec;
+    }
+
     if (result.is_string()) co_return result.get<std::string>();
     co_return result.dump();
   };

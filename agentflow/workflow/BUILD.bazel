@@ -76,7 +76,7 @@ cc_library(
         "//agentflow/inference",
         "//agentflow/tools",
         "//proto:agentflow_proto",
-        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/status:statusor",
         "@asio",
         "@nlohmann_json//:json",
     ],
@@ -90,6 +90,23 @@ cc_library(
         ":sub_agent_runtime",
         "//agentflow/tools",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "workflow_runner",
+    srcs = ["workflow_runner.cc"],
+    hdrs = ["workflow_runner.h"],
+    deps = [
+        ":delegate_tool",
+        ":sub_agent_runtime",
+        ":workflow",
+        "//agentflow/core",
+        "//agentflow/inference",
+        "//agentflow/nodes",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@asio",
     ],
 )
 

@@ -1,6 +1,17 @@
 package agentflow.jni
 
 /**
+ * Invoked once per generated text delta during a streaming run.
+ *
+ * `fun interface`, so callers can pass a lambda. The C++ side resolves
+ * `onToken(String)` via JNI and invokes it directly off the io thread driving
+ * the run — a direct streaming path that bypasses the trace-event stream.
+ */
+fun interface TokenCallback {
+    fun onToken(token: String)
+}
+
+/**
  * Thin JNI surface. Loads libagentflow_jni.so on first reference and
  * forwards external calls into the C++ runtime.
  *
@@ -37,4 +48,29 @@ internal object NativeBridge {
         workflowJson: String,
         userQuery: String,
     ): String
+
+    /**
+     * Streaming variant of [runJsonWorkflow]: the main agent runs in streaming
+     * mode and each generated text delta is delivered to [onToken] as it
+     * arrives. Returns the full assistant reply when the run completes.
+     *
+     * Streaming uses the unconstrained decoding path (the constrained C bridge
+     * has no streaming variant), so this forces constrained tool calls off.
+     */
+    external fun runJsonWorkflowStreaming(
+        modelPath: String,
+        workflowJson: String,
+        userQuery: String,
+        onToken: TokenCallback,
+        cancelId: Long,
+    ): String
+
+    /** Allocates a cancel handle. Returns its opaque id (0 means "none"). */
+    external fun nativeNewCancel(): Long
+
+    /** Signals cancellation for a running streaming call. Any thread; no-op if freed. */
+    external fun nativeCancel(cancelId: Long)
+
+    /** Releases a cancel handle. Call after the run has finished. */
+    external fun nativeFreeCancel(cancelId: Long)
 }

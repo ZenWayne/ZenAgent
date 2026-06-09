@@ -140,10 +140,13 @@ void LiteRtLmConversation::SendMessage(std::string message_json,
     accum_.clear();
   }
 
+  // Pass nullptr (not "") when empty — matches SendMessageSync. An empty
+  // string parses to a discarded JSON in CreateOptionalArgs and corrupts
+  // optional_args.extra_context, which then fails prompt_template_.Apply.
   int rc = litert_lm_conversation_send_message_stream(
       conv_,
       message_json.c_str(),
-      extra_context.c_str(),
+      extra_context.empty() ? nullptr : extra_context.c_str(),
       &LiteRtLmConversation::StreamCallback,
       this);
   if (rc != 0) {
@@ -201,11 +204,19 @@ void LiteRtLmConversation::StreamCallback(void* data, const char* chunk,
              [self, tok = chunk ? std::string(chunk) : std::string{},
               is_final]() mutable {
                if (!tok.empty()) {
-                 std::lock_guard<std::mutex> lk(self->accum_mu_);
-                 self->accum_.append(tok);
+                 {
+                   std::lock_guard<std::mutex> lk(self->accum_mu_);
+                   self->accum_.append(tok);
+                 }
+                 self->channel_.try_send(asio::error_code{}, std::move(tok));
                }
-               self->channel_.try_send(asio::error_code{}, std::move(tok));
-               if (is_final) self->channel_.close();
+               // End-of-turn is signalled by an empty-string sentinel, NOT by
+               // closing the channel — closing it would make the conversation
+               // single-use and break the next turn's SendMessage. The channel
+               // is only closed on Cancel()/destruction.
+               if (is_final) {
+                 self->channel_.try_send(asio::error_code{}, std::string{});
+               }
              });
 }
 

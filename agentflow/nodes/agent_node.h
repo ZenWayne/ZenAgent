@@ -14,8 +14,10 @@
 #include "agentflow/core/event.h"
 #include "agentflow/core/node.h"
 #include "agentflow/core/state.h"
+#include "agentflow/core/token_channel.h"
 #include "agentflow/inference/litert_lm_conversation.h"
 #include "agentflow/inference/litert_lm_engine.h"
+#include "agentflow/tools/tool.h"
 #include "agentflow/tools/tool_registry.h"
 
 namespace agentflow {
@@ -38,12 +40,26 @@ struct AgentNodeConfig {
   // If empty, all registered tools are exported.
   std::vector<std::string> tool_names;
 
+  // Tools added inline (not through the shared ToolRegistry). Used by the
+  // workflow runner to inject the auto-generated `delegate` tool for an
+  // agent with a delegates block, without mutating the host's registry.
+  // Extras take precedence over registry tools when names collide.
+  std::vector<std::shared_ptr<Tool>> extra_tools;
+
   // When true AND tool_registry is set, drive the LiteRT-LM Conversation
   // through the constrained C bridge (LiteRT-LM/c/engine.h §
   // litert_lm_engine_create_constrained_conversation). The model's tool-call
   // arguments are then forced by an LLGuidance Lark grammar derived from
   // the tools' parameter schemas to match the schema exactly.
   bool constrained_tool_calls = false;
+
+  // Optional direct token stream. When set (and streaming is active — i.e.
+  // stream_tokens && !constrained_tool_calls), each generated text delta is
+  // also pushed onto this channel as it arrives, giving the top of the stack
+  // (e.g. the JNI bridge → a Kotlin callback/Flow) a direct streaming path
+  // that bypasses the proto::TraceEvent observability stream. Non-owning; the
+  // channel must outlive the run and live on the same io_context as io_ctx.
+  TokenChannel* token_channel = nullptr;
 };
 
 class AgentNode : public Node {
