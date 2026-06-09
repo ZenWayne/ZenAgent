@@ -66,7 +66,7 @@ TEST(SubAgentRuntimeTest, MaxDepthEnforced) {
   auto wf = *WorkflowLoader::Load(kRosterJson, host_tools);
 
   NullEventEmitter emit;
-  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory(), io);
+  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory());
   SubAgentContext ctx;
   ctx.depth = 2;
   CancelSource cs;
@@ -83,7 +83,7 @@ TEST(SubAgentRuntimeTest, UnknownChildRejected) {
   ToolRegistry host_tools(io);
   auto wf = *WorkflowLoader::Load(kRosterJson, host_tools);
   NullEventEmitter emit;
-  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory(), io);
+  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory());
   SubAgentContext ctx;
   auto result = RunAsyncBlocking(rt, io, "parent", "ghost", "do thing", ctx);
   ASSERT_TRUE(result.is_object());
@@ -110,7 +110,7 @@ TEST(SubAgentRuntimeTest, InjectedConversationDrivesRun) {
     };
   };
 
-  SubAgentRuntime rt(wf, host_tools, emit, std::move(fake), io);
+  SubAgentRuntime rt(wf, host_tools, emit, std::move(fake));
   SubAgentContext ctx;
   auto result = RunAsyncBlocking(rt, io, "parent", "child", "ping", ctx);
   ASSERT_TRUE(result.is_string());
@@ -130,7 +130,7 @@ TEST(SubAgentRuntimeTest, ConversationCreationFailureIsEngineError) {
     return {};
   };
 
-  SubAgentRuntime rt(wf, host_tools, emit, std::move(broken), io);
+  SubAgentRuntime rt(wf, host_tools, emit, std::move(broken));
   SubAgentContext ctx;
   auto result = RunAsyncBlocking(rt, io, "parent", "child", "ping", ctx);
   ASSERT_TRUE(result.is_object());
@@ -162,7 +162,7 @@ TEST(SubAgentRuntimeTest, StreamsDeltasToChannel) {
     };
   };
 
-  SubAgentRuntime rt(wf, host_tools, emit, std::move(streaming_fake), io);
+  SubAgentRuntime rt(wf, host_tools, emit, std::move(streaming_fake));
   TokenChannel ch(io, /*capacity=*/16);
   SubAgentContext ctx;
   ctx.token_channel = &ch;
@@ -207,7 +207,7 @@ TEST(SubAgentRuntimeTest, ParentWithoutDelegatesRejected) {
   })";
   auto wf = *WorkflowLoader::Load(kNoDelegate, host_tools);
   NullEventEmitter emit;
-  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory(), io);
+  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory());
   SubAgentContext ctx;
   auto result = RunAsyncBlocking(rt, io, "solo", "anything", "x", ctx);
   EXPECT_EQ(result.value("error", ""), "unknown_agent");

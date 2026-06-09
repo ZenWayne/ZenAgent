@@ -50,8 +50,7 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
 
     auto runtime = std::make_shared<SubAgentRuntime>(
         spec.workflow, *spec.host_tools, *emit,
-        SubAgentRuntime::DefaultConversationFactory(spec.engine, *spec.io_ctx),
-        *spec.io_ctx);
+        SubAgentRuntime::DefaultConversationFactory(spec.engine, *spec.io_ctx));
 
     std::vector<std::string> allowed;
     allowed.reserve(agent_def.delegates().agents_size());

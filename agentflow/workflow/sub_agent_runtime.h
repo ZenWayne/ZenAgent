@@ -56,8 +56,7 @@ class SubAgentRuntime {
   SubAgentRuntime(std::shared_ptr<Workflow> wf,
                    const ToolRegistry& host_tools,
                    EventEmitter& emit,
-                   ConversationFactory conv_factory,
-                   ::asio::io_context& io);
+                   ConversationFactory conv_factory);
 
   // Builds the production factory backed by a real LiteRT-LM engine.
   static ConversationFactory DefaultConversationFactory(
@@ -79,9 +78,6 @@ class SubAgentRuntime {
   const ToolRegistry& host_tools_;
   EventEmitter& emit_;
   ConversationFactory conv_factory_;
-  // Kept for construction symmetry; RunAsync no longer drives the loop itself
-  // (it co_awaits under the caller's io_context), so this is currently unused.
-  [[maybe_unused]] ::asio::io_context* io_ = nullptr;
 };
 
 }  // namespace agentflow::workflow

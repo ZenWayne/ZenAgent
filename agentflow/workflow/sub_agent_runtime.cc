@@ -58,13 +58,11 @@ std::string ExtractTextDelta(const nlohmann::ordered_json& msg) {
 
 SubAgentRuntime::SubAgentRuntime(
     std::shared_ptr<Workflow> wf, const ToolRegistry& host_tools,
-    EventEmitter& emit, ConversationFactory conv_factory,
-    ::asio::io_context& io)
+    EventEmitter& emit, ConversationFactory conv_factory)
     : wf_(std::move(wf)),
       host_tools_(host_tools),
       emit_(emit),
-      conv_factory_(std::move(conv_factory)),
-      io_(&io) {}
+      conv_factory_(std::move(conv_factory)) {}
 
 SubAgentRuntime::ConversationFactory
 SubAgentRuntime::DefaultConversationFactory(
