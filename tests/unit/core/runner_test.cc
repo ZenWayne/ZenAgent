@@ -599,5 +599,68 @@ TEST(RunnerCheckpointTest, ResumeColdStartSeedsEntryNodesAndRuns) {
   EXPECT_EQ(out.As<test::TestState>().counter(), 2);
 }
 
+TEST(RunnerCheckpointTest, ResumeColdStartFanOutDifferentLengthBranchesJoin) {
+  // Cold-start Resume over a multi-way fork whose branches have DIFFERENT
+  // lengths and converge on a single join:
+  //
+  //        entry                  s   : length-1 branch (entry -> s        -> join)
+  //       .  |  .                 m*  : length-2 branch (entry -> m1 -> m2 -> join)
+  //      s   m1   l1              l*  : length-3 branch (entry -> l1 -> l2 -> l3 -> join)
+  //      |   |    |
+  //      |   m2   l2
+  //      |   |    |
+  //      |   |    l3
+  //       .  |   .
+  //        join
+  //
+  // The join has THREE group-0 incoming edges, so the ALL fan-in must drain
+  // all three before it fires exactly once — regardless of branch length or
+  // arrival order. We assert via an external run counter (one fetch_add per
+  // node execution): 8 nodes, join fires once => exactly 8 runs. A premature
+  // or per-edge join firing would push the count above 8.
+  auto runs = std::make_shared<std::atomic<int>>(0);
+  auto mark_join = [](State& s) {
+    s.Mutable<test::TestState>().set_last_node("join");
+  };
+
+  // Stagger delays so the short branch finishes well before the long one;
+  // the ALL counter — not timing — is what makes the join wait.
+  GraphBuilder b;
+  b.AddNode(std::make_unique<StubNode>("entry", 0ms, runs))
+   .AddNode(std::make_unique<StubNode>("s",  0ms, runs))   // branch A (len 1)
+   .AddNode(std::make_unique<StubNode>("m1", 5ms, runs))   // branch B (len 2)
+   .AddNode(std::make_unique<StubNode>("m2", 5ms, runs))
+   .AddNode(std::make_unique<StubNode>("l1", 5ms, runs))   // branch C (len 3)
+   .AddNode(std::make_unique<StubNode>("l2", 5ms, runs))
+   .AddNode(std::make_unique<StubNode>("l3", 5ms, runs))
+   .AddNode(std::make_unique<StubNode>("join", 0ms, runs, mark_join))
+   .AddEdge("entry", "s").AddEdge("entry", "m1").AddEdge("entry", "l1")
+   .AddEdge("s", "join")
+   .AddEdge("m1", "m2").AddEdge("m2", "join")
+   .AddEdge("l1", "l2").AddEdge("l2", "l3").AddEdge("l3", "join");
+
+  // Put a sentinel counter (100) in the checkpoint state. Resume seeds entry
+  // nodes from the checkpoint's parsed state, so this value must flow through
+  // every branch to the join untouched (no node mutates counter).
+  proto::Checkpoint cp;
+  test::TestState init;
+  init.set_counter(100);
+  cp.set_state_type(init.GetTypeName());
+  cp.set_state_bytes(init.SerializeAsString());
+  // completed_nodes intentionally EMPTY — cold start seeds entry nodes.
+
+  State out = ResumeSync(b.Build(), Runner::Options{}, cp,
+                         State::From(test::TestState{}));
+
+  // Exactly 8 node executions: entry + (s) + (m1,m2) + (l1,l2,l3) + join,
+  // with the join firing once after all three branches drain.
+  EXPECT_EQ(runs->load(), 8);
+  // The seeded checkpoint state propagated end-to-end (cold start runs the
+  // graph against the checkpoint's state, not a default-constructed one).
+  EXPECT_EQ(out.As<test::TestState>().counter(), 100);
+  // The merged terminal state is the join's output.
+  EXPECT_EQ(out.As<test::TestState>().last_node(), "join");
+}
+
 }  // namespace
 }  // namespace agentflow
