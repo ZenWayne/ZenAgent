@@ -103,4 +103,77 @@ void EventEmitter::EmitGraphDone(bool failed) {
   Emit(std::move(ev));
 }
 
+void EventEmitter::EmitWorkflowRegistered(std::string_view name,
+                                            std::string_view version,
+                                            bool signed_value,
+                                            std::string_view key_id) {
+  proto::TraceEvent ev;
+  ev.set_kind(proto::TraceEvent::WORKFLOW_REGISTERED);
+  ev.set_unix_micros(NowMicros());
+  auto* p = ev.mutable_workflow_registered();
+  p->set_name(std::string(name));
+  p->set_version(std::string(version));
+  p->set_signed_(signed_value);
+  p->set_key_id(std::string(key_id));
+  Emit(std::move(ev));
+}
+
+void EventEmitter::EmitWorkflowUnregistered(std::string_view name,
+                                              std::string_view version) {
+  proto::TraceEvent ev;
+  ev.set_kind(proto::TraceEvent::WORKFLOW_UNREGISTERED);
+  ev.set_unix_micros(NowMicros());
+  auto* p = ev.mutable_workflow_unregistered();
+  p->set_name(std::string(name));
+  p->set_version(std::string(version));
+  Emit(std::move(ev));
+}
+
+void EventEmitter::EmitSubAgentStart(std::string_view parent_agent,
+                                       std::string_view child_agent,
+                                       std::string_view invocation_id,
+                                       std::string_view root_invocation_id,
+                                       uint32_t depth,
+                                       std::string_view goal) {
+  proto::TraceEvent ev;
+  ev.set_kind(proto::TraceEvent::SUB_AGENT_START);
+  ev.set_unix_micros(NowMicros());
+  auto* p = ev.mutable_sub_agent_start();
+  p->set_parent_agent(std::string(parent_agent));
+  p->set_child_agent(std::string(child_agent));
+  p->set_invocation_id(std::string(invocation_id));
+  p->set_root_invocation_id(std::string(root_invocation_id));
+  p->set_depth(depth);
+  p->set_goal(std::string(goal));
+  Emit(std::move(ev));
+}
+
+void EventEmitter::EmitSubAgentEnd(std::string_view invocation_id,
+                                     uint32_t depth,
+                                     bool success,
+                                     std::string_view error_kind,
+                                     uint32_t output_chars) {
+  proto::TraceEvent ev;
+  ev.set_kind(proto::TraceEvent::SUB_AGENT_END);
+  ev.set_unix_micros(NowMicros());
+  auto* p = ev.mutable_sub_agent_end();
+  p->set_invocation_id(std::string(invocation_id));
+  p->set_depth(depth);
+  p->set_success(success);
+  p->set_error_kind(std::string(error_kind));
+  p->set_output_chars(output_chars);
+  Emit(std::move(ev));
+}
+
+void EventEmitter::EmitSubAgentExtractFailed(std::string_view invocation_id,
+                                                std::string_view json_path) {
+  proto::TraceEvent ev;
+  ev.set_kind(proto::TraceEvent::SUB_AGENT_EXTRACT_FAILED);
+  ev.set_unix_micros(NowMicros());
+  auto* p = ev.mutable_sub_agent_extract_failed();
+  p->set_invocation_id(std::string(invocation_id));
+  p->set_json_path(std::string(json_path));
+  Emit(std::move(ev));
+}
+
 }  // namespace agentflow

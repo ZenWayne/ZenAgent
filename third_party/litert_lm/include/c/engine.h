@@ -504,6 +504,43 @@ LITERT_LM_C_API_EXPORT
 LiteRtLmBenchmarkInfo* litert_lm_conversation_get_benchmark_info(
     LiteRtLmConversation* conversation);
 
+// ── Agentflow extension: LLGuidance-backed constrained conversation ──────────
+//
+// Bridges the C++ Conversation + LLGuidance APIs through the C ABI so callers
+// can drive constrained decoding without linking the full LiteRT-LM C++
+// surface. The standard C API only exposes a boolean
+// `enable_constrained_decoding` that routes to the stubbed Gemma provider;
+// these functions take the working LLGuidance path instead.
+
+// Creates a Conversation that uses LLGuidance for constrained decoding.
+// When `tools_json` carries at least one tool, the conversation pre-builds a
+// Lark grammar from the tools (via CreateLarkGrammarForTools) and uses it as
+// the decoding constraint on every send.
+//
+// @param engine The engine to create the conversation from.
+// @param system_message_json Plain content string OR a JSON value the engine
+//        will wrap into `{role:system, content:<this>}`. May be NULL.
+// @param tools_json JSON array of tool definitions. May be NULL or "[]".
+// @return A new LiteRtLmConversation owned by the caller; destroy via
+//         `litert_lm_conversation_delete`. NULL on failure.
+LITERT_LM_C_API_EXPORT
+LiteRtLmConversation* litert_lm_engine_create_constrained_conversation(
+    LiteRtLmEngine* engine,
+    const char* system_message_json,
+    const char* tools_json);
+
+// Sends `message_json` synchronously through a constrained conversation
+// (created via `litert_lm_engine_create_constrained_conversation`). The
+// conversation's pre-built Lark grammar is attached as the decoding
+// constraint for this turn.
+//
+// @return JSON response owned by the caller (destroy via
+//         `litert_lm_json_response_delete`). NULL on failure.
+LITERT_LM_C_API_EXPORT
+LiteRtLmJsonResponse* litert_lm_conversation_send_message_constrained(
+    LiteRtLmConversation* conversation,
+    const char* message_json);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

@@ -23,6 +23,7 @@ cc_library(
         "runner.h",
         "state.h",
         "stub_node.h",
+        "token_channel.h",
     ],
     deps = [
         "//agentflow/persist",
@@ -30,5 +31,6 @@ cc_library(
         "@abseil-cpp//absl/status",
         "@asio",
         "@com_google_protobuf//:protobuf",
+        "@nlohmann_json//:json",
     ],
 )

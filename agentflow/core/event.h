@@ -3,6 +3,7 @@
 #define AGENTFLOW_CORE_EVENT_H_
 
 #include <chrono>
+#include <cstdint>
 #include <string_view>
 
 #include "trace_event.pb.h"
@@ -28,6 +29,22 @@ class EventEmitter {
   void EmitNodeFailed(std::string_view node_id, std::string_view type,
                        std::string_view message);
   void EmitGraphDone(bool failed);
+  void EmitWorkflowRegistered(std::string_view name, std::string_view version,
+                                bool signed_value, std::string_view key_id);
+  void EmitWorkflowUnregistered(std::string_view name, std::string_view version);
+  void EmitSubAgentStart(std::string_view parent_agent,
+                          std::string_view child_agent,
+                          std::string_view invocation_id,
+                          std::string_view root_invocation_id,
+                          uint32_t depth,
+                          std::string_view goal);
+  void EmitSubAgentEnd(std::string_view invocation_id,
+                        uint32_t depth,
+                        bool success,
+                        std::string_view error_kind,
+                        uint32_t output_chars);
+  void EmitSubAgentExtractFailed(std::string_view invocation_id,
+                                   std::string_view json_path);
 
  protected:
   static int64_t NowMicros();
