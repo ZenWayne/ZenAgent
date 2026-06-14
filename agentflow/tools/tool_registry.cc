@@ -55,6 +55,11 @@ void ToolRegistry::Register(std::shared_ptr<Tool> tool) {
   tools_[tool->Schema().name] = std::move(tool);
 }
 
+bool ToolRegistry::Has(std::string_view name) const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return tools_.find(std::string(name)) != tools_.end();
+}
+
 bool ToolRegistry::TryRegisterIfAbsent(std::shared_ptr<Tool> tool) {
   std::lock_guard<std::mutex> lk(mu_);
   const auto& name = tool->Schema().name;
