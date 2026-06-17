@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include "absl/status/status.h"
 #include "test_messages.pb.h"
 
 namespace agentflow {
@@ -71,6 +72,33 @@ TEST(StateTest, ClonePreservesData) {
   EXPECT_EQ(copy.As<test::TestState>().counter(), 11);
   copy.Mutable<test::TestState>().set_counter(99);
   EXPECT_EQ(s.As<test::TestState>().counter(), 11);  // original untouched
+}
+
+TEST(StateTest, ParseFromStringBoundedRejectsOversize) {
+  test::TestState raw;
+  raw.set_user_query(std::string(1024, 'x'));  // ~1KB field
+  State filled = State::From(raw);
+  const std::string big = filled.SerializeAsString();
+  State s = State::Empty<test::TestState>();
+  absl::Status st = s.ParseFromStringBounded(big, /*max_depth=*/100,
+                                             /*max_bytes=*/64);
+  EXPECT_FALSE(st.ok());
+  EXPECT_EQ(st.code(), absl::StatusCode::kInvalidArgument);
+}
+
+TEST(StateTest, ParseFromStringBoundedAcceptsUnderLimit) {
+  test::TestState raw;
+  raw.set_counter(5);
+  const std::string bytes = State::From(raw).SerializeAsString();
+  State s = State::Empty<test::TestState>();
+  ASSERT_TRUE(s.ParseFromStringBounded(bytes, 100, 1 << 20).ok());
+  EXPECT_EQ(s.As<test::TestState>().counter(), 5);
+}
+
+TEST(StateTest, ParseFromStringBoundedRejectsEmptyState) {
+  State s;  // default-constructed: no underlying message
+  absl::Status st = s.ParseFromStringBounded("anything");
+  EXPECT_EQ(st.code(), absl::StatusCode::kFailedPrecondition);
 }
 
 // Cross-arm parity: ReadStringField/WriteStringField against a proto-backed
