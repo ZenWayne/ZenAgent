@@ -45,8 +45,19 @@ done
 echo "staging source archives:  ${#STAGING_ARCHIVES[@]}"
 echo "external source archives: ${#EXTERNAL_ARCHIVES[@]} (abseil excluded)"
 
-# Combine a list of .a files into one thin-member archive by extracting all
-# members into a private dir (disambiguating same-named members) then `ar rcs`.
+# Combine a list of .a files into one archive.
+#
+# CRITICAL: many of the component archives contain MULTIPLE members with the
+# SAME basename (e.g. libXNNPACK.a has two `pack-lh.c.o`; libcpuinfo.a has two
+# `cache.c.o` / `init.c.o`; libtensorflow-lite.a has 8 duplicated basenames).
+# A plain `ar x` extracts every member of an archive into one directory, so the
+# second same-named member OVERWRITES the first and its objects (and symbols)
+# are silently lost. That is the bug that produced the old, too-small arm64
+# libce_external.a (missing cpuinfo_*, xnn_*_pack_lh_*, TfLite C API symbols).
+#
+# Fix: extract each member of each source archive INDIVIDUALLY by ordinal index
+# (`ar xN <archive> <member>`), writing each to a globally-unique path. This
+# preserves every duplicate-named member.
 combine() {
   local out="$1"; shift
   local extract="$WORK/$(basename "$out").d"
@@ -54,10 +65,21 @@ combine() {
   local i=0
   for src in "$@"; do
     local sub="$extract/$i"; mkdir -p "$sub"; i=$((i+1))
-    ( cd "$sub" && "$AR" x "$src" )
+    # List members; for each (1-based) occurrence of a name, extract that exact
+    # ordinal so duplicate basenames are all preserved under unique filenames.
+    local -A seen=()
+    local idx=0 name occ dest
+    while IFS= read -r name; do
+      idx=$((idx+1))
+      occ=$(( ${seen["$name"]:-0} + 1 ))
+      seen["$name"]=$occ
+      dest="$sub/$(printf '%05d_%d_%s' "$idx" "$occ" "$name")"
+      # `ar xN N` extracts the Nth member matching <name> to <name> in CWD.
+      ( cd "$sub" && "$AR" xN "$occ" "$src" "$name" && mv -f "$name" "$(basename "$dest")" )
+    done < <("$AR" t "$src")
   done
   rm -f "$out"
-  # Collect all object members across subdirs (unique paths, dup names kept separate).
+  # Collect all extracted object members (every unique on-disk path).
   find "$extract" -type f \( -name '*.o' -o -name '*.obj' \) -print0 \
     | xargs -0 "$AR" rcs "$out"
 }

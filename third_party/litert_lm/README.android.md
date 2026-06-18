@@ -78,6 +78,27 @@ $ANDROID_NDK_HOME/.../llvm-strip --strip-debug lib/arm64-v8a/libce_*.a lib/arm64
 - `libce_external.a` = all other linked `.a` EXCEPT abseil (Bazel supplies it).
 - `libkissfft-float.so.131` = the arm64 kissfft `.so` (Android SONAME is
   unversioned `libkissfft-float.so`; staged under the `.131` import name).
+  NOTE: kissfft is not always emitted into the main link tree — if the split
+  reports it cannot find `libkissfft-float.so.131`, keep the existing staged
+  copy (it is unchanged across builds).
+
+### Duplicate-member hazard (do not regress)
+
+Several component archives contain MULTIPLE members with the same basename:
+`libXNNPACK.a` has two `pack-lh.c.o` (only one defines `xnn_*_pack_lh_*`),
+`libcpuinfo.a` has duplicate `cache.c.o` / `init.c.o`, and
+`libtensorflow-lite.a` has 8 duplicated basenames (incl. the TFLite C API
+core that defines `TfLiteIntArray*`, `TfLiteTypeGetName`,
+`tflite::ErrorReporter::Report`). A naive `ar x <archive>` extracts all members
+of an archive into one directory, so a same-named member silently OVERWRITES the
+earlier one and its symbols vanish from the aggregate. This is what produced the
+earlier too-small (130 MB) arm64 `libce_external.a` that failed the JNI link
+with undefined `cpuinfo_*` / `xnn_*_pack_lh_*` / `TfLite*` symbols.
+
+`split_archives.sh` now extracts each member INDIVIDUALLY by ordinal
+(`ar xN <occurrence> <archive> <member>`) into a globally-unique path, so all
+duplicate-named members survive. After the split, strip debug info; the arm64
+`libce_external.a` should be ~144 MB (vs the host x86-64 reference's 155 MB).
 
 ## Verification
 
