@@ -25,6 +25,21 @@ namespace agentflow {
 struct AgentNodeConfig {
   std::shared_ptr<LiteRtLmEngine> engine;
   asio::io_context* io_ctx = nullptr;  // for LiteRtLmSession creation
+
+  // Optional persistent-conversation slot for multi-turn reuse. The LiteRT-LM
+  // engine owns dialogue history server-side, so reusing ONE conversation
+  // across many Run() calls continues the same dialogue (each user message is
+  // the next turn). When this points at a slot:
+  //   * if the slot already holds a conversation, Run() REUSES it (the system
+  //     prompt + tools baked in at its Create time are kept; system_prompt /
+  //     tool_names here are then only used to build it the first time);
+  //   * if the slot is empty, Run() creates the conversation and STORES it back
+  //     into the slot so the next Run() reuses it.
+  // Non-owning pointer to a caller-owned slot that must outlive every Run() and
+  // live on the same io_context as io_ctx. When null, Run() falls back to a
+  // fresh per-Run conversation (legacy single-shot behaviour).
+  std::shared_ptr<LiteRtLmConversation>* conversation_slot = nullptr;
+
   std::string system_prompt;
   std::shared_ptr<ToolRegistry> tool_registry;
   int max_iter = 8;

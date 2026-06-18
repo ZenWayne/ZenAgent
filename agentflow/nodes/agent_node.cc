@@ -87,25 +87,42 @@ asio::awaitable<State> AgentNode::Run(
   }
   if (cancel.IsCancelled()) co_return std::move(state);
 
-  // One Conversation per Run. The engine owns history across turns within
-  // the ReAct loop; we don't need to thread message state ourselves.
-  LiteRtLmConversationOptions opts;
-  opts.system_message_json = BuildSystemMessageJson();
-  opts.tools_json = BuildToolsJson();
-  opts.max_output_tokens = cfg_.max_output_tokens;
-  opts.constrained_tool_calls = cfg_.constrained_tool_calls;
-
-  auto conv = LiteRtLmConversation::Create(cfg_.engine, std::move(opts),
-                                            *cfg_.io_ctx);
+  // Reuse a persistent conversation when a slot is supplied and already holds
+  // one (multi-turn: the engine owns history server-side, so the same
+  // conversation across many Run() calls continues the same dialogue).
+  // Otherwise create one — and, when a slot was supplied, store it back so the
+  // next Run() reuses it. Without a slot this is a fresh per-Run conversation
+  // (legacy single-shot behaviour); the engine still owns history across turns
+  // within the ReAct loop, so we don't thread message state ourselves either
+  // way.
+  std::shared_ptr<LiteRtLmConversation> conv =
+      cfg_.conversation_slot ? *cfg_.conversation_slot : nullptr;
   if (!conv) {
-    throw AgentflowError("AgentNode: failed to create Conversation");
+    LiteRtLmConversationOptions opts;
+    opts.system_message_json = BuildSystemMessageJson();
+    opts.tools_json = BuildToolsJson();
+    opts.max_output_tokens = cfg_.max_output_tokens;
+    opts.constrained_tool_calls = cfg_.constrained_tool_calls;
+
+    conv = LiteRtLmConversation::Create(cfg_.engine, std::move(opts),
+                                        *cfg_.io_ctx);
+    if (!conv) {
+      throw AgentflowError("AgentNode: failed to create Conversation");
+    }
+    if (cfg_.conversation_slot) *cfg_.conversation_slot = conv;
   }
 
   // Cooperative cancellation: when the run is cancelled (e.g. a Flow collector
   // at the top of the stack cancelled), break the in-flight engine request so
   // a streaming turn stops mid-decode instead of only at the next turn
-  // boundary. conv->Cancel() is safe to call from any thread.
-  cancel.OnCancel([conv]() { conv->Cancel(); });
+  // boundary. For a persistent (slot-backed) conversation use CancelTurn so the
+  // conversation survives for the next user message; for a fresh per-Run
+  // conversation use the full Cancel (it's discarded after this run anyway).
+  const bool persistent = cfg_.conversation_slot != nullptr;
+  cancel.OnCancel([conv, persistent]() {
+    if (persistent) conv->CancelTurn();
+    else conv->Cancel();
+  });
 
   std::string message_json = BuildUserMessageJson(state);
   std::string final_answer;

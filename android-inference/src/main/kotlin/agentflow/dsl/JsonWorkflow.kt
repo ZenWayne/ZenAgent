@@ -115,3 +115,84 @@ class JsonWorkflow internal constructor(
  */
 fun loadWorkflow(modelPath: String, json: String): JsonWorkflow =
     JsonWorkflow(modelPath, json)
+
+/**
+ * A PERSISTENT multi-turn chat session. Unlike [JsonWorkflow.streamTokens]
+ * (which creates a fresh engine per message — reloading the model and tripping
+ * the engine's per-process registration on the 2nd message), a session loads
+ * the engine ONCE and reuses one conversation across messages, so the model
+ * keeps dialogue history and second/third/… messages just work.
+ *
+ * Lifecycle:
+ * ```
+ * val sess = openChatSession(modelPath, workflowJson)  // loads model once (blocking)
+ * sess.streamTokens("hi").collect { print(it) }        // turn 1
+ * sess.streamTokens("and again?").collect { ... }      // turn 2 — same context
+ * sess.close()                                          // free engine + worker thread
+ * ```
+ *
+ * [openChatSession] blocks while the model loads; call it off the main thread.
+ * Only one [streamTokens] turn runs at a time (the native side serializes).
+ */
+class ChatSession internal constructor(private val sessionId: Long) {
+
+    /**
+     * Streams one user message's reply deltas as a cold [Flow], reusing this
+     * session's engine + conversation. Same robust completion semantics as
+     * [JsonWorkflow.streamTokens]: a daemon thread runs the blocking native
+     * call, deltas flow through a blocking queue + DONE sentinel, and the flow
+     * completes cleanly when the turn ends. nativeCancel is signalled ONLY on
+     * collector cancellation (never on normal completion — that would deadlock
+     * the native cancel path against a finished turn).
+     */
+    fun streamTokens(userQuery: String): Flow<String> = flow {
+        val cancelId = NativeBridge.nativeNewCancel()
+        val queue = LinkedBlockingQueue<Item>()
+        val thread = Thread {
+            try {
+                NativeBridge.nativeSessionSendMessage(sessionId, userQuery, {
+                    delta ->
+                    queue.put(Item.Delta(delta))
+                }, cancelId)
+                queue.put(Item.Done(null))
+            } catch (t: Throwable) {
+                queue.put(Item.Done(t))
+            } finally {
+                NativeBridge.nativeFreeCancel(cancelId)
+            }
+        }
+        thread.isDaemon = true
+        thread.start()
+        try {
+            while (true) {
+                when (val item = queue.take()) {
+                    is Item.Delta -> emit(item.text)
+                    is Item.Done -> {
+                        item.error?.let { throw it }
+                        break
+                    }
+                }
+            }
+        } catch (c: CancellationException) {
+            NativeBridge.nativeCancel(cancelId)
+            throw c
+        }
+    }
+
+    /** Frees the native engine + worker thread. Safe to call once; idempotent-ish. */
+    fun close() {
+        NativeBridge.nativeCloseSession(sessionId)
+    }
+
+    private sealed interface Item {
+        data class Delta(val text: String) : Item
+        data class Done(val error: Throwable?) : Item
+    }
+}
+
+/**
+ * Opens a persistent [ChatSession], loading the model ONCE. Blocks while the
+ * engine loads (call off the main thread). Throws on failure.
+ */
+fun openChatSession(modelPath: String, workflowJson: String): ChatSession =
+    ChatSession(NativeBridge.nativeCreateSession(modelPath, workflowJson))
