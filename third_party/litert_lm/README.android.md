@@ -110,3 +110,11 @@ for f in lib/arm64-v8a/libce_*.a; do
 done
 file lib/arm64-v8a/libkissfft-float.so.131
 ```
+
+## Reproducing from a clean checkout
+The arm64 LiteRT-LM build requires submodule-local CMake fixes captured in
+`android-arm64-litertlm.patch`. Apply before building:
+```
+cd LiteRT-LM && git apply ../third_party/litert_lm/android-arm64-litertlm.patch
+```
+Then run `../build_jni_arm64.sh` (builds + verifies aarch64 + stages the .so).
