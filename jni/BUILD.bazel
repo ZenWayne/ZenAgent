@@ -12,16 +12,18 @@ cc_binary(
     name = "libagentflow_jni.so",
     srcs = ["agentflow_jni.cc"],
     linkshared = True,
-    # `-z notext` is a defensive belt, NOT currently required. Verified on
-    # GNU ld 2.46: the .so links clean without it and carries no DT_TEXTREL.
-    # RE2 in libce_external.a is already PIC; the only absolute relocs come
-    # from the Rust tokenizer's std/compiler_builtins objects and live
-    # entirely in .debug_* (non-alloc) sections, so they never become runtime
-    # text relocations. Kept cheap in case a future non-PIC object with real
-    # .text relocs ever slips into the combined archive.
-    linkopts = [
-        "-Wl,-z,notext",
-    ],
+    # `-z,notext` PERMITS text relocations. On the host (GNU ld) the combined
+    # archive carries no real .text relocs, so the flag is a harmless belt.
+    # On the NDK/arm64 cross-build it is actively harmful: it silently lets
+    # real runtime text relocations through, producing a .so with DT_TEXTREL
+    # that Android's loader REJECTS ("dlopen failed: ... has text relocations").
+    # So we DROP it for android and let lld ENFORCE no-textrel (it will error
+    # and name any offending object instead of shipping an unloadable .so).
+    # Kept ONLY for the host config where it is benign.
+    linkopts = select({
+        "//bazel/platforms:is_android": [],
+        "//conditions:default": ["-Wl,-z,notext"],
+    }),
     deps = [
         # Official JNI headers. Bazel auto-detects the system JDK (via JAVA_HOME
         # or `java` on PATH) and materializes @local_jdk locally — no network,
