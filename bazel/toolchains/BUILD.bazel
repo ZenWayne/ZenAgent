@@ -1,0 +1,59 @@
+package(default_visibility = ["//visibility:public"])
+
+# Cross-compile JDK runtime toolchain.
+#
+# When building for //bazel/platforms:android_arm64, Bazel still needs to
+# resolve @bazel_tools//tools/jdk:runtime_toolchain_type for the TARGET
+# platform — the `@bazel_tools//tools/jdk:jni` target (a dep of
+# //jni:libagentflow_jni.so) reads jni.h / jni_md.h from the resolved Java
+# runtime. The stock @local_jdk runtime toolchain hard-codes
+# target_compatible_with = HOST_CONSTRAINTS (see rules_java
+# local_java_repository.bzl), so it never matches an android target platform
+# and resolution fails with "No matching toolchains found".
+#
+# We re-export the host JDK's java_runtime as a runtime toolchain that IS
+# compatible with the android target. JNI headers are platform-independent for
+# our purposes (the .so links against the device's libart at load time, not
+# against the host JDK), so the host JDK's jni.h/jni_md.h are fine here.
+#
+# This toolchain is registered AFTER @androidndk/@local_jdk in MODULE.bazel, so
+# host builds keep resolving the stock @local_jdk runtime first; only the
+# android target (which the stock one rejects) falls through to this one.
+toolchain(
+    name = "android_jdk_runtime_toolchain",
+    target_compatible_with = [
+        "@platforms//os:android",
+    ],
+    toolchain = "@local_jdk//:jdk",
+    toolchain_type = "@bazel_tools//tools/jdk:runtime_toolchain_type",
+)
+
+# Cross-compile shim for the platform-dependent JNI header.
+#
+# @bazel_tools//tools/jdk:jni's jni.h does `#include "jni_md.h"`, but that
+# target only puts jni_md.h (and its include/<os> dir) on the search path for
+# HOST-style targets — its select() keys on @bazel_tools//src/conditions:
+# linux_x86_64 / linux_aarch64 / ..., all of which require os:linux. Under
+# --config=android_arm64 the target platform is os:android, the select falls
+# through to [] and jni_md.h is never exposed →
+#   fatal error: 'jni_md.h' file not found
+# (clang, compiling jni/agentflow_jni.cc → external/rules_java~/.../jni.h).
+#
+# jni_md.h is platform-independent for our purposes (it only typedefs the JNI
+# scalar widths and defines JNIEXPORT/JNICALL; the .so is loaded by the
+# device's ART at runtime, not linked against the host JDK). We re-export the
+# host JDK's linux jni_md.h with `includes = ["."]` so consumers get it on the
+# angle/quote search path. //jni:libagentflow_jni.so adds this as an
+# android-only `select()` dep.
+genrule(
+    name = "copy_jni_md",
+    srcs = ["@local_jdk//:jdk-include"],
+    outs = ["jni_md.h"],
+    cmd = "cp \"$$(for f in $(locations @local_jdk//:jdk-include); do case \"$$f\" in */include/linux/jni_md.h) echo \"$$f\";; esac; done | head -1)\" $@",
+)
+
+cc_library(
+    name = "android_jni_md",
+    hdrs = [":jni_md.h"],
+    includes = ["."],
+)

@@ -1,10 +1,21 @@
 # third_party/litert_lm/BUILD.bazel
 package(default_visibility = ["//visibility:public"])
 
+# Under --config=android_arm64 (//bazel/platforms:android_arm64) the prebuilt
+# archives come from lib/arm64-v8a/ (Task 1 cross-compiled them with NDK r26d).
+# The host (x86_64) build keeps using lib/*.a (the //conditions:default path).
+config_setting(
+    name = "android_build",
+    constraint_values = ["@platforms//os:android"],
+)
+
 # kissfft is the only non-system shared dependency of the C engine.
 cc_import(
     name = "kissfft",
-    shared_library = "lib/libkissfft-float.so.131",
+    shared_library = select({
+        ":android_build": "lib/arm64-v8a/libkissfft-float.so.131",
+        "//conditions:default": "lib/libkissfft-float.so.131",
+    }),
 )
 
 # Prebuilt LiteRT-LM C engine, split into two archives that mirror how
@@ -17,7 +28,10 @@ cc_import(
 # registrars survive (LITERT_LM_REGISTER_ENGINE etc.).
 cc_import(
     name = "c_engine_staging",
-    static_library = "lib/libce_staging.a",
+    static_library = select({
+        ":android_build": "lib/arm64-v8a/libce_staging.a",
+        "//conditions:default": "lib/libce_staging.a",
+    }),
     alwayslink = True,
 )
 
@@ -28,7 +42,10 @@ cc_import(
 # litert::Environment::Create. On-demand linking pulls the real def first.
 cc_import(
     name = "c_engine_external",
-    static_library = "lib/libce_external.a",
+    static_library = select({
+        ":android_build": "lib/arm64-v8a/libce_external.a",
+        "//conditions:default": "lib/libce_external.a",
+    }),
 )
 
 cc_library(
@@ -42,10 +59,18 @@ cc_library(
         "-Wl,--allow-multiple-definition",
         "-ldl",
         "-lm",
-        "-lpthread",
-        "-lrt",
         "-lz",
-    ],
+    ] + select({
+        # Android's Bionic libc folds pthread and rt into libc itself — there
+        # is no libpthread.so / librt.so, so `-lpthread`/`-lrt` make ld.lld
+        # fail with "unable to find library". On the host (glibc) they are
+        # separate libs and must be linked explicitly.
+        ":android_build": [],
+        "//conditions:default": [
+            "-lpthread",
+            "-lrt",
+        ],
+    }),
     deps = [
         ":c_engine_staging",
         ":c_engine_external",

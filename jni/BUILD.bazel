@@ -36,5 +36,11 @@ cc_binary(
         "//agentflow/workflow:workflow_runner",
         "//proto:agentflow_proto",
         "@asio",
-    ],
+    ] + select({
+        # @bazel_tools//tools/jdk:jni only exposes jni_md.h for os:linux target
+        # platforms; cross-compiling for os:android needs this shim so jni.h's
+        # `#include "jni_md.h"` resolves. See bazel/toolchains:android_jni_md.
+        "//bazel/platforms:is_android": ["//bazel/toolchains:android_jni_md"],
+        "//conditions:default": [],
+    }),
 )

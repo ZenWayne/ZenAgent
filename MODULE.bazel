@@ -52,3 +52,19 @@ cc_library(
 # Referenced as //third_party/litert_lm:c_engine (main workspace target).
 # Upgrade to @litert_lm//:c_engine with local_path_override in MODULE.bazel
 # when a prebuilt libc_engine.a is available.
+
+# ── Android NDK toolchain (arm64-v8a on-device builds) ─────────────
+# ANDROID_NDK_HOME must be exported in the build shell (NDK r26d).
+bazel_dep(name = "rules_android_ndk", version = "0.1.3")
+android_ndk_repository_extension = use_extension(
+    "@rules_android_ndk//:extension.bzl",
+    "android_ndk_repository_extension",
+)
+use_repo(android_ndk_repository_extension, "androidndk")
+register_toolchains("@androidndk//:all")
+
+# JDK runtime toolchain compatible with the android target platform, so that
+# @bazel_tools//tools/jdk:jni (a dep of //jni:libagentflow_jni.so) can resolve
+# a Java runtime when cross-compiling. Registered last so host builds keep
+# using the stock @local_jdk runtime toolchain. See bazel/toolchains/BUILD.bazel.
+register_toolchains("//bazel/toolchains:android_jdk_runtime_toolchain")
