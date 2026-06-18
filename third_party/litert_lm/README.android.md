@@ -100,6 +100,37 @@ with undefined `cpuinfo_*` / `xnn_*_pack_lh_*` / `TfLite*` symbols.
 duplicate-named members survive. After the split, strip debug info; the arm64
 `libce_external.a` should be ~144 MB (vs the host x86-64 reference's 155 MB).
 
+### Bogus `kLiteRtRuntimeBuiltin` null def (do not regress)
+
+`litert_runtime_no_builtin.cc.o` defines `kLiteRtRuntimeBuiltin` as a read-only
+symbol with value 0 (i.e. `nullptr`); `llvm-nm` shows it as
+`0000000000000000 R kLiteRtRuntimeBuiltin`. The REAL definition lives in
+`litert_runtime_builtin.cc.o` as `D kLiteRtRuntimeBuiltin` (points at
+`kBuiltinStruct`). Under the `-Wl,--allow-multiple-definition` linkopt the C
+engine needs (see `BUILD.bazel`), the null `R` def can win over the real `D`
+def, after which `litert::Environment::Create` aborts with:
+
+```
+Check failed: 'runtime_c_api == nullptr ? kLiteRtRuntimeBuiltin : runtime_c_api' Must be non-null
+```
+
+The host `litert_lm_main` `link.txt` never references the `no_builtin` object,
+so the host `libce_external.a` only ever contained the real `D` def. The arm64
+aggregation accidentally pulled in BOTH objects, reintroducing the null def.
+`split_archives.sh` now excludes `litert_runtime_no_builtin.cc.o` (see
+`EXCLUDE_OBJECT_BASENAMES`); that object carries only this one symbol, so
+dropping it loses nothing. Verify after staging:
+
+```bash
+# Must show exactly one DEFINED def, of type D (non-null), and no R/B null def:
+llvm-nm -A lib/arm64-v8a/libce_external.a | grep kLiteRtRuntimeBuiltin
+# In the linked .so it must be DEFINED at a non-zero address (D), not undefined:
+llvm-nm bazel-bin/jni/libagentflow_jni.so | grep kLiteRtRuntimeBuiltin
+```
+
+If a re-staged archive ever reintroduces the `R`/null def, either the exclude
+list was bypassed or upstream renamed the object; re-add the new basename.
+
 ## Verification
 
 Each archive member / the `.so` must report `ELF 64-bit ... ARM aarch64`:

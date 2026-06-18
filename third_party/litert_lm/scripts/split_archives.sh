@@ -58,6 +58,26 @@ echo "external source archives: ${#EXTERNAL_ARCHIVES[@]} (abseil excluded)"
 # Fix: extract each member of each source archive INDIVIDUALLY by ordinal index
 # (`ar xN <archive> <member>`), writing each to a globally-unique path. This
 # preserves every duplicate-named member.
+#
+# EXCLUDED OBJECTS (see third_party/litert_lm/BUILD.bazel + README.android.md):
+#   litert_runtime_no_builtin.cc.o defines a bogus `R kLiteRtRuntimeBuiltin`
+#   (read-only, value 0 == nullptr). The real def is `D kLiteRtRuntimeBuiltin`
+#   in litert_runtime_builtin.cc.o. Under -Wl,--allow-multiple-definition the
+#   null `R` def can win over the real `D` def, which crashes
+#   litert::Environment::Create (CHECK_NOTNULL). The host link.txt never pulls
+#   the no_builtin object; the arm64 aggregate accidentally did. Drop it so the
+#   real (non-null) def is the only definition. This object carries ONLY that
+#   one symbol, so excluding it loses nothing else.
+EXCLUDE_OBJECT_BASENAMES=(
+  "litert_runtime_no_builtin.cc.o"
+)
+is_excluded() {
+  local base="$1" ex
+  for ex in "${EXCLUDE_OBJECT_BASENAMES[@]}"; do
+    [ "$base" = "$ex" ] && return 0
+  done
+  return 1
+}
 combine() {
   local out="$1"; shift
   local extract="$WORK/$(basename "$out").d"
@@ -73,6 +93,11 @@ combine() {
       idx=$((idx+1))
       occ=$(( ${seen["$name"]:-0} + 1 ))
       seen["$name"]=$occ
+      # Skip objects that introduce a colliding bogus symbol definition.
+      if is_excluded "$name"; then
+        echo "EXCLUDING object from $(basename "$out"): $name" >&2
+        continue
+      fi
       dest="$sub/$(printf '%05d_%d_%s' "$idx" "$occ" "$name")"
       # `ar xN N` extracts the Nth member matching <name> to <name> in CWD.
       ( cd "$sub" && "$AR" xN "$occ" "$src" "$name" && mv -f "$name" "$(basename "$dest")" )
