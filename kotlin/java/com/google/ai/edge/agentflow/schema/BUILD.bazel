@@ -1,0 +1,46 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+package(default_visibility = ["//visibility:public"])
+
+kt_jvm_library(
+    name = "schema",
+    srcs = ["ProtoSchemaCompiler.kt"],
+    deps = [
+        "@agentflow_maven//:com_squareup_wire_wire_schema_jvm",
+        "@agentflow_maven//:com_squareup_okio_okio",
+        # Runtime dep (not test-only): ProtoSchemaCompiler uses FakeFileSystem
+        # as an in-memory VFS to feed Wire's SchemaLoader without touching disk.
+        "@agentflow_maven//:com_squareup_okio_okio_fakefilesystem",
+    ],
+)
+
+kt_jvm_test(
+    name = "ProtoSchemaCompilerTest",
+    srcs = ["ProtoSchemaCompilerTest.kt"],
+    test_class = "com.google.ai.edge.agentflow.schema.ProtoSchemaCompilerTest",
+    deps = [
+        ":schema",
+        "@agentflow_maven//:com_google_protobuf_protobuf_java",
+        "@agentflow_maven//:junit_junit",
+    ],
+)
+
+kt_jvm_library(
+    name = "dynamic_schema",
+    srcs = ["DynamicSchema.kt"],
+    deps = [
+        ":schema",
+        "//agentflow/jni:schema_registry_jni_kt",
+    ],
+)
+
+kt_jvm_test(
+    name = "DynamicSchemaSmokeTest",
+    srcs = ["DynamicSchemaSmokeTest.kt"],
+    test_class = "com.google.ai.edge.agentflow.schema.DynamicSchemaSmokeTest",
+    data = ["//agentflow/jni:libagentflow_jni.so"],
+    deps = [
+        ":dynamic_schema",
+        "@agentflow_maven//:junit_junit",
+    ],
+)

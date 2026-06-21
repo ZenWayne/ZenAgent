@@ -54,6 +54,22 @@ class State {
     return s;
   }
 
+  // Wraps an already-constructed protobuf message whose concrete type is not
+  // known at compile time. This is the entry point for the dynamic-schema path:
+  // a DynamicMessage built from a runtime-loaded descriptor (see
+  // agentflow/dynamic/SchemaRegistry) is handed in as a base-class pointer.
+  //
+  // Unlike FromDynamicProto(), this does NOT install a pool keepalive: the
+  // message borrows its descriptors/prototype from whatever built it (e.g. a
+  // SchemaRegistry), which the caller guarantees outlives this State. Prefer
+  // FromDynamicProto() when the State itself should own the pool's lifetime.
+  [[nodiscard]] static State FromMessage(
+      std::unique_ptr<google::protobuf::Message> msg) {
+    State s;
+    s.backing_ = std::move(msg);
+    return s;
+  }
+
   // Build a JSON-backed state from a fields declaration (typically the
   // WorkflowSpec.state.fields entry). Each entry's "default" is used if
   // present; otherwise initialized by "type" ("string"->"", "integer"->0,

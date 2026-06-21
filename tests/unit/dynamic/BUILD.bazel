@@ -1,0 +1,43 @@
+# tests/unit/dynamic/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "schema_registry_test",
+    size = "small",
+    srcs = ["schema_registry_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/dynamic",
+        "@com_google_protobuf//:protobuf",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "dynamic_state_test",
+    size = "small",
+    srcs = ["dynamic_state_test.cc"],
+    deps = [
+        "//agentflow/dynamic",
+        "//proto:agentflow_proto",
+        "@com_google_protobuf//:protobuf",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "dynamic_resume_test",
+    size = "small",
+    srcs = ["dynamic_resume_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/dynamic",
+        "//proto:agentflow_proto",
+        "@asio",
+        "@com_google_protobuf//:protobuf",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

@@ -367,38 +367,47 @@ asio::awaitable<State> Runner::Impl::Resume(const proto::Checkpoint& cp,
 
   {
     std::lock_guard<std::mutex> lk(mu_);
-    // Replay completion bookkeeping: each completed node "fired once,"
-    // counted toward our completed_node_ids_ log.
-    for (const auto& id : cp.completed_nodes()) {
-      auto& na = activations_[id];
-      na.times_fired = 1;
-      na.in_flight = false;
-      completed_node_ids_.push_back(id);
-    }
-    // Seed successors of every completed node — but skip edges whose target
-    // is itself already completed (that input was consumed in the prior run).
-    bool any_outgoing_alive = false;
-    for (const auto& id : cp.completed_nodes()) {
-      bool has_outgoing = false;
-      for (const auto& e : graph_.Edges()) {
-        if (e.from != id) continue;
-        has_outgoing = true;
-        if (completed.count(e.to)) continue;
-        auto& succ = activations_[e.to];
-        succ.pending_inputs.push_back(target.Clone());
-        if (e.condition == Edge::Condition::ALL) {
-          succ.remaining_all[e.activation_group] -= 1;
-        } else {
-          succ.any_fired[e.activation_group] = true;
-        }
+
+    if (cp.completed_nodes().empty()) {
+      // Cold-start: no prior progress recorded. Seed entry nodes with
+      // `target` exactly as Run() does, and let RunInner dispatch normally.
+      for (const auto& id : graph_.EntryNodeIds()) {
+        activations_[id].pending_inputs.push_back(target.Clone());
       }
-      if (has_outgoing) any_outgoing_alive = true;
-    }
-    // If every completed node was terminal (no outgoing) or the graph has
-    // nothing left to do, take target as the terminal state immediately.
-    if (!any_outgoing_alive ||
-        completed.size() == graph_.Nodes().size()) {
-      terminal_state_ = target.Clone();
+    } else {
+      // Replay completion bookkeeping: each completed node "fired once,"
+      // counted toward our completed_node_ids_ log.
+      for (const auto& id : cp.completed_nodes()) {
+        auto& na = activations_[id];
+        na.times_fired = 1;
+        na.in_flight = false;
+        completed_node_ids_.push_back(id);
+      }
+      // Seed successors of every completed node — but skip edges whose target
+      // is itself already completed (that input was consumed in the prior run).
+      bool any_outgoing_alive = false;
+      for (const auto& id : cp.completed_nodes()) {
+        bool has_outgoing = false;
+        for (const auto& e : graph_.Edges()) {
+          if (e.from != id) continue;
+          has_outgoing = true;
+          if (completed.count(e.to)) continue;
+          auto& succ = activations_[e.to];
+          succ.pending_inputs.push_back(target.Clone());
+          if (e.condition == Edge::Condition::ALL) {
+            succ.remaining_all[e.activation_group] -= 1;
+          } else {
+            succ.any_fired[e.activation_group] = true;
+          }
+        }
+        if (has_outgoing) any_outgoing_alive = true;
+      }
+      // If every completed node was terminal (no outgoing) or the graph has
+      // nothing left to do, take target as the terminal state immediately.
+      if (!any_outgoing_alive ||
+          completed.size() == graph_.Nodes().size()) {
+        terminal_state_ = target.Clone();
+      }
     }
   }
 
