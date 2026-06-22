@@ -1,5 +1,8 @@
 #include "agentflow/workflow/workflow_loader.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -9,6 +12,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <asio/awaitable.hpp>
 
 #include <absl/status/status.h>
 #include <absl/strings/escaping.h>
@@ -187,6 +192,87 @@ absl::Status ParseSigning(const ordered_json& j,
   return absl::OkStatus();
 }
 
+absl::StatusOr<proto::McpServerSpec::Transport> ParseTransport(std::string v) {
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char ch) { return std::tolower(ch); });
+  if (v == "stdio") return proto::McpServerSpec::STDIO;
+  if (v == "http_sse" || v == "http" || v == "sse")
+    return proto::McpServerSpec::HTTP_SSE;
+  if (v == "websocket" || v == "ws") return proto::McpServerSpec::WEBSOCKET;
+  if (v == "tcp") return proto::McpServerSpec::TCP;
+  return absl::InvalidArgumentError(absl::StrCat("unknown transport '", v, "'"));
+}
+
+constexpr size_t kMaxMcpServers = 16;
+
+absl::Status ParseMcpServers(const ordered_json& arr,
+                             proto::WorkflowSpec* spec) {
+  if (!arr.is_array()) {
+    return absl::InvalidArgumentError("mcp_servers must be an array");
+  }
+  if (arr.size() > kMaxMcpServers) {
+    return absl::ResourceExhaustedError(absl::StrCat(
+        "mcp_servers count ", arr.size(), " > limit ", kMaxMcpServers));
+  }
+  std::unordered_set<std::string> seen;
+  for (const auto& e : arr) {
+    if (!e.is_object()) {
+      return absl::InvalidArgumentError("mcp_servers entries must be objects");
+    }
+    auto* decl = spec->add_mcp_servers();
+
+    auto idit = e.find("id");
+    if (idit == e.end() || !idit->is_string() ||
+        idit->get<std::string>().empty()) {
+      return absl::InvalidArgumentError(
+          "mcp_servers entry requires a non-empty string 'id'");
+    }
+    std::string id = idit->get<std::string>();
+    if (id.find('.') != std::string::npos) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("mcp_server id '", id, "' must not contain '.'"));
+    }
+    if (!seen.insert(id).second) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("duplicate mcp_server id '", id, "'"));
+    }
+    decl->set_id(id);
+
+    auto* s = decl->mutable_spec();
+    std::string transport = "stdio";
+    if (auto t = e.find("transport"); t != e.end() && t->is_string()) {
+      transport = t->get<std::string>();
+    }
+    auto tr = ParseTransport(transport);
+    if (!tr.ok()) return tr.status();
+    s->set_transport(*tr);
+
+    if (auto c = e.find("command_or_url"); c != e.end() && c->is_string()) {
+      s->set_command_or_url(c->get<std::string>());
+    }
+    if (auto a = e.find("args"); a != e.end() && a->is_array()) {
+      for (const auto& x : *a)
+        if (x.is_string()) s->add_args(x.get<std::string>());
+    }
+    if (auto inc = e.find("include_tools"); inc != e.end() && inc->is_array()) {
+      for (const auto& x : *inc)
+        if (x.is_string()) s->add_include_tools(x.get<std::string>());
+    }
+    if (auto exc = e.find("exclude_tools"); exc != e.end() && exc->is_array()) {
+      for (const auto& x : *exc)
+        if (x.is_string()) s->add_exclude_tools(x.get<std::string>());
+    }
+    if (auto to = e.find("call_timeout_ms");
+        to != e.end() && to->is_number_integer()) {
+      s->set_call_timeout_ms(to->get<int32_t>());
+    }
+    if (auto lz = e.find("lazy_start"); lz != e.end() && lz->is_boolean()) {
+      s->set_lazy_start(lz->get<bool>());
+    }
+  }
+  return absl::OkStatus();
+}
+
 absl::Status ParseRoot(const ordered_json& root, proto::WorkflowSpec* spec) {
   if (!root.is_object()) {
     return absl::InvalidArgumentError("workflow root must be a JSON object");
@@ -217,6 +303,9 @@ absl::Status ParseRoot(const ordered_json& root, proto::WorkflowSpec* spec) {
       if (auto s = ParseAgentDef(a.key(), a.value(), &def); !s.ok()) return s;
       agents_map[a.key()] = std::move(def);
     }
+  }
+  if (auto it = root.find("mcp_servers"); it != root.end()) {
+    if (auto s = ParseMcpServers(*it, spec); !s.ok()) return s;
   }
   if (auto it = root.find("signing"); it != root.end()) {
     if (auto s = ParseSigning(*it, spec->mutable_signing()); !s.ok()) return s;
@@ -558,6 +647,11 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
   proto::WorkflowSpec spec;
   if (auto s = ParseRoot(root, &spec); !s.ok()) return s;
 
+  if (spec.mcp_servers_size() > 0) {
+    return absl::InvalidArgumentError(
+        "workflow declares mcp_servers; use WorkflowLoader::LoadAndAttach");
+  }
+
   return FinalizeLoadedSpec(std::move(spec), root, host_tools,
                             json_text.size(), opts);
 }
@@ -573,6 +667,45 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::LoadFromFile(
   std::ostringstream buf;
   buf << in.rdbuf();
   return Load(buf.str(), host_tools, opts);
+}
+
+asio::awaitable<absl::StatusOr<std::shared_ptr<Workflow>>>
+WorkflowLoader::LoadAndAttach(std::string_view json_text,
+                             ToolRegistry& registry, Options opts) {
+  if (json_text.size() > opts.max_json_bytes) {
+    co_return absl::ResourceExhaustedError(absl::StrCat(
+        "workflow json size ", json_text.size(),
+        " > limit ", opts.max_json_bytes));
+  }
+  auto root = ordered_json::parse(json_text, nullptr, /*allow_exceptions=*/false);
+  if (root.is_discarded()) {
+    co_return absl::InvalidArgumentError("malformed json");
+  }
+
+  proto::WorkflowSpec spec;
+  if (auto s = ParseRoot(root, &spec); !s.ok()) co_return s;
+
+  // Connect declared MCP servers (eager). Failures degrade: warn + skip.
+  for (const auto& decl : spec.mcp_servers()) {
+    proto::McpServerSpec server = decl.spec();
+    if (server.lazy_start()) {
+      std::fprintf(stderr,
+                   "[WorkflowLoader] mcp_server '%s': lazy_start ignored "
+                   "(eager connect required for JSON-declared servers)\n",
+                   decl.id().c_str());
+      server.set_lazy_start(false);
+    }
+    absl::Status st = co_await registry.AttachMcpServer(server, decl.id());
+    if (!st.ok()) {
+      std::fprintf(stderr,
+                   "[WorkflowLoader] mcp_server '%s' attach failed: %s — "
+                   "skipping (degrade)\n",
+                   decl.id().c_str(), std::string(st.message()).c_str());
+    }
+  }
+
+  co_return FinalizeLoadedSpec(std::move(spec), root, registry,
+                               json_text.size(), opts);
 }
 
 }  // namespace agentflow::workflow

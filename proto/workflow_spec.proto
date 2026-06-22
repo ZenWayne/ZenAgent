@@ -2,6 +2,8 @@
 syntax = "proto3";
 package agentflow.proto;
 
+import "mcp_spec.proto";
+
 // Mirror of the JSON workflow schema described in Spec §3. Authors write
 // JSON; the loader parses into this proto for typed downstream use.
 message WorkflowSpec {
@@ -47,6 +49,12 @@ message WorkflowSpec {
   }
   map<string, AgentDef> agents = 5;
   string main = 6;
+
+  message McpServerDecl {
+    string id          = 1;   // namespace prefix; non-empty, unique, no '.'
+    McpServerSpec spec = 2;   // transport / command_or_url / args / include / exclude / timeout
+  }
+  repeated McpServerDecl mcp_servers = 8;
 
   message Signing {
     string algo      = 1;  // "HMAC-SHA256"
