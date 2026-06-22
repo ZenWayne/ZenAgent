@@ -68,7 +68,8 @@ class ToolRegistry {
   //                                 still starts.
   // Collision policy: a remote tool whose name is already registered (native
   // or earlier MCP) is SKIPPED with a warning — the local/earlier tool wins.
-  asio::awaitable<absl::Status> AttachMcpServer(proto::McpServerSpec spec);
+  asio::awaitable<absl::Status> AttachMcpServer(
+      proto::McpServerSpec spec, std::string name_prefix = "");
 
   // Shuts down every MCP client this registry's pool has created. The MCP
   // adapters registered as tools stay in place but will return

@@ -16,3 +16,18 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "mcp_namespace_smoke_test",
+    size = "medium",
+    srcs = ["mcp_namespace_smoke_test.cc"],
+    data = ["echo_mcp_server.py"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

@@ -8,6 +8,8 @@
 #include <unordered_set>
 #include <utility>
 
+#include <absl/strings/str_cat.h>
+
 #include "agentflow/core/errors.h"
 #include "agentflow/tools/mcp_client.h"
 #include "agentflow/tools/mcp_client_pool.h"
@@ -69,7 +71,7 @@ bool ToolRegistry::TryRegisterIfAbsent(std::shared_ptr<Tool> tool) {
 }
 
 asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(
-    proto::McpServerSpec spec) {
+    proto::McpServerSpec spec, std::string name_prefix) {
   if (pool_ == nullptr) {
     co_return absl::FailedPreconditionError(
         "AttachMcpServer requires the io_context-aware ToolRegistry ctor");
@@ -114,8 +116,9 @@ asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(
   int skipped_collision = 0;
   int skipped_filtered = 0;
   for (auto& schema : *list) {
-    if (!include_set.empty() && include_set.find(schema.name) ==
-                                    include_set.end()) {
+    // Filters match the RAW remote name (before namespacing).
+    if (!include_set.empty() &&
+        include_set.find(schema.name) == include_set.end()) {
       ++skipped_filtered;
       continue;
     }
@@ -123,8 +126,14 @@ asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(
       ++skipped_filtered;
       continue;
     }
+
+    const std::string remote_name = schema.name;
+    ToolSchema registered_schema = schema;  // copy; mutate the registry-facing name
+    if (!name_prefix.empty()) {
+      registered_schema.name = absl::StrCat(name_prefix, ".", remote_name);
+    }
     auto adapter = std::make_shared<mcp::McpToolAdapter>(
-        client, schema.name, schema, timeout);
+        client, remote_name, registered_schema, timeout);
     if (TryRegisterIfAbsent(adapter)) {
       ++registered;
     } else {
@@ -132,7 +141,8 @@ asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(
       std::fprintf(stderr,
                    "[ToolRegistry] skipping MCP tool '%s' from '%s' — name "
                    "already registered (local/earlier wins)\n",
-                   schema.name.c_str(), spec.command_or_url().c_str());
+                   registered_schema.name.c_str(),
+                   spec.command_or_url().c_str());
     }
   }
   std::fprintf(stderr,
