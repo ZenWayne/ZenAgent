@@ -91,5 +91,21 @@ TEST(WorkflowLoaderMcpTest, SyncLoadRejectsMcpServers) {
   EXPECT_TRUE(absl::StrContains(result.status().message(), "LoadAndAttach"));
 }
 
+TEST(WorkflowLoaderMcpTest, FailedServerDropsItsToolsAndBuilds) {
+  asio::io_context io;
+  ToolRegistry reg(io);
+  // 'fs' points at a non-existent command → connect fails → degrade.
+  // Agent references fs.echo → tool dropped, workflow still builds.
+  constexpr char kJson[] = R"({
+    "schema_version":1,"name":"w","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "mcp_servers":[{"id":"fs","transport":"stdio",
+                    "command_or_url":"/nonexistent/mcp-server-xyz"}],
+    "agents":{"chat":{"system_prompt":"h","tools":["fs.echo"]}},"main":"chat"})";
+  auto r = RunLoadAndAttach(io, reg, kJson);
+  ASSERT_TRUE(r.ok()) << r.status().message();
+  EXPECT_FALSE(reg.Has("fs.echo"));
+}
+
 }  // namespace
 }  // namespace agentflow::workflow

@@ -686,6 +686,7 @@ WorkflowLoader::LoadAndAttach(std::string_view json_text,
   if (auto s = ParseRoot(root, &spec); !s.ok()) co_return s;
 
   // Connect declared MCP servers (eager). Failures degrade: warn + skip.
+  std::unordered_set<std::string> skipped_ids;
   for (const auto& decl : spec.mcp_servers()) {
     proto::McpServerSpec server = decl.spec();
     if (server.lazy_start()) {
@@ -701,6 +702,32 @@ WorkflowLoader::LoadAndAttach(std::string_view json_text,
                    "[WorkflowLoader] mcp_server '%s' attach failed: %s — "
                    "skipping (degrade)\n",
                    decl.id().c_str(), std::string(st.message()).c_str());
+      skipped_ids.insert(decl.id());
+    }
+  }
+
+  // Degrade-drop: remove agent tool refs whose prefix names a skipped server.
+  // Everything else is left for CheckReferences (undeclared prefix → error).
+  if (!skipped_ids.empty()) {
+    for (auto& [agent_name, def] : *spec.mutable_agents()) {
+      google::protobuf::RepeatedPtrField<std::string> kept;
+      for (const auto& t : def.tools()) {
+        if (!registry.Has(t)) {
+          auto dot = t.find('.');
+          if (dot != std::string::npos) {
+            std::string prefix = t.substr(0, dot);
+            if (skipped_ids.count(prefix)) {
+              std::fprintf(stderr,
+                           "[WorkflowLoader] dropping tool '%s' from agent "
+                           "'%s' — server '%s' unavailable\n",
+                           t.c_str(), agent_name.c_str(), prefix.c_str());
+              continue;  // drop
+            }
+          }
+        }
+        *kept.Add() = t;
+      }
+      *def.mutable_tools() = std::move(kept);
     }
   }
 
