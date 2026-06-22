@@ -1,0 +1,514 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 63ff28e..e9db6a6 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -94,6 +94,19 @@ ExternalProject_Add(
+         "-DLITERTLM_HOST_FLATC=${LITERTLM_HOST_FLATC}"
+         "-DLITERTLM_HOST_FLATC_BIN_DIR=${LITERTLM_HOST_FLATC_BIN_DIR}"
+ 
++        "-DFETCHCONTENT_FULLY_DISCONNECTED=${FETCHCONTENT_FULLY_DISCONNECTED}"
++        "-DFETCHCONTENT_SOURCE_DIR_ANTLR_LIB=${FETCHCONTENT_SOURCE_DIR_ANTLR_LIB}"
++        "-DFETCHCONTENT_SOURCE_DIR_CORROSION=${FETCHCONTENT_SOURCE_DIR_CORROSION}"
++        "-DFETCHCONTENT_SOURCE_DIR_LLGUIDANCE=${FETCHCONTENT_SOURCE_DIR_LLGUIDANCE}"
++        "-DFETCHCONTENT_SOURCE_DIR_LIBPNG_LIB=${FETCHCONTENT_SOURCE_DIR_LIBPNG_LIB}"
++        "-DFETCHCONTENT_SOURCE_DIR_KISSFFT_LIB=${FETCHCONTENT_SOURCE_DIR_KISSFFT_LIB}"
++        "-DFETCHCONTENT_SOURCE_DIR_MINIAUDIO_LIB=${FETCHCONTENT_SOURCE_DIR_MINIAUDIO_LIB}"
++        "-DFETCHCONTENT_SOURCE_DIR_MINIZIP_LIB=${FETCHCONTENT_SOURCE_DIR_MINIZIP_LIB}"
++        "-DFETCHCONTENT_SOURCE_DIR_MINJA_LIB=${FETCHCONTENT_SOURCE_DIR_MINJA_LIB}"
++        "-DFETCHCONTENT_SOURCE_DIR_JSON_LIB=${FETCHCONTENT_SOURCE_DIR_JSON_LIB}"
++        "-DFETCHCONTENT_SOURCE_DIR_STB_LIB=${FETCHCONTENT_SOURCE_DIR_STB_LIB}"
++        "-DFETCHCONTENT_SOURCE_DIR_ZLIB_LIB=${FETCHCONTENT_SOURCE_DIR_ZLIB_LIB}"
++
+     INSTALL_COMMAND ""
+     BUILD_ALWAYS TRUE
+ )
+diff --git a/c/engine.cc b/c/engine.cc
+index e8b33b1..12686c8 100644
+--- a/c/engine.cc
++++ b/c/engine.cc
+@@ -92,7 +92,10 @@ litert::lm::OptionalArgs CreateOptionalArgs(const char* extra_context) {
+   if (extra_context) {
+     auto extra_context_json =
+         nlohmann::ordered_json::parse(extra_context, nullptr, false);
+-    if (!extra_context_json.is_null() && !extra_context_json.empty()) {
++    // A discarded value (e.g. from an empty or malformed string) must not be
++    // forwarded — it corrupts the prompt template inputs downstream.
++    if (!extra_context_json.is_discarded() && !extra_context_json.is_null() &&
++        !extra_context_json.empty()) {
+       optional_args.extra_context = extra_context_json;
+     }
+   }
+@@ -847,11 +850,42 @@ LiteRtLmConversation* litert_lm_engine_create_constrained_conversation(
+   // unconstrained send.
+   std::string lark_grammar;
+   if (!json_preface.tools.is_null() && !json_preface.tools.empty()) {
++    // CreateLarkGrammarForTools expects a FLAT tool shape — it reads top-level
++    // tool["name"] and tool["parameters"]. But json_preface.tools is the
++    // OpenAI-nested shape ({"type":"function","function":{"name",...}}) which
++    // must stay nested for the chat template (it renders tool['function']
++    // ['name']). So flatten a copy here: lift each tool["function"] to the top
++    // level. Without this, every tool is skipped → "No tools provided".
++    nlohmann::ordered_json flat_tools = nlohmann::ordered_json::array();
++    for (const auto& tool : json_preface.tools) {
++      if (tool.contains("function") && tool["function"].is_object()) {
++        flat_tools.push_back(tool["function"]);
++      } else {
++        flat_tools.push_back(tool);
++      }
++    }
+     litert::lm::LlgConstraintsOptions opts;
++    // kTextAndOrFunctionCalls (not kFunctionCallsOnly): the agent must be able
++    // to EITHER call a tool OR emit a final text answer. kFunctionCallsOnly
++    // forces a function call every turn, so the model can never produce a final
++    // reply and the agent loops until max_iter. In this mode the function-call
++    // portions are still grammar-constrained to the tool schemas.
+     opts.constraint_mode =
+-        litert::lm::LlgConstraintMode::kFunctionCallsOnly;
++        litert::lm::LlgConstraintMode::kTextAndOrFunctionCalls;
++    // The FC control tokens default to placeholders (<start_function_call>,
++    // <escape>, ...) that don't exist in the model's vocab. Set the model's
++    // actual FC tokens so the grammar's <special_token> rules resolve against
++    // the tokenizer (which now marks these as special — see
++    // SentencePieceTokenizer::GetTokens). These are the Gemma-4 values from the
++    // loaded model config. TODO: plumb from the model's data-processor config
++    // instead of hardcoding once an accessor is exposed.
++    opts.fc_code_fence_start = "<|tool_call>";
++    opts.fc_code_fence_end = "<tool_call|>";
++    opts.fc_open_quote = "<|\"|>";
++    opts.fc_close_quote = "<|\"|>";
++    opts.fc_function_response_start = "<|tool_response>";
+     auto grammar_or =
+-        litert::lm::CreateLarkGrammarForTools(json_preface.tools, opts);
++        litert::lm::CreateLarkGrammarForTools(flat_tools, opts);
+     if (grammar_or.ok()) {
+       lark_grammar = *std::move(grammar_or);
+     } else {
+diff --git a/cmake/packages/litert/litert.cmake b/cmake/packages/litert/litert.cmake
+index f314c92..94794ae 100644
+--- a/cmake/packages/litert/litert.cmake
++++ b/cmake/packages/litert/litert.cmake
+@@ -43,12 +43,12 @@ ExternalProject_Add(
+     flatbuffers_external
+     tflite_external
+ 
+-  GIT_REPOSITORY
+-    https://github.com/google-ai-edge/LiteRT.git
+-  GIT_TAG
+-    fb16353a648922cb6c67a8e9a7a9ebc946360ad2 #Updated on 2026-03-24
+-  GIT_SUBMODULES ""
+-  GIT_SUBMODULES_RECURSE FALSE
++  # Source pre-populated out-of-band as a depth-1 shallow clone at the pinned
++  # SHA below (full clone drops on the proxy). git fetch --depth 1 origin <SHA>.
++  #   SHA: fb16353a648922cb6c67a8e9a7a9ebc946360ad2 # Updated on 2026-03-24
++  DOWNLOAD_COMMAND ""
++  SOURCE_DIR
++    ${LITERT_SOURCE_DIR}
+   PREFIX
+     ${LITERT_EXT_PREFIX}
+   SOURCE_SUBDIR
+diff --git a/cmake/packages/litert/litert_patcher.cmake b/cmake/packages/litert/litert_patcher.cmake
+index e28b3d7..9b33095 100644
+--- a/cmake/packages/litert/litert_patcher.cmake
++++ b/cmake/packages/litert/litert_patcher.cmake
+@@ -113,12 +113,11 @@ patch_file_content("${LITERT_SRC_DIR}/cc/internal/litert_runtime_builtin.cc"
+     FALSE
+ )
+ 
+-file(READ "${LITERT_PACKAGE_DIR}/shims/litert_cc_options_shim.cmake" litert_cc_options_shim_CONTENT)
+-patch_file_content("${LITERT_SRC_DIR}/cc/options/CMakeLists.txt"
+-    "cmake_minimum_required\\(VERSION 3.20\\).*"
+-    ${litert_cc_options_shim_CONTENT}
+-    TRUE
+-)
++file(COPY "${LITERT_PACKAGE_DIR}/shims/litert_cc_options_shim.cmake"
++     DESTINATION "${LITERT_SRC_DIR}/cc/options/")
++file(RENAME "${LITERT_SRC_DIR}/cc/options/litert_cc_options_shim.cmake"
++            "${LITERT_SRC_DIR}/cc/options/CMakeLists.txt")
++message(STATUS "[LiteRTLM] Replaced cc/options/CMakeLists.txt with shim")
+ 
+ set(GPU_INJECTION_STR
+ "\${TFLITE_SOURCE_DIR}/delegates/gpu/cl/gl_interop.cc
+diff --git a/cmake/packages/re2/re2.cmake b/cmake/packages/re2/re2.cmake
+index b9a9f5b..d625789 100644
+--- a/cmake/packages/re2/re2.cmake
++++ b/cmake/packages/re2/re2.cmake
+@@ -58,10 +58,12 @@ if(NOT EXISTS "${RE2_CONFIG_CMAKE_FILE}")
+       ${LITERTLM_TOOLCHAIN_FILE}
+       ${LITERTLM_TOOLCHAIN_ARGS}
+       -DCMAKE_PREFIX_PATH=${ABSL_INSTALL_PREFIX}
++      -DCMAKE_FIND_ROOT_PATH=${ABSL_INSTALL_PREFIX}
++      -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH
+       -DCMAKE_INSTALL_PREFIX=${RE2_INSTALL_PREFIX}
+       -DCMAKE_INSTALL_LIBDIR=lib
+-      -Dabsl_DIR=${absl_DIR}
+-      -DABSL_DIR=${ABSL_DIR}
++      -Dabsl_DIR=${ABSL_INSTALL_PREFIX}/lib/cmake/absl
++      -DABSL_DIR=${ABSL_INSTALL_PREFIX}/lib/cmake/absl
+       -Dabsl_ROOT=${absl_ROOT}
+       -DABSL_ROOT=${ABSL_ROOT}
+       -DABSL_INCLUDE_DIR=${ABSL_INCLUDE_DIR}
+diff --git a/cmake/packages/sentencepiece/sentencepiece_patcher.cmake b/cmake/packages/sentencepiece/sentencepiece_patcher.cmake
+index e23d2c3..deac05a 100644
+--- a/cmake/packages/sentencepiece/sentencepiece_patcher.cmake
++++ b/cmake/packages/sentencepiece/sentencepiece_patcher.cmake
+@@ -32,6 +32,14 @@ file(GLOB_RECURSE SP_SOURCES
+ foreach(FILE_PATH ${SP_SOURCES})
+     file(READ "${FILE_PATH}" CONTENT)
+ 
++    # gcc 13+ no longer transitively includes <cstdint>; sentencepiece uses
++    # uintN_t/intN_t without including it. Inject the header where missing.
++    if(CONTENT MATCHES "(u?int(8|16|32|64)_t)" AND NOT CONTENT MATCHES "#include <cstdint>")
++        set(CONTENT "#include <cstdint>\n${CONTENT}")
++        file(WRITE "${FILE_PATH}" "${CONTENT}")
++        message(STATUS "  - Injected <cstdint>: ${FILE_PATH}")
++    endif()
++
+     if(CONTENT MATCHES "SharedBitGen")
+         string(REPLACE "absl::SharedBitGen" "absl::BitGen" CONTENT "${CONTENT}")
+         if(NOT CONTENT MATCHES "#include \"absl/random/random.h\"")
+diff --git a/cmake/packages/tflite/tflite.cmake b/cmake/packages/tflite/tflite.cmake
+index 789c9cb..87ee8d2 100644
+--- a/cmake/packages/tflite/tflite.cmake
++++ b/cmake/packages/tflite/tflite.cmake
+@@ -44,8 +44,13 @@ if(NOT EXISTS "${TFLITE_STATIC_LIB}")
+             opencl_headers_external
+             protobuf_external
+             tokenizers-cpp_external
+-        GIT_REPOSITORY  https://github.com/tensorflow/tensorflow.git
+-        GIT_TAG         862baf45439c742ac3a9d43e88088943bd3a582d # Updated on 2026-03-18
++        # Source pre-populated out-of-band as a depth-1 shallow clone at the
++        # pinned SHA below. CMake's GIT_SHALLOW cannot checkout a raw commit
++        # SHA, and a full tensorflow clone is multi-GB (won't finish in a
++        # bounded build window). Pre-fetched: git fetch --depth 1 origin <SHA>.
++        #   SHA: 862baf45439c742ac3a9d43e88088943bd3a582d # Updated on 2026-03-18
++        DOWNLOAD_COMMAND ""
++        SOURCE_DIR      "${TENSORFLOW_SOURCE_DIR}"
+         PREFIX          "${TFLITE_EXT_PREFIX}"
+         SOURCE_SUBDIR   "tensorflow/lite"
+ 
+diff --git a/cmake/scripts/compile_flatbuffers.cmake b/cmake/scripts/compile_flatbuffers.cmake
+index de1cd94..49ce54d 100644
+--- a/cmake/scripts/compile_flatbuffers.cmake
++++ b/cmake/scripts/compile_flatbuffers.cmake
+@@ -23,12 +23,23 @@ endif()
+ 
+ foreach(FBS_FILE ${FBS_FILES})
+     get_filename_component(FBS_DIR "${FBS_FILE}" DIRECTORY)
+-    execute_process(
+-        COMMAND ${FLATC_BIN} --cpp --gen-object-api --reflect-names --gen-mutable -o "${FBS_DIR}" "${FBS_FILE}"
+-        RESULT_VARIABLE RET_CODE
+-    )
++    # Retry to absorb build-graph races where flatc or the .fbs aren't ready.
++    set(RET_CODE 1)
++    foreach(_attempt RANGE 1 5)
++        execute_process(
++            COMMAND ${FLATC_BIN} --cpp --gen-object-api --reflect-names --gen-mutable -o "${FBS_DIR}" "${FBS_FILE}"
++            RESULT_VARIABLE RET_CODE
++            OUTPUT_VARIABLE _flatc_out
++            ERROR_VARIABLE _flatc_err
++        )
++        if(RET_CODE EQUAL 0)
++            break()
++        endif()
++        message(WARNING "[LiteRTLM] flatc attempt ${_attempt} failed (code ${RET_CODE}) on ${FBS_FILE}:\n${_flatc_out}\n${_flatc_err}")
++        execute_process(COMMAND ${CMAKE_COMMAND} -E sleep 2)
++    endforeach()
+ 
+     if(NOT RET_CODE EQUAL 0)
+-        message(FATAL_ERROR "Failed to compile ${FBS_FILE}")
++        message(FATAL_ERROR "Failed to compile ${FBS_FILE}\nstdout:\n${_flatc_out}\nstderr:\n${_flatc_err}")
+     endif()
+ endforeach()
+\ No newline at end of file
+diff --git a/runtime/components/BUILD b/runtime/components/BUILD
+index 53da36c..a23635d 100644
+--- a/runtime/components/BUILD
++++ b/runtime/components/BUILD
+@@ -551,6 +551,7 @@ cc_library(
+         "//conditions:default": [],
+     }),
+     deps = [
++        "@com_google_absl//absl/log:absl_log",
+         "@com_google_absl//absl/status",
+         "@com_google_absl//absl/status:statusor",
+         "@com_google_absl//absl/strings",
+diff --git a/runtime/components/prompt_template.cc b/runtime/components/prompt_template.cc
+index 9e7246d..3be1d66 100644
+--- a/runtime/components/prompt_template.cc
++++ b/runtime/components/prompt_template.cc
+@@ -17,6 +17,7 @@
+ #include <string>
+ #include <utility>
+ 
++#include "absl/log/absl_log.h"  // from @com_google_absl
+ #include "absl/status/status.h"  // from @com_google_absl
+ #include "absl/status/statusor.h"  // from @com_google_absl
+ #include "absl/strings/str_cat.h"  // from @com_google_absl
+@@ -121,8 +122,11 @@ absl::StatusOr<std::string> PromptTemplate::Apply(
+   minijinja_inputs["eos_token"] = input.eos_token;
+   auto result = minijinja_template_->apply(minijinja_inputs.dump());
+   if (!result.is_ok) {
++    std::string error = std::string(result.error);
++    ABSL_LOG(ERROR) << "minijinja apply failed: " << error
++                    << "\ninputs: " << minijinja_inputs.dump();
+     return absl::InternalError(
+-        absl::StrCat("Failed to apply template: ", std::string(result.error)));
++        absl::StrCat("Failed to apply template: ", error));
+   }
+   return std::string(result.content);
+ }
+diff --git a/runtime/components/sentencepiece_tokenizer.cc b/runtime/components/sentencepiece_tokenizer.cc
+index 4a1a35f..08e86cf 100644
+--- a/runtime/components/sentencepiece_tokenizer.cc
++++ b/runtime/components/sentencepiece_tokenizer.cc
+@@ -131,9 +131,26 @@ absl::StatusOr<std::string> SentencePieceTokenizer::TokenIdsToText(
+ }
+ 
+ std::vector<std::string> SentencePieceTokenizer::GetTokens() const {
++  // LLGuidance (the only consumer of GetTokens, via LlgConstraintProvider)
++  // requires control/special tokens to be prefixed with the
++  // SPECIAL_TOKEN_MARKER byte 0xFF so its token-trie can resolve them as
++  // special tokens. The constrained-decoding Lark grammar references FC
++  // control tokens (e.g. "<|tool_call>", "<|\"|>") via <special_token> rules;
++  // without the marker llguidance has no special-token-prefix node and panics
++  // ("missing special token prefix"). 0xFF is not a valid UTF-8 byte, so it
++  // never collides with a normal piece. CONTROL (e.g. <bos>/<eos>) and
++  // USER_DEFINED (the chat/FC control tokens) are exactly the special ones.
++  constexpr char kSpecialTokenMarker = static_cast<char>(0xFF);
+   std::vector<std::string> tokens;
++  tokens.reserve(processor_->model_proto().pieces_size());
+   for (const auto& piece : processor_->model_proto().pieces()) {
+-    tokens.push_back(piece.piece());
++    const auto type = piece.type();
++    if (type == sentencepiece::ModelProto::SentencePiece::CONTROL ||
++        type == sentencepiece::ModelProto::SentencePiece::USER_DEFINED) {
++      tokens.push_back(std::string(1, kSpecialTokenMarker) + piece.piece());
++    } else {
++      tokens.push_back(piece.piece());
++    }
+   }
+   return tokens;
+ }
+diff --git a/runtime/conversation/CMakeLists.txt b/runtime/conversation/CMakeLists.txt
+index d662eaf..024a88f 100644
+--- a/runtime/conversation/CMakeLists.txt
++++ b/runtime/conversation/CMakeLists.txt
+@@ -17,6 +17,27 @@ set(PKG_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
+ 
+ add_subdirectory(model_data_processor)
+ 
++# ==============================================================================
++# Channel Util
++# ==============================================================================
++add_litertlm_library(runtime_conversation_channel_util STATIC
++  channel_util.cc
++)
++add_library(LiteRTLM::Runtime::Conversation::ChannelUtil ALIAS runtime_conversation_channel_util)
++
++target_include_directories(runtime_conversation_channel_util
++  PUBLIC
++    ${PKG_ROOT}
++    ${GENERATED_SRC_DIR}
++    ${LITERTLM_INCLUDE_PATHS}
++)
++
++target_link_libraries(runtime_conversation_channel_util
++  PUBLIC
++    LiteRTLM::Runtime::Conversation::IoTypes
++    LITERTLM_DEPS
++)
++
+ add_litertlm_library(runtime_conversation_conversation STATIC
+   conversation.cc
+ )
+@@ -30,6 +51,7 @@ target_include_directories(runtime_conversation_conversation
+ 
+ target_link_libraries(runtime_conversation_conversation
+   PUBLIC
++    LiteRTLM::Runtime::Conversation::ChannelUtil
+     LiteRTLM::Runtime::Conversation::InternalCallbackUtil
+     LiteRTLM::Runtime::Conversation::IoTypes
+     LiteRTLM::Runtime::Conversation::Processor::ConfigRegistry
+@@ -55,6 +77,7 @@ target_include_directories(runtime_conversation_internal_callback_util
+ 
+ target_link_libraries(runtime_conversation_internal_callback_util
+   PUBLIC
++    LiteRTLM::Runtime::Conversation::ChannelUtil
+     LiteRTLM::Runtime::Conversation::IoTypes
+     LiteRTLM::Runtime::Conversation::Processor::ConfigRegistry
+     LiteRTLM::Runtime::Conversation::Processor::Interface
+diff --git a/runtime/conversation/model_data_processor/CMakeLists.txt b/runtime/conversation/model_data_processor/CMakeLists.txt
+index 8ed9ac9..c5eab84 100644
+--- a/runtime/conversation/model_data_processor/CMakeLists.txt
++++ b/runtime/conversation/model_data_processor/CMakeLists.txt
+@@ -235,6 +235,47 @@ target_link_libraries(runtime_conversation_model_data_processor_qwen3_data_proce
+     LITERTLM_DEPS
+ )
+ 
++# ==============================================================================
++# Gemma4 Data Processor Config
++# ==============================================================================
++add_litertlm_library(runtime_conversation_model_data_processor_gemma4_data_processor_config INTERFACE)
++add_library(LiteRTLM::Runtime::Conversation::Processor::Gemma4Config ALIAS runtime_conversation_model_data_processor_gemma4_data_processor_config)
++
++target_include_directories(runtime_conversation_model_data_processor_gemma4_data_processor_config
++  INTERFACE
++    ${GENERATED_SRC_DIR}
++    ${LITERTLM_INCLUDE_PATHS}
++)
++
++# ==============================================================================
++# Gemma4 Data Processor
++# ==============================================================================
++add_litertlm_library(runtime_conversation_model_data_processor_gemma4_data_processor STATIC
++  gemma4_data_processor.cc
++)
++add_library(LiteRTLM::Runtime::Conversation::Processor::Gemma4 ALIAS runtime_conversation_model_data_processor_gemma4_data_processor)
++
++target_include_directories(runtime_conversation_model_data_processor_gemma4_data_processor
++  PUBLIC
++    ${GENERATED_SRC_DIR}
++    ${LITERTLM_INCLUDE_PATHS}
++)
++
++target_link_libraries(runtime_conversation_model_data_processor_gemma4_data_processor
++  PUBLIC
++    runtime_conversation_io_types
++    runtime_engine_io_types
++    LiteRTLM::Runtime::Conversation::Processor::Gemma4Config
++    LiteRTLM::Runtime::Components::Tokenizer::Interface
++    LiteRTLM::Runtime::Components::ConstrainedDecoding::Constraint
++    LiteRTLM::Runtime::Components::ConstrainedDecoding::ConstraintProvider
++    LiteRTLM::Runtime::Components::ToolUse::ParserUtils
++    runtime_util_litert_status_util
++    LiteRTLM::Runtime::Conversation::Processor::DataUtils
++    LiteRTLM::Runtime::Conversation::Processor::Interface
++    LITERTLM_DEPS
++)
++
+ # ==============================================================================
+ # Model Data Processor Factory
+ # ==============================================================================
+@@ -254,6 +295,8 @@ target_link_libraries(runtime_conversation_model_data_processor_factory
+     LiteRTLM::Runtime::Conversation::Processor::ConfigRegistry
+     LiteRTLM::Runtime::Conversation::Processor::Gemma3
+     LiteRTLM::Runtime::Conversation::Processor::Gemma3Config
++    LiteRTLM::Runtime::Conversation::Processor::Gemma4
++    LiteRTLM::Runtime::Conversation::Processor::Gemma4Config
+     LiteRTLM::Runtime::Conversation::Processor::Generic
+     LiteRTLM::Runtime::Conversation::Processor::GenericConfig
+     LiteRTLM::Runtime::Conversation::Processor::Interface
+@@ -276,7 +319,9 @@ target_link_libraries(runtime_conversation_model_data_processor_libs INTERFACE
+   LiteRTLM::Runtime::Conversation::Processor::DataUtils
+   LiteRTLM::Runtime::Conversation::Processor::Gemma3
+   LiteRTLM::Runtime::Conversation::Processor::Gemma3Config
+-  
++  LiteRTLM::Runtime::Conversation::Processor::Gemma4
++  LiteRTLM::Runtime::Conversation::Processor::Gemma4Config
++
+   LiteRTLM::Runtime::Conversation::FunctionDataProcessor
+ 
+   LiteRTLM::Runtime::Conversation::Processor::Generic
+diff --git a/runtime/executor/CMakeLists.txt b/runtime/executor/CMakeLists.txt
+index 735b7be..9f1aee9 100644
+--- a/runtime/executor/CMakeLists.txt
++++ b/runtime/executor/CMakeLists.txt
+@@ -451,6 +451,7 @@ target_link_libraries(runtime_executor_llm_litert_compiled_model_executor
+     runtime_util_convert_tensor_buffer
+     runtime_util_file_util
+     runtime_util_litert_status_util
++    runtime_util_log_tensor_buffer
+     runtime_util_lora_util
+     runtime_util_scoped_file
+     LITERTLM_DEPS
+diff --git a/runtime/executor/llm_executor_settings_utils.cc b/runtime/executor/llm_executor_settings_utils.cc
+index 3250c7b..dc141c6 100644
+--- a/runtime/executor/llm_executor_settings_utils.cc
++++ b/runtime/executor/llm_executor_settings_utils.cc
+@@ -203,10 +203,7 @@ absl::StatusOr<litert::Options> CreateCompilationOptions(
+       gpu_compilation_options.HintWaitingForCompletion(
+           advanced_settings.hint_waiting_for_completion.has_value() &&
+           advanced_settings.hint_waiting_for_completion.value());
+-      if (advanced_settings.hint_kernel_batch_size.has_value()) {
+-        gpu_compilation_options.SetKernelBatchSize(
+-            advanced_settings.hint_kernel_batch_size.value());
+-      }
++      // [LiteRTLM-patch] SetKernelBatchSize disabled for LiteRT compatibility
+       if (advanced_settings.is_benchmark) {
+         gpu_compilation_options.SetSyncExecutionModeWaitType(
+             GpuOptions::SyncExecutionModeWaitType::kActive);
+@@ -278,8 +275,8 @@ absl::StatusOr<litert::Options> CreateCompilationOptions(
+       if (executor_settings.GetAdvancedSettings()) {
+         advanced_settings = *executor_settings.GetAdvancedSettings();
+       }
+-      runtime_options.SetDisableDelegateClustering(
+-          advanced_settings.disable_delegate_clustering);
++      // [LiteRTLM-patch] runtime_options.SetDisableDelegateClustering(
++//          advanced_settings.disable_delegate_clustering);
+       compilation_options.SetHardwareAccelerators(HwAccelerators::kCpu);
+       break;
+     }
+diff --git a/runtime/executor/llm_litert_npu_compiled_model_executor.cc b/runtime/executor/llm_litert_npu_compiled_model_executor.cc
+index c83e746..124c4d7 100644
+--- a/runtime/executor/llm_litert_npu_compiled_model_executor.cc
++++ b/runtime/executor/llm_litert_npu_compiled_model_executor.cc
+@@ -2535,16 +2535,10 @@ LlmLiteRtNpuCompiledModelExecutor::Create(
+   LITERT_ASSIGN_OR_RETURN(
+       auto logits_tensor,
+       decode_signature.OutputTensor(LlmSignatures::kDecodeLogitsOutput));
+-  if (logits_tensor.HasQuantization()) {
+-    auto q_params = logits_tensor.PerTensorQuantization();
+-    quantization_params.scale = q_params.scale;
+-    quantization_params.zero_point = static_cast<int32_t>(q_params.zero_point);
+-    ABSL_LOG(INFO) << "Logits quantization params from '" << kDecodeSignature
+-                   << "' signature: scale=" << quantization_params.scale
+-                   << " zero_point=" << quantization_params.zero_point;
+-  } else {
+-    ABSL_LOG(WARNING) << "No quantization for logits in '" << kDecodeSignature
+-                      << "' signature (using default scale= "
++  // [LiteRTLM-patch] HasQuantization/PerTensorQuantization not in this LiteRT version
++  {
++    ABSL_LOG(WARNING) << "Quantization check skipped for logits in '"
++                      << kDecodeSignature << "' signature (using default scale= "
+                       << quantization_params.scale
+                       << ", zero_point= " << quantization_params.zero_point
+                       << ").";
+diff --git a/runtime/util/CMakeLists.txt b/runtime/util/CMakeLists.txt
+index 1a626f5..ba532f6 100644
+--- a/runtime/util/CMakeLists.txt
++++ b/runtime/util/CMakeLists.txt
+@@ -281,6 +281,26 @@ target_link_libraries(runtime_util_logging_tensor_buffer
+     LITERTLM_DEPS
+ )
+ 
++# ==============================================================================
++# 11b. Log Tensor Buffer
++# ==============================================================================
++add_litertlm_library(runtime_util_log_tensor_buffer STATIC
++  log_tensor_buffer.cc
++)
++add_library(LiteRTLM::Runtime::Util::LogTensorBuffer ALIAS runtime_util_log_tensor_buffer)
++
++target_include_directories(runtime_util_log_tensor_buffer
++  PRIVATE
++    ${GENERATED_SRC_DIR}
++    ${LITERTLM_INCLUDE_PATHS}
++    ${LITERT_INCLUDE_PATHS}
++)
++
++target_link_libraries(runtime_util_log_tensor_buffer
++  PUBLIC
++    LITERTLM_DEPS
++)
++
+ # ==============================================================================
+ # 12. LoRA Util
+ # ==============================================================================
+@@ -446,6 +466,7 @@ target_link_libraries(runtime_util_libs INTERFACE
+   LiteRTLM::Runtime::Util::FileUtil
+   LiteRTLM::Runtime::Util::LMLoader
+   LiteRTLM::Runtime::Util::LoggingTensorBuffer
++  LiteRTLM::Runtime::Util::LogTensorBuffer
+   LiteRTLM::Runtime::Util::LoRAData
+   LiteRTLM::Runtime::Util::LoRAUtil
+   LiteRTLM::Runtime::Util::MemoryMappedFile

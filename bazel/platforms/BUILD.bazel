@@ -1,0 +1,16 @@
+package(default_visibility = ["//visibility:public"])
+
+platform(
+    name = "android_arm64",
+    constraint_values = [
+        "@platforms//os:android",
+        "@platforms//cpu:arm64",
+    ],
+)
+
+# True whenever the target platform is android (used by //jni to pull in the
+# jni_md.h cross-compile shim, see bazel/toolchains:android_jni_md).
+config_setting(
+    name = "is_android",
+    constraint_values = ["@platforms//os:android"],
+)

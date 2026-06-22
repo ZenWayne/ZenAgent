@@ -8,3 +8,16 @@ build:ubsan --copt=-fsanitize=undefined --linkopt=-fsanitize=undefined
 
 # Test output
 test --test_output=errors
+
+# Android arm64-v8a cross-compile (on-device inference).
+build:android_arm64 --platforms=//bazel/platforms:android_arm64
+build:android_arm64 --android_platforms=//bazel/platforms:android_arm64
+build:android_arm64 --copt=-DANDROID --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+# abseil exposes its headers via the bare repo-root, which Bazel passes as
+# `-iquote external/abseil-cpp~`. The host compiler is gcc, which resolves
+# `#include <absl/...>` from a quote dir; the NDK compiler is clang, which is
+# strict and only searches quote dirs for `"..."` includes. Re-add the abseil
+# repo root as an angle-searchable `-I` so `<absl/...>` resolves under clang.
+# (The repo-root name is the Bazel 7 bzlmod canonical form pinned via
+# .bazelversion; abseil-cpp is pinned in MODULE.bazel.)
+build:android_arm64 --copt=-Iexternal/abseil-cpp~

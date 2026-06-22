@@ -15,3 +15,6 @@ compile_commands.json
 
 # Local model files (large)
 /models/
+
+# Android library native binaries (packaged into AAR at build time)
+android-inference/src/main/jniLibs/
