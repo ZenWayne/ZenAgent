@@ -31,3 +31,18 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "loader_mcp_smoke_test",
+    size = "medium",
+    srcs = ["loader_mcp_smoke_test.cc"],
+    data = ["echo_mcp_server.py"],
+    deps = [
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow_loader",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
