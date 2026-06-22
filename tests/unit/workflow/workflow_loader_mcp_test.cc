@@ -29,6 +29,7 @@ absl::StatusOr<std::shared_ptr<Workflow>> RunLoadAndAttach(
       io,
       [&]() -> asio::awaitable<void> {
         result = co_await WorkflowLoader::LoadAndAttach(json, reg);
+        reg.ShutdownMcp();
         co_return;
       },
       asio::detached);

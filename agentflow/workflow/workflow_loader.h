@@ -62,6 +62,8 @@ class WorkflowLoader {
   // `<id>.<remote>`. Servers that fail to connect are skipped (degrade); agent
   // `tools[]` entries whose prefix names a skipped server are dropped. Requires
   // an MCP-aware ToolRegistry (io_context ctor). lazy_start in JSON is ignored.
+  // On a non-OK return, some declared servers may already be connected; callers
+  // must still invoke `registry.ShutdownMcp()` to release those connections.
   [[nodiscard]] static asio::awaitable<absl::StatusOr<std::shared_ptr<Workflow>>>
   LoadAndAttach(std::string_view json_text, ToolRegistry& registry,
                 Options opts);

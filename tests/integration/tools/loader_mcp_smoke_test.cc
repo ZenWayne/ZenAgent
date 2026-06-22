@@ -78,5 +78,34 @@ TEST(LoaderMcpSmokeTest, LazyStartIgnoredStillRegisters) {
   EXPECT_TRUE(reg.Has("echo.echo"));  // eager connect despite lazy_start
 }
 
+TEST(LoaderMcpSmokeTest, IncludeToolsKeepsListedTool) {
+  asio::io_context io;
+  ToolRegistry reg(io);
+  auto result =
+      RunLoad(io, reg, MakeJson(R"(,"include_tools":["echo"],"call_timeout_ms":5000)"));
+  ASSERT_TRUE(result.ok()) << result.status().message();
+  EXPECT_TRUE(reg.Has("echo.echo"));
+}
+
+TEST(LoaderMcpSmokeTest, ExcludeToolsDropsListedTool) {
+  asio::io_context io;
+  ToolRegistry reg(io);
+  // Build a dedicated JSON: echo server with exclude_tools, agent has no tools
+  // (so CheckReferences doesn't hard-error on the excluded tool).
+  // Note: use R"json(...)json" delimiters to avoid )" clashing with outer R"(.
+  const std::string json =
+      std::string(R"json({
+    "schema_version":1,"name":"w","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{"user_query":{"type":"string"}}},
+    "mcp_servers":[{"id":"echo","transport":"stdio",
+                    "command_or_url":"/usr/bin/python3","args":[")json") +
+      EchoServerPath() + R"json("],"exclude_tools":["echo"]}],
+    "agents":{"chat":{"system_prompt":"hi","tools":[]}},
+    "main":"chat"})json";
+  auto result = RunLoad(io, reg, json);
+  ASSERT_TRUE(result.ok()) << result.status().message();
+  EXPECT_FALSE(reg.Has("echo.echo"));
+}
+
 }  // namespace
 }  // namespace agentflow
