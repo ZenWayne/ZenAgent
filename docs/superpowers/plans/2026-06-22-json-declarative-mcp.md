@@ -6,7 +6,7 @@
 
 **Architecture:** 在 `ToolRegistry::AttachMcpServer` 上加可选 `name_prefix` 做命名空间；把 `WorkflowLoader::Load` 解析后的收尾逻辑抽成共享 helper `FinalizeLoadedSpec`；新增协程 `WorkflowLoader::LoadAndAttach`，在"解析 → 连接 MCP → 降级裁剪 tools → 收尾校验/构建"之间插入 MCP 连接步骤。同步 `Load` 行为不变（遇到 `mcp_servers` 直接报错，引导改用 `LoadAndAttach`）。
 
-**Tech Stack:** C++20 (asio coroutines, abseil status), protobuf3, nlohmann/json, Bazel (Bzlmod), GoogleTest。MCP 既有实现：`McpClient`(stdio)、`McpToolAdapter`、`McpClientPool`、`proto::McpServerSpec`。
+**Tech Stack:** C++20 (asio coroutines, abseil status), protobuf3, nlohmann/json, Bazel (Bzlmod), GoogleTest。MCP 既有实现：in-house `McpClient`(stdio, 基于 asio)、`McpToolAdapter`、`McpClientPool`、`proto::McpServerSpec`。
 
 ## Global Constraints
 
@@ -18,8 +18,11 @@
 - v1 对 JSON 声明的 server 一律 eager 连接；JSON 里的 `lazy_start` 被忽略并警告。
 - 同步 `WorkflowLoader::Load` 行为不变；只为新协程 `LoadAndAttach` 增加 MCP 能力。
 - proto 文件用 `strip_import_prefix = "/proto"`：import 写 `import "mcp_spec.proto";`（不带 `proto/`）。
+- **测试用真实 MCP server**：所有需要真实 MCP 行为的测试通过子进程驱动既有的 `tests/integration/tools/echo_mcp_server.py`（真实 stdio MCP server，工具名 `echo`，入参 `text`，回 `content[].text`），**不使用进程内 `FakeMcpClient`**。纯 JSON 解析/校验类测试不连接、不起子进程。需要系统 `python3`（既有 `stdio_mcp_smoke_test` 已如此）。
+  - 决策依据：评估过用 GopherSecurity/gopher-mcp C++ SDK 自建 server，但它硬依赖 libevent + OpenSSL + fmt + yaml-cpp（无 client-only/无-libevent 开关），且本机 CMake 4.3 下 yaml-cpp pin 版本 configure 失败，与"不想膨胀依赖"冲突；故改用既有 Python 真实 server。agentflow 自带的 in-house `McpClient` 已满足 client 需求，无需引入外部 SDK。
 - Bazel 首次拉依赖需代理参数：`bazel --host_jvm_args=-Dhttps.proxyHost=127.0.0.1 --host_jvm_args=-Dhttps.proxyPort=10808 ...`（宿主代理在 10809）。依赖已缓存后可省略。下文命令以普通 `bazel` 给出。
 - 当前分支：`worktree-spec-json-mcp`（已隔离的 worktree）。
+- 既有的 `tests/unit/tools/tool_registry_mcp_test.cc`（基于 `FakeMcpClient`）属于本特性之外的存量测试，本计划不改动它；本特性新增的测试一律用真实 server 或纯解析。
 
 ## File Structure
 
@@ -28,85 +31,141 @@
 - `agentflow/tools/tool_registry.h` / `.cc` — `AttachMcpServer` 增加 `name_prefix` 形参 + 命名空间注册。
 - `agentflow/workflow/workflow_loader.h` / `.cc` — 抽 `FinalizeLoadedSpec`；新增 `ParseMcpServers` + transport 解析；新增 `LoadAndAttach` 协程 + 降级裁剪；同步 `Load` 加 `mcp_servers` 守卫。
 - `agentflow/workflow/BUILD.bazel` — `workflow_loader` 加 `@asio` 依赖。
-- `tests/unit/tools/tool_registry_mcp_test.cc` — Task 1 命名空间测试。
-- `tests/unit/tools/BUILD.bazel` — 新增 `fake_mcp_server` cc_library（供 loader 测试复用）。
-- `tests/unit/workflow/workflow_loader_mcp_test.cc`（新建）+ `tests/unit/workflow/BUILD.bazel` 新 target — LoadAndAttach 单测（happy / id 校验 / 降级 / 错误）。
-- `tests/integration/tools/loader_mcp_smoke_test.cc`（新建）+ BUILD target — 用真实 stdio echo server 端到端验证。
+- `tests/integration/tools/mcp_namespace_smoke_test.cc`（新建）+ BUILD target — Task 1 命名空间（真实 echo server）。
+- `tests/unit/workflow/workflow_loader_mcp_test.cc`（新建）+ BUILD target — Task 3/4 纯解析与降级逻辑（不起子进程）。
+- `tests/integration/tools/loader_mcp_smoke_test.cc`（新建）+ BUILD target — Task 5 端到端（真实 echo server）。
+- 复用：`tests/integration/tools/echo_mcp_server.py`（已存在）。
 
 ---
 
-### Task 1: 命名空间化 AttachMcpServer
+### Task 1: 命名空间化 AttachMcpServer（真实 server 集成测试）
 
 **Files:**
 - Modify: `agentflow/tools/tool_registry.h:71`
 - Modify: `agentflow/tools/tool_registry.cc:71-144`
-- Test: `tests/unit/tools/tool_registry_mcp_test.cc`
+- Create: `tests/integration/tools/mcp_namespace_smoke_test.cc`
+- Modify: `tests/integration/tools/BUILD.bazel`
 
 **Interfaces:**
 - Produces: `asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(proto::McpServerSpec spec, std::string name_prefix = "")` — 当 `name_prefix` 非空时，发现到的远端工具注册名为 `name_prefix + "." + remote`，但对远端调用仍用原始 remote 名；include/exclude 按原始名过滤。默认空 → 行为与今日完全一致。
 
-- [ ] **Step 1: 写失败测试**
+- [ ] **Step 1: 写失败测试（真实 echo server）**
 
-在 `tests/unit/tools/tool_registry_mcp_test.cc` 末尾（最后一个 `}  // namespace` 之前）追加：
+新建 `tests/integration/tools/mcp_namespace_smoke_test.cc`：
 
 ```cpp
-TEST(ToolRegistryMcpTest, AttachWithPrefixNamespacesNames) {
-  asio::io_context io;
-  auto h = std::make_shared<FakeFactoryHandle>();
-  ToolRegistry reg(io, MakeFactory(h, [](FakeMcpClient& c) {
-    c.on_list_tools = [] {
-      return std::vector<ToolSchema>{MakeRemoteSchema("echo")};
-    };
-    c.on_call_tool = [](std::string_view name,
-                        std::string_view /*args*/) -> absl::StatusOr<std::string> {
-      // The remote must receive the RAW tool name, not the namespaced one.
-      EXPECT_EQ(name, "echo");
-      return std::string(R"({"ok":true})");
-    };
-  }));
+// tests/integration/tools/mcp_namespace_smoke_test.cc
+//
+// Drives the real stdio echo MCP server and verifies AttachMcpServer's
+// name_prefix namespacing: the tool registers as "<prefix>.echo" while the
+// remote tools/call still receives the raw name "echo".
 
-  std::string invoke_out;
+#include <cstdlib>
+#include <string>
+#include <sys/stat.h>
+
+#include <absl/status/status.h>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
+#include <gtest/gtest.h>
+
+#include "agentflow/core/cancel.h"
+#include "agentflow/tools/tool_registry.h"
+#include "mcp_spec.pb.h"
+
+namespace agentflow {
+namespace {
+
+std::string EchoServerPath() {
+  const char* srcdir = std::getenv("TEST_SRCDIR");
+  if (srcdir != nullptr) {
+    std::string candidate = std::string(srcdir) +
+        "/_main/tests/integration/tools/echo_mcp_server.py";
+    struct stat st;
+    if (::stat(candidate.c_str(), &st) == 0) return candidate;
+  }
+  return "tests/integration/tools/echo_mcp_server.py";
+}
+
+proto::McpServerSpec EchoSpec() {
+  proto::McpServerSpec s;
+  s.set_transport(proto::McpServerSpec::STDIO);
+  s.set_command_or_url("/usr/bin/python3");
+  s.add_args(EchoServerPath());
+  return s;
+}
+
+TEST(McpNamespaceSmokeTest, PrefixNamespacesToolAndCallsRawRemote) {
+  asio::io_context io;
+  ToolRegistry reg(io);
+
   bool attach_ok = false;
+  std::string invoke_out;
   asio::co_spawn(
       io,
       [&]() -> asio::awaitable<void> {
-        auto st = co_await reg.AttachMcpServer(MakeSpec(), "fs");
+        auto st = co_await reg.AttachMcpServer(EchoSpec(), "remote");
         attach_ok = st.ok();
-        CancelToken cancel;
-        invoke_out = co_await reg.Invoke("fs.echo", "{}", cancel);
+        if (attach_ok) {
+          CancelToken cancel;
+          invoke_out = co_await reg.Invoke("remote.echo",
+                                           R"({"text":"hi-there"})", cancel);
+        }
+        reg.ShutdownMcp();
         co_return;
       },
       asio::detached);
   io.run();
 
-  EXPECT_TRUE(attach_ok);
-  EXPECT_TRUE(reg.Has("fs.echo"));
+  ASSERT_TRUE(attach_ok);
+  EXPECT_TRUE(reg.Has("remote.echo"));
   EXPECT_FALSE(reg.Has("echo"));
-  EXPECT_NE(invoke_out.find("ok"), std::string::npos);
+  EXPECT_NE(invoke_out.find("hi-there"), std::string::npos);
 }
+
+}  // namespace
+}  // namespace agentflow
 ```
 
-若文件未包含 `<asio/detached.hpp>`，在顶部 include 区加上 `#include <asio/detached.hpp>`。
+- [ ] **Step 2: 加 BUILD target**
 
-- [ ] **Step 2: 跑测试确认失败**
+`tests/integration/tools/BUILD.bazel` 追加：
 
-Run: `bazel test //tests/unit/tools:tool_registry_mcp_test --test_output=all`
-Expected: 编译失败（`AttachMcpServer` 不接受第二个参数）或 `reg.Has("fs.echo")` 为 false。
+```python
+cc_test(
+    name = "mcp_namespace_smoke_test",
+    size = "medium",
+    srcs = ["mcp_namespace_smoke_test.cc"],
+    data = ["echo_mcp_server.py"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+```
 
-- [ ] **Step 3: 改签名（头文件）**
+- [ ] **Step 3: 跑测试确认失败**
 
-`agentflow/tools/tool_registry.h:71` 把声明改为：
+Run: `bazel test //tests/integration/tools:mcp_namespace_smoke_test --test_output=all`
+Expected: 编译失败（`AttachMcpServer` 不接受第二个参数）或 `reg.Has("remote.echo")` 为 false。
+
+- [ ] **Step 4: 改签名（头文件）**
+
+`agentflow/tools/tool_registry.h:71` 改为：
 
 ```cpp
   asio::awaitable<absl::Status> AttachMcpServer(
       proto::McpServerSpec spec, std::string name_prefix = "");
 ```
 
-并在文件顶 include 区确认有 `#include <string>`（已有）。
+- [ ] **Step 5: 改实现（命名空间注册）**
 
-- [ ] **Step 4: 改实现（命名空间注册）**
-
-`agentflow/tools/tool_registry.cc` 把定义首行改为：
+`agentflow/tools/tool_registry.cc` 定义首行改为：
 
 ```cpp
 asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(
@@ -150,15 +209,16 @@ asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(
 
 确认文件顶部已 `#include <absl/strings/str_cat.h>`；若无则加上。
 
-- [ ] **Step 5: 跑测试确认通过 + 回归**
+- [ ] **Step 6: 跑测试确认通过 + 回归**
 
-Run: `bazel test //tests/unit/tools:tool_registry_mcp_test --test_output=errors`
-Expected: PASS（含原有用例：默认空前缀行为不变）。
+Run: `bazel test //tests/integration/tools:mcp_namespace_smoke_test //tests/unit/tools:tool_registry_mcp_test --test_output=errors`
+Expected: 两者 PASS（新集成测试通过；既有 fake-based 测试因默认空前缀行为不变而仍绿）。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
-git add agentflow/tools/tool_registry.h agentflow/tools/tool_registry.cc tests/unit/tools/tool_registry_mcp_test.cc
+git add agentflow/tools/tool_registry.h agentflow/tools/tool_registry.cc \
+        tests/integration/tools/mcp_namespace_smoke_test.cc tests/integration/tools/BUILD.bazel
 git commit -m "feat(tools): AttachMcpServer optional name_prefix for MCP tool namespacing"
 ```
 
@@ -307,7 +367,7 @@ git commit -m "refactor(workflow): extract FinalizeLoadedSpec from WorkflowLoade
 
 ---
 
-### Task 3: proto + 解析 mcp_servers + LoadAndAttach（happy path）
+### Task 3: proto + 解析 mcp_servers + LoadAndAttach（解析/校验，无子进程）
 
 **Files:**
 - Modify: `proto/workflow_spec.proto`
@@ -315,28 +375,33 @@ git commit -m "refactor(workflow): extract FinalizeLoadedSpec from WorkflowLoade
 - Modify: `agentflow/workflow/workflow_loader.h`
 - Modify: `agentflow/workflow/workflow_loader.cc`
 - Modify: `agentflow/workflow/BUILD.bazel:113-129`
-- Create: `tests/unit/tools/BUILD.bazel`（新增 `fake_mcp_server` cc_library）
 - Create: `tests/unit/workflow/workflow_loader_mcp_test.cc`
 - Modify: `tests/unit/workflow/BUILD.bazel`
 
 **Interfaces:**
-- Consumes: `ToolRegistry::AttachMcpServer(spec, name_prefix)`（Task 1）、`FinalizeLoadedSpec(...)`（Task 2）。
+- Consumes: `FinalizeLoadedSpec(...)`（Task 2）。
 - Produces:
   - proto `WorkflowSpec.McpServerDecl { string id = 1; McpServerSpec spec = 2; }` 与 `repeated McpServerDecl mcp_servers = 8;`
   - `asio::awaitable<absl::StatusOr<std::shared_ptr<Workflow>>> WorkflowLoader::LoadAndAttach(std::string_view json_text, ToolRegistry& registry, const Options& opts)` 及无 opts 重载。
   - 同步 `Load` 在检测到 `spec.mcp_servers_size() > 0` 时返回 `InvalidArgumentError`，提示改用 `LoadAndAttach`。
 
-- [ ] **Step 1: 写失败测试（先建测试基建）**
+> 本任务测试只覆盖**不需要成功连接**的路径（id 校验、同步守卫、未声明前缀报错），因此不起子进程、不依赖 echo server。真实连接的 happy path 在 Task 5。
+
+- [ ] **Step 1: 写失败测试**
 
 新建 `tests/unit/workflow/workflow_loader_mcp_test.cc`：
 
 ```cpp
 // tests/unit/workflow/workflow_loader_mcp_test.cc
+//
+// Parse/validation tests for JSON-declared mcp_servers. These exercise paths
+// that fail before (or without) a successful MCP connection, so no subprocess
+// or echo server is needed. Real-connection behavior lives in the integration
+// test tests/integration/tools/loader_mcp_smoke_test.cc.
 #include "agentflow/workflow/workflow_loader.h"
 
 #include <memory>
 #include <string>
-#include <vector>
 
 #include <absl/status/statusor.h>
 #include <absl/strings/match.h>
@@ -345,76 +410,29 @@ git commit -m "refactor(workflow): extract FinalizeLoadedSpec from WorkflowLoade
 #include <asio/io_context.hpp>
 #include <gtest/gtest.h>
 
-#include "agentflow/tools/mcp_client_pool.h"
-#include "agentflow/tools/tool.h"
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/workflow.h"
-#include "mcp_spec.pb.h"
-#include "tests/unit/tools/fake_mcp_server.h"
 
 namespace agentflow::workflow {
 namespace {
 
-using ::agentflow::testing::FakeMcpClient;
-
-ToolSchema RemoteSchema(std::string name) {
-  return ToolSchema{.name = std::move(name),
-                    .description = "remote",
-                    .params_json_schema = R"({"type":"object"})"};
-}
-
-// Factory that returns a FakeMcpClient configured by `configure`.
-mcp::McpClientPool::ClientFactory MakeFactory(
-    std::function<void(FakeMcpClient&)> configure) {
-  return [configure = std::move(configure)](
-             const proto::McpServerSpec& /*spec*/,
-             asio::io_context& io) -> std::shared_ptr<mcp::IMcpClient> {
-    auto c = std::make_shared<FakeMcpClient>(io);
-    if (configure) configure(*c);
-    return c;
-  };
-}
-
-constexpr char kJsonWithMcp[] = R"({
-  "schema_version": 1,
-  "name": "wf",
-  "version": "v1",
-  "state": {"kind": "dynamic_json", "fields": {"user_query": {"type":"string"}}},
-  "mcp_servers": [
-    {"id": "fs", "transport": "stdio", "command_or_url": "/usr/bin/fake",
-     "args": ["--root", "/data"]}
-  ],
-  "agents": {
-    "chat": {"system_prompt": "hi", "tools": ["fs.echo"]}
-  },
-  "main": "chat"
-})";
-
-TEST(WorkflowLoaderMcpTest, LoadAndAttachRegistersAndResolvesNamespacedTool) {
-  asio::io_context io;
-  ToolRegistry reg(io, MakeFactory([](FakeMcpClient& c) {
-    c.on_list_tools = [] {
-      return std::vector<ToolSchema>{RemoteSchema("echo")};
-    };
-  }));
-
+absl::StatusOr<std::shared_ptr<Workflow>> RunLoadAndAttach(
+    asio::io_context& io, ToolRegistry& reg, std::string_view json) {
   absl::StatusOr<std::shared_ptr<Workflow>> result;
   asio::co_spawn(
       io,
       [&]() -> asio::awaitable<void> {
-        result = co_await WorkflowLoader::LoadAndAttach(kJsonWithMcp, reg);
+        result = co_await WorkflowLoader::LoadAndAttach(json, reg);
         co_return;
       },
       asio::detached);
   io.run();
-
-  ASSERT_TRUE(result.ok()) << result.status().message();
-  EXPECT_TRUE(reg.Has("fs.echo"));
+  return result;
 }
 
 TEST(WorkflowLoaderMcpTest, DuplicateServerIdRejected) {
   asio::io_context io;
-  ToolRegistry reg(io, MakeFactory(nullptr));
+  ToolRegistry reg(io);
   constexpr char kDup[] = R"({
     "schema_version":1,"name":"w","version":"v1",
     "state":{"kind":"dynamic_json","fields":{}},
@@ -422,40 +440,47 @@ TEST(WorkflowLoaderMcpTest, DuplicateServerIdRejected) {
       {"id":"x","transport":"stdio","command_or_url":"/a"},
       {"id":"x","transport":"stdio","command_or_url":"/b"}],
     "agents":{"c":{"system_prompt":"h","tools":[]}},"main":"c"})";
-
-  absl::StatusOr<std::shared_ptr<Workflow>> result;
-  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-    result = co_await WorkflowLoader::LoadAndAttach(kDup, reg);
-    co_return; }, asio::detached);
-  io.run();
-
-  ASSERT_FALSE(result.ok());
-  EXPECT_TRUE(absl::StrContains(result.status().message(), "duplicate"));
+  auto r = RunLoadAndAttach(io, reg, kDup);
+  ASSERT_FALSE(r.ok());
+  EXPECT_TRUE(absl::StrContains(r.status().message(), "duplicate"));
 }
 
 TEST(WorkflowLoaderMcpTest, DottedServerIdRejected) {
   asio::io_context io;
-  ToolRegistry reg(io, MakeFactory(nullptr));
+  ToolRegistry reg(io);
   constexpr char kDot[] = R"({
     "schema_version":1,"name":"w","version":"v1",
     "state":{"kind":"dynamic_json","fields":{}},
     "mcp_servers":[{"id":"a.b","transport":"stdio","command_or_url":"/a"}],
     "agents":{"c":{"system_prompt":"h","tools":[]}},"main":"c"})";
+  auto r = RunLoadAndAttach(io, reg, kDot);
+  ASSERT_FALSE(r.ok());
+  EXPECT_TRUE(absl::StrContains(r.status().message(), "."));
+}
 
-  absl::StatusOr<std::shared_ptr<Workflow>> result;
-  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-    result = co_await WorkflowLoader::LoadAndAttach(kDot, reg);
-    co_return; }, asio::detached);
-  io.run();
-
-  ASSERT_FALSE(result.ok());
-  EXPECT_TRUE(absl::StrContains(result.status().message(), "."));
+TEST(WorkflowLoaderMcpTest, UndeclaredPrefixIsHardError) {
+  asio::io_context io;
+  ToolRegistry reg(io);
+  // No servers declared; agent references 'ghost.echo' → CheckReferences error.
+  constexpr char kJson[] = R"({
+    "schema_version":1,"name":"w","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "mcp_servers":[],
+    "agents":{"chat":{"system_prompt":"h","tools":["ghost.echo"]}},"main":"chat"})";
+  auto r = RunLoadAndAttach(io, reg, kJson);
+  ASSERT_FALSE(r.ok());
+  EXPECT_TRUE(absl::StrContains(r.status().message(), "unknown tool"));
 }
 
 TEST(WorkflowLoaderMcpTest, SyncLoadRejectsMcpServers) {
   asio::io_context io;
   ToolRegistry host(io);
-  auto result = WorkflowLoader::Load(kJsonWithMcp, host);
+  constexpr char kJson[] = R"({
+    "schema_version":1,"name":"w","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "mcp_servers":[{"id":"fs","transport":"stdio","command_or_url":"/x"}],
+    "agents":{"chat":{"system_prompt":"h","tools":[]}},"main":"chat"})";
+  auto result = WorkflowLoader::Load(kJson, host);
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(absl::StrContains(result.status().message(), "LoadAndAttach"));
 }
@@ -471,13 +496,13 @@ Expected: 失败 —— 目标不存在 / `LoadAndAttach` 未声明 / `mcp_serve
 
 - [ ] **Step 3: 改 proto schema**
 
-`proto/workflow_spec.proto`：在 `syntax`/`package` 之后加 import：
+`proto/workflow_spec.proto`：在 `package` 之后加 import：
 
 ```proto
 import "mcp_spec.proto";
 ```
 
-在 `message WorkflowSpec { ... }` 内，`map<string, AgentDef> agents = 5;` 之后、`string main = 6;` 之前（或紧接 `signing` 之后均可，只要 tag=8 不冲突）加入：
+在 `message WorkflowSpec { ... }` 内，`map<string, AgentDef> agents = 5;` 之后加入：
 
 ```proto
   message McpServerDecl {
@@ -489,7 +514,7 @@ import "mcp_spec.proto";
 
 - [ ] **Step 4: 改 proto BUILD 依赖**
 
-`proto/BUILD.bazel` 把 `workflow_spec_proto`（41-46 行）改为带 deps：
+`proto/BUILD.bazel` 把 `workflow_spec_proto`（41-46 行）改为：
 
 ```python
 proto_library(
@@ -500,8 +525,6 @@ proto_library(
     visibility = ["//visibility:public"],
 )
 ```
-
-（`agentflow_proto` 已聚合 `mcp_spec_cc_proto` 与 `workflow_spec_cc_proto`，C++ 侧无需再改。）
 
 - [ ] **Step 5: 声明 LoadAndAttach（头文件）**
 
@@ -529,17 +552,18 @@ proto_library(
   }
 ```
 
-- [ ] **Step 6: 实现解析 + 协程（.cc）**
+- [ ] **Step 6: 实现解析（.cc）**
 
 `agentflow/workflow/workflow_loader.cc` 顶部 include 区补：
 
 ```cpp
 #include <algorithm>
+#include <cctype>
 #include <unordered_set>
 #include <asio/awaitable.hpp>
 ```
 
-在匿名 namespace 内（`ParseSigning` 之后、`ParseRoot` 之前）加入 transport 解析与 mcp_servers 解析：
+在匿名 namespace 内（`ParseSigning` 之后、`ParseRoot` 之前）加入：
 
 ```cpp
 absl::StatusOr<proto::McpServerSpec::Transport> ParseTransport(std::string v) {
@@ -632,8 +656,6 @@ absl::Status ParseMcpServers(const ordered_json& arr,
   }
 ```
 
-确认顶部已 include `<cctype>`（`std::tolower`）；若无则加上。
-
 - [ ] **Step 7: 同步 Load 加 mcp_servers 守卫**
 
 在 `WorkflowLoader::Load` 内，`ParseRoot` 成功之后、`return FinalizeLoadedSpec(...)` 之前插入：
@@ -645,9 +667,9 @@ absl::Status ParseMcpServers(const ordered_json& arr,
   }
 ```
 
-- [ ] **Step 8: 实现 LoadAndAttach 协程**
+- [ ] **Step 8: 实现 LoadAndAttach 协程（不含降级裁剪）**
 
-在 `WorkflowLoader::LoadFromFile` 定义之后（文件末尾 `}` namespace 之前）加入：
+在 `WorkflowLoader::LoadFromFile` 定义之后（文件末尾 namespace `}` 之前）加入：
 
 ```cpp
 asio::awaitable<absl::StatusOr<std::shared_ptr<Workflow>>>
@@ -690,29 +712,13 @@ WorkflowLoader::LoadAndAttach(std::string_view json_text,
 }
 ```
 
-> 注意：本任务的 happy path 测试里所有 server 都连接成功，因此暂不做"降级裁剪 tools"。裁剪逻辑在 Task 4 用 TDD 加入。
+> 降级裁剪（丢弃失败 server 的工具）在 Task 4 用 TDD 加入。
 
-- [ ] **Step 9: 新增 fake_mcp_server cc_library**
+- [ ] **Step 9: 给 workflow_loader 加 @asio 依赖**
 
-`tests/unit/tools/BUILD.bazel` 末尾追加：
+`agentflow/workflow/BUILD.bazel` 的 `workflow_loader` target deps 列表里加一行 `"@asio",`（按字母序放在 `@abseil-cpp//absl/strings` 之后）。
 
-```python
-cc_library(
-    name = "fake_mcp_server",
-    testonly = True,
-    hdrs = ["fake_mcp_server.h"],
-    deps = [
-        "//agentflow/core",
-        "//agentflow/tools",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
-        "@asio",
-    ],
-    visibility = ["//visibility:public"],
-)
-```
-
-- [ ] **Step 10: 新增 loader-mcp 测试 target**
+- [ ] **Step 10: 新增 loader-mcp 单测 target**
 
 `tests/unit/workflow/BUILD.bazel` 追加：
 
@@ -725,7 +731,6 @@ cc_test(
         "//agentflow/tools",
         "//agentflow/workflow:workflow_loader",
         "//proto:agentflow_proto",
-        "//tests/unit/tools:fake_mcp_server",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@asio",
@@ -735,118 +740,65 @@ cc_test(
 )
 ```
 
-- [ ] **Step 11: 给 workflow_loader 加 @asio 依赖**
-
-`agentflow/workflow/BUILD.bazel` 的 `workflow_loader` target deps 列表里加一行 `"@asio",`（按字母序放在 `@abseil-cpp//absl/strings` 之后）。
-
-- [ ] **Step 12: 跑测试确认通过**
+- [ ] **Step 11: 跑测试确认通过**
 
 Run: `bazel test //tests/unit/workflow:workflow_loader_mcp_test //tests/unit/workflow:workflow_loader_test --test_output=errors`
 Expected: PASS（4 个新用例通过，原 loader 测试仍绿）。
 
-- [ ] **Step 13: 提交**
+- [ ] **Step 12: 提交**
 
 ```bash
 git add proto/workflow_spec.proto proto/BUILD.bazel \
         agentflow/workflow/workflow_loader.h agentflow/workflow/workflow_loader.cc \
         agentflow/workflow/BUILD.bazel \
-        tests/unit/tools/BUILD.bazel \
         tests/unit/workflow/workflow_loader_mcp_test.cc tests/unit/workflow/BUILD.bazel
-git commit -m "feat(workflow): LoadAndAttach + mcp_servers JSON schema (happy path)"
+git commit -m "feat(workflow): LoadAndAttach + mcp_servers JSON schema (parse/validation)"
 ```
 
 ---
 
-### Task 4: 降级裁剪与错误语义
+### Task 4: 降级裁剪（连接失败丢工具）
 
 **Files:**
 - Modify: `agentflow/workflow/workflow_loader.cc`（`LoadAndAttach` 加裁剪逻辑）
 - Test: `tests/unit/workflow/workflow_loader_mcp_test.cc`
 
 **Interfaces:**
-- Consumes: `LoadAndAttach`（Task 3）、`FakeMcpClient::on_connect`（可注入连接失败）。
+- Consumes: `LoadAndAttach`（Task 3）。
 - Produces: `LoadAndAttach` 在某 server 连接失败时，把 agent `tools[]` 中前缀属于该 server 的项丢弃（warn），其余交给 `CheckReferences`；前缀未声明的项仍硬报错。
+
+> 用一个**指向不存在命令**的 server spec 触发真实连接失败（in-house `McpClient` exec 失败 → 返回非 OK），无需 fake，也无需 echo server。
 
 - [ ] **Step 1: 写失败测试**
 
-在 `tests/unit/workflow/workflow_loader_mcp_test.cc` 的匿名 namespace 内追加三个用例：
+在 `tests/unit/workflow/workflow_loader_mcp_test.cc` 匿名 namespace 内追加：
 
 ```cpp
 TEST(WorkflowLoaderMcpTest, FailedServerDropsItsToolsAndBuilds) {
   asio::io_context io;
-  ToolRegistry reg(io, MakeFactory([](FakeMcpClient& c) {
-    c.on_connect = [] { return absl::UnavailableError("boom"); };
-  }));
-  // Agent references fs.echo; server fs fails → tool dropped, workflow builds.
+  ToolRegistry reg(io);
+  // 'fs' points at a non-existent command → connect fails → degrade.
+  // Agent references fs.echo → tool dropped, workflow still builds.
   constexpr char kJson[] = R"({
     "schema_version":1,"name":"w","version":"v1",
     "state":{"kind":"dynamic_json","fields":{}},
-    "mcp_servers":[{"id":"fs","transport":"stdio","command_or_url":"/x"}],
+    "mcp_servers":[{"id":"fs","transport":"stdio",
+                    "command_or_url":"/nonexistent/mcp-server-xyz"}],
     "agents":{"chat":{"system_prompt":"h","tools":["fs.echo"]}},"main":"chat"})";
-
-  absl::StatusOr<std::shared_ptr<Workflow>> result;
-  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-    result = co_await WorkflowLoader::LoadAndAttach(kJson, reg);
-    co_return; }, asio::detached);
-  io.run();
-
-  ASSERT_TRUE(result.ok()) << result.status().message();
+  auto r = RunLoadAndAttach(io, reg, kJson);
+  ASSERT_TRUE(r.ok()) << r.status().message();
   EXPECT_FALSE(reg.Has("fs.echo"));
-}
-
-TEST(WorkflowLoaderMcpTest, UndeclaredPrefixIsHardError) {
-  asio::io_context io;
-  ToolRegistry reg(io, MakeFactory(nullptr));
-  // 'ghost.echo' references a server that was never declared.
-  constexpr char kJson[] = R"({
-    "schema_version":1,"name":"w","version":"v1",
-    "state":{"kind":"dynamic_json","fields":{}},
-    "mcp_servers":[],
-    "agents":{"chat":{"system_prompt":"h","tools":["ghost.echo"]}},"main":"chat"})";
-
-  absl::StatusOr<std::shared_ptr<Workflow>> result;
-  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-    result = co_await WorkflowLoader::LoadAndAttach(kJson, reg);
-    co_return; }, asio::detached);
-  io.run();
-
-  ASSERT_FALSE(result.ok());
-  EXPECT_TRUE(absl::StrContains(result.status().message(), "unknown tool"));
-}
-
-TEST(WorkflowLoaderMcpTest, LazyStartIgnoredStillRegisters) {
-  asio::io_context io;
-  ToolRegistry reg(io, MakeFactory([](FakeMcpClient& c) {
-    c.on_list_tools = [] {
-      return std::vector<ToolSchema>{RemoteSchema("echo")};
-    };
-  }));
-  constexpr char kJson[] = R"({
-    "schema_version":1,"name":"w","version":"v1",
-    "state":{"kind":"dynamic_json","fields":{}},
-    "mcp_servers":[{"id":"fs","transport":"stdio","command_or_url":"/x",
-                    "lazy_start":true}],
-    "agents":{"chat":{"system_prompt":"h","tools":["fs.echo"]}},"main":"chat"})";
-
-  absl::StatusOr<std::shared_ptr<Workflow>> result;
-  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-    result = co_await WorkflowLoader::LoadAndAttach(kJson, reg);
-    co_return; }, asio::detached);
-  io.run();
-
-  ASSERT_TRUE(result.ok()) << result.status().message();
-  EXPECT_TRUE(reg.Has("fs.echo"));  // eager connect happened despite lazy_start
 }
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `bazel test //tests/unit/workflow:workflow_loader_mcp_test --test_output=all`
-Expected: `FailedServerDropsItsToolsAndBuilds` 失败（当前无裁剪 → `CheckReferences` 报 "unknown tool 'fs.echo'"）。`LazyStartIgnoredStillRegisters` 应已通过（Task 3 已忽略 lazy_start）；`UndeclaredPrefixIsHardError` 应已通过。
+Expected: `FailedServerDropsItsToolsAndBuilds` 失败 —— 当前无裁剪，`CheckReferences` 报 "unknown tool 'fs.echo'"，`r.ok()` 为 false。
 
 - [ ] **Step 3: 加降级裁剪逻辑**
 
-在 `agentflow/workflow/workflow_loader.cc` 的 `LoadAndAttach` 中，把连接循环改为收集失败的 server id，并在连接循环之后、`FinalizeLoadedSpec` 之前插入裁剪。即把连接循环替换为：
+在 `agentflow/workflow/workflow_loader.cc` 的 `LoadAndAttach` 中，把连接循环替换为（收集失败 id + 连接后裁剪）：
 
 ```cpp
   std::unordered_set<std::string> skipped_ids;
@@ -895,12 +847,12 @@ Expected: `FailedServerDropsItsToolsAndBuilds` 失败（当前无裁剪 → `Che
   }
 ```
 
-确认顶部已 include `<google/protobuf/repeated_ptr_field.h>`（多数 protobuf 版本经生成头间接引入；若编译报缺失则显式加 `#include <google/protobuf/repeated_field.h>`）。
+确认顶部已 include `<google/protobuf/repeated_field.h>`（多数 protobuf 版本经生成头间接引入；若编译报缺失则显式加 `#include <google/protobuf/repeated_ptr_field.h>`）。
 
 - [ ] **Step 4: 跑测试确认全绿**
 
 Run: `bazel test //tests/unit/workflow:workflow_loader_mcp_test --test_output=errors`
-Expected: PASS（7 个用例）。
+Expected: PASS（5 个用例）。
 
 - [ ] **Step 5: 提交**
 
@@ -911,16 +863,16 @@ git commit -m "feat(workflow): degrade-drop tools of failed MCP servers in LoadA
 
 ---
 
-### Task 5: 端到端集成测试（真实 stdio echo server）
+### Task 5: 端到端集成（真实 stdio echo server）
 
 **Files:**
 - Create: `tests/integration/tools/loader_mcp_smoke_test.cc`
 - Modify: `tests/integration/tools/BUILD.bazel`
-- 复用: `tests/integration/tools/echo_mcp_server.py`（已存在，工具名为 `echo`）
+- 复用: `tests/integration/tools/echo_mcp_server.py`（工具名 `echo`）
 
 **Interfaces:**
 - Consumes: `WorkflowLoader::LoadAndAttach`、真实 `McpClient` over stdio、`echo_mcp_server.py`。
-- Produces: 证明 JSON→连接→命名空间注册→引用解析 在真实子进程下端到端可用。
+- Produces: 证明 JSON→连接→命名空间注册→引用解析 在真实子进程下端到端可用，并验证 `lazy_start` 被忽略但仍 eager 注册。
 
 - [ ] **Step 1: 写测试**
 
@@ -931,7 +883,8 @@ git commit -m "feat(workflow): degrade-drop tools of failed MCP servers in LoadA
 //
 // End-to-end: a workflow JSON declares the stdio echo MCP server; LoadAndAttach
 // connects it, namespaces its tool as "echo.echo", and an agent referencing it
-// resolves cleanly. Exercises the real McpClient + child process path.
+// resolves cleanly. Also verifies lazy_start is ignored (eager connect still
+// registers tools).
 
 #include <cstdlib>
 #include <memory>
@@ -939,7 +892,6 @@ git commit -m "feat(workflow): degrade-drop tools of failed MCP servers in LoadA
 #include <sys/stat.h>
 
 #include <absl/status/statusor.h>
-#include <absl/strings/match.h>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
@@ -963,19 +915,21 @@ std::string EchoServerPath() {
   return "tests/integration/tools/echo_mcp_server.py";
 }
 
-TEST(LoaderMcpSmokeTest, LoadAndAttachStdioEcho) {
-  asio::io_context io;
-  ToolRegistry reg(io);
-
-  const std::string json = std::string(R"({
+// Builds a workflow JSON that declares the echo server (id "echo") with the
+// given extra entry fields, and one agent referencing "echo.echo".
+std::string MakeJson(const std::string& extra_server_fields) {
+  return std::string(R"({
     "schema_version":1,"name":"w","version":"v1",
     "state":{"kind":"dynamic_json","fields":{"user_query":{"type":"string"}}},
     "mcp_servers":[{"id":"echo","transport":"stdio",
                     "command_or_url":"/usr/bin/python3","args":[")") +
-      EchoServerPath() + R"("]}],
+      EchoServerPath() + R"("])" + extra_server_fields + R"(}],
     "agents":{"chat":{"system_prompt":"hi","tools":["echo.echo"]}},
     "main":"chat"})";
+}
 
+absl::StatusOr<std::shared_ptr<workflow::Workflow>> RunLoad(
+    asio::io_context& io, ToolRegistry& reg, const std::string& json) {
   absl::StatusOr<std::shared_ptr<workflow::Workflow>> result;
   asio::co_spawn(
       io,
@@ -986,9 +940,23 @@ TEST(LoaderMcpSmokeTest, LoadAndAttachStdioEcho) {
       },
       asio::detached);
   io.run();
+  return result;
+}
 
+TEST(LoaderMcpSmokeTest, LoadAndAttachStdioEcho) {
+  asio::io_context io;
+  ToolRegistry reg(io);
+  auto result = RunLoad(io, reg, MakeJson(""));
   ASSERT_TRUE(result.ok()) << result.status().message();
   EXPECT_TRUE(reg.Has("echo.echo"));
+}
+
+TEST(LoaderMcpSmokeTest, LazyStartIgnoredStillRegisters) {
+  asio::io_context io;
+  ToolRegistry reg(io);
+  auto result = RunLoad(io, reg, MakeJson(R"(,"lazy_start":true)"));
+  ASSERT_TRUE(result.ok()) << result.status().message();
+  EXPECT_TRUE(reg.Has("echo.echo"));  // eager connect despite lazy_start
 }
 
 }  // namespace
@@ -1009,7 +977,6 @@ cc_test(
         "//agentflow/tools",
         "//agentflow/workflow:workflow_loader",
         "@abseil-cpp//absl/status:statusor",
-        "@abseil-cpp//absl/strings",
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
@@ -1020,11 +987,11 @@ cc_test(
 - [ ] **Step 3: 跑集成测试**
 
 Run: `bazel test //tests/integration/tools:loader_mcp_smoke_test --test_output=all`
-Expected: PASS —— `result.ok()` 为真，`reg.Has("echo.echo")` 为真。（需要系统 `/usr/bin/python3`。）
+Expected: PASS（两个用例：命名空间注册成功；lazy_start 被忽略仍注册）。需系统 `/usr/bin/python3`。
 
 - [ ] **Step 4: 全量回归**
 
-Run: `bazel test //tests/unit/tools:all //tests/unit/workflow:all //tests/integration/tools:all --test_output=errors`
+Run: `bazel test //tests/unit/tools/... //tests/unit/workflow/... //tests/integration/tools/... --test_output=errors`
 Expected: 全 PASS。
 
 - [ ] **Step 5: 提交**
@@ -1040,18 +1007,18 @@ git commit -m "test(integration): end-to-end LoadAndAttach over stdio echo MCP s
 
 **Spec 覆盖：**
 - 顶层 `mcp_servers` 声明 + agent `tools[]` 引用 → Task 3（proto + 解析 + LoadAndAttach）。✅
-- `id.toolname` 命名空间 → Task 1（registry 前缀）+ Task 3（解析）。✅
-- 连接失败降级跳过 → Task 4。✅
-- 声明过但失败的前缀丢工具+警告 / 未声明前缀硬报错 → Task 4（两个用例）。✅
-- v1 忽略 `lazy_start` + 警告 → Task 3 实现，Task 4 `LazyStartIgnoredStillRegisters` 验证。✅
-- include/exclude 按原始名 → Task 1（过滤在加前缀前）+ 现有 registry 测试覆盖。✅
+- `id.toolname` 命名空间 → Task 1（registry 前缀，真实 echo 验证）+ Task 3（解析）。✅
+- 连接失败降级跳过 → Task 4（真实 bad-command 触发）。✅
+- 声明过但失败的前缀丢工具+警告 / 未声明前缀硬报错 → Task 4 + Task 3（`UndeclaredPrefixIsHardError`）。✅
+- v1 忽略 `lazy_start` + 警告 → Task 3 实现，Task 5 `LazyStartIgnoredStillRegisters` 真实验证。✅
+- include/exclude 按原始名 → Task 1（过滤在加前缀前）。✅
 - 同步 `Load` 不变 + mcp_servers 守卫 → Task 2（重构不变）+ Task 3（守卫 + `SyncLoadRejectsMcpServers`）。✅
-- 生命周期 `ShutdownMcp` → Task 5 集成测试中调用演示。✅
-- 受影响文件清单（proto / tool_registry / workflow_loader / 测试）→ 全部有对应 Task。✅
+- 生命周期 `ShutdownMcp` → Task 1 / Task 5 测试中调用。✅
+- 测试用真实 server、不用 FakeMcpClient → 所有新测试为真实 echo server 集成或纯解析单测。✅
 
 **占位符扫描：** 无 TBD/TODO；每个代码步骤含完整代码。✅
 
-**类型一致性：** `LoadAndAttach` 签名（`std::string_view`, `ToolRegistry&`, `const Options&`）在 .h/.cc/测试中一致；`AttachMcpServer(spec, name_prefix)` 第二参 `std::string` 默认空，在 Task 1 与 Task 3/4 调用一致；`ParseMcpServers` / `ParseTransport` / `FinalizeLoadedSpec` 签名在声明与调用处一致。✅
+**类型一致性：** `LoadAndAttach`（`std::string_view`, `ToolRegistry&`, `const Options&`）在 .h/.cc/测试一致；`AttachMcpServer(spec, name_prefix)` 第二参 `std::string` 默认空，Task 1/3/4 调用一致；`ParseMcpServers`/`ParseTransport`/`FinalizeLoadedSpec` 声明与调用一致；测试 helper `RunLoadAndAttach`/`RunLoad`/`MakeJson`/`EchoServerPath` 各自文件内定义并使用。✅
 
 ## Execution Handoff
 

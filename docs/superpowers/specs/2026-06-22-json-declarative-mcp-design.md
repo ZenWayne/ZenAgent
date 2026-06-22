@@ -155,16 +155,20 @@ LoadAndAttach(std::string_view json, ToolRegistry& registry, const Options& opts
 
 ## 8. 测试计划
 
-单元测试（用现有 `FakeMcpClient` 注入工厂，避免真子进程）：
+**测试一律用真实 MCP server，不用进程内 `FakeMcpClient`。** 复用既有的 `tests/integration/tools/echo_mcp_server.py`（真实 stdio MCP server，工具名 `echo`，入参 `text`）。曾评估用 GopherSecurity/gopher-mcp C++ SDK 自建 server，但它硬依赖 libevent+OpenSSL+fmt+yaml-cpp（无 client-only/无-libevent 开关）且本机 configure 失败，与"不膨胀依赖"冲突，故放弃。
 
-- 解析 `mcp_servers`：字段映射正确；`transport` 字符串枚举映射。
-- `id` 校验：重复 `id`、含 `.` 的 `id`、空 `id` 均报错。
-- 命名空间注册：注册名 = `id.tool`；`Invoke` 仍按原始名调用远端；`include/exclude` 按原始名过滤。
-- 降级路径：① 正常 attach + agent 引用 `id.tool` 通过；② server 连接失败 → 跳过 + 警告，引用其工具的 agent 丢工具 + 警告，workflow 仍构建成功；③ 未声明前缀 / 拼写错 → 硬报错。
+纯解析 / 校验单测（不连接、不起子进程）：
 
-集成测试（`tests/integration/tools/stdio_mcp_smoke_test.cc` 风格）：
+- `id` 校验：重复 `id`、含 `.` 的 `id` 报错。
+- 同步 `Load` 遇 `mcp_servers` → 报错引导用 `LoadAndAttach`。
+- 未声明前缀 → 硬报错（`LoadAndAttach` 空 server 列表 + agent 引用 `ghost.echo`）。
+- 降级：server 指向不存在命令 → 连接失败 → 引用其工具的 agent 丢工具 + 警告，workflow 仍构建成功。
 
-- 跑一个真实 stdio MCP server，端到端 `LoadAndAttach` → `AgentNode` 实际调用命名空间化的 MCP 工具。
+集成测试（真实 echo server 子进程，需 `python3`）：
+
+- 命名空间：`AttachMcpServer(spec, "remote")` → 注册名 `remote.echo`；`Invoke` 仍按原始名 `echo` 调用远端；`include/exclude` 按原始名过滤。
+- 端到端 `LoadAndAttach`（JSON 声明 echo server）→ `registry.Has("echo.echo")`、workflow 构建成功、`ShutdownMcp` 收尾。
+- `lazy_start` 在 JSON 中被忽略但仍 eager 注册。
 
 ## 9. 范围之外（YAGNI）
 
@@ -178,6 +182,6 @@ LoadAndAttach(std::string_view json, ToolRegistry& registry, const Options& opts
 - `proto/workflow_spec.proto` — 新增 `McpServerDecl` 与 `mcp_servers` 字段；import `mcp_spec.proto`。
 - `agentflow/tools/tool_registry.h` / `.cc` — `AttachMcpServer` 增加 `name_prefix` 参数及命名空间注册逻辑。
 - `agentflow/workflow/workflow_loader.h` / `.cc` — 新增 `LoadAndAttach` 协程；拆分可复用 helper；`mcp_servers` 解析、`id` 校验、降级引用校验。
-- `tests/unit/workflow/` 与 `tests/unit/tools/` — 新增单测。
-- `tests/integration/tools/` — 端到端集成测试。
+- `tests/unit/workflow/workflow_loader_mcp_test.cc` — 纯解析/校验/降级单测（不起子进程）。
+- `tests/integration/tools/mcp_namespace_smoke_test.cc` + `loader_mcp_smoke_test.cc` — 真实 echo server 集成测试。
 - 调用方（runner / JNI / examples）— 切到 `LoadAndAttach` + MCP-aware registry（按需）。
