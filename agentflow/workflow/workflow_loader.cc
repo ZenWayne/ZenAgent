@@ -458,25 +458,10 @@ absl::Status VerifySignature(const std::string& canonical,
   return absl::OkStatus();
 }
 
-}  // namespace
-
-absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
-    std::string_view json_text,
-    const ToolRegistry& host_tools,
-    const Options& opts) {
-  if (json_text.size() > opts.max_json_bytes) {
-    return absl::ResourceExhaustedError(absl::StrCat(
-        "workflow json size ", json_text.size(),
-        " > limit ", opts.max_json_bytes));
-  }
-  auto root = ordered_json::parse(json_text, nullptr, /*allow_exceptions=*/false);
-  if (root.is_discarded()) {
-    return absl::InvalidArgumentError("malformed json");
-  }
-
-  proto::WorkflowSpec spec;
-  if (auto s = ParseRoot(root, &spec); !s.ok()) return s;
-
+absl::StatusOr<std::shared_ptr<Workflow>> FinalizeLoadedSpec(
+    proto::WorkflowSpec spec, const ordered_json& root,
+    const ToolRegistry& host_tools, size_t json_bytes,
+    const WorkflowLoader::Options& opts) {
   // Forward-leniency: treat absent/zero schema_version as the current min.
   if (spec.schema_version() == 0) spec.set_schema_version(1);
   if (spec.schema_version() > kCurrentWorkflowSchemaVersion) {
@@ -485,23 +470,13 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
         " > supported ", kCurrentWorkflowSchemaVersion));
   }
 
-  if (auto s = CheckResourceLimits(spec, json_text.size(), opts.max_json_bytes);
+  if (auto s = CheckResourceLimits(spec, json_bytes, opts.max_json_bytes);
       !s.ok())
     return s;
   if (auto s = CheckReferences(spec, host_tools); !s.ok()) return s;
   if (auto s = CheckAcyclic(spec); !s.ok()) return s;
   if (auto s = CheckTemplates(spec); !s.ok()) return s;
 
-  // Signing verification. The signature is computed over a canonical JSON
-  // form (sorted keys, no whitespace, top-level "signing" stripped) — this
-  // decouples the verifier from author-side formatting.
-  //
-  // Three cases:
-  //   1. has_signing && opts.key_resolver  → verify, must match.
-  //   2. has_signing && !opts.key_resolver → permissive (signature ignored).
-  //      This is the dev-host escape hatch; production hosts must wire a
-  //      resolver and (typically) set require_signed=true.
-  //   3. !has_signing && opts.require_signed → reject.
   const bool has_signing = spec.has_signing() &&
                            (!spec.signing().algo().empty() ||
                             !spec.signing().signature().empty());
@@ -512,24 +487,16 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
         return s;
       }
     }
-    // else: permissive — accept without verification. A future change may
-    // emit SIGNED_WORKFLOW_UNVERIFIED via opts.trace.
   } else if (opts.require_signed) {
     return absl::FailedPreconditionError("signature_required");
   }
 
-  // Tier-3 (proto_dynamic) state: build a DescriptorPool from the supplied
-  // FileDescriptorSet (preferred: descriptor_set_b64 inline; fallback:
-  // descriptor_set_path on disk). The pool is held on the Workflow so any
-  // State produced by NewEmptyState() remains valid for the workflow's
-  // lifetime. Reflection (ReadStringField/WriteStringField) on the resulting
-  // Message works unchanged.
   std::shared_ptr<google::protobuf::DescriptorPool> state_pool;
   if (spec.state().kind() == "proto_dynamic") {
     std::string desc_bytes;
     if (!spec.state().descriptor_set_b64().empty()) {
       if (!absl::Base64Unescape(spec.state().descriptor_set_b64(),
-                                  &desc_bytes)) {
+                                &desc_bytes)) {
         return absl::InvalidArgumentError("descriptor_set_b64 decode failed");
       }
     } else if (!spec.state().descriptor_set_path().empty()) {
@@ -558,8 +525,7 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
       }
     }
     if (spec.state().message_type().empty()) {
-      return absl::InvalidArgumentError(
-          "proto_dynamic requires message_type");
+      return absl::InvalidArgumentError("proto_dynamic requires message_type");
     }
     if (!state_pool->FindMessageTypeByName(spec.state().message_type())) {
       return absl::InvalidArgumentError(absl::StrCat(
@@ -571,6 +537,29 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
   auto workflow = std::make_shared<Workflow>(std::move(spec));
   if (state_pool) workflow->SetStatePool(std::move(state_pool));
   return workflow;
+}
+
+}  // namespace
+
+absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
+    std::string_view json_text,
+    const ToolRegistry& host_tools,
+    const Options& opts) {
+  if (json_text.size() > opts.max_json_bytes) {
+    return absl::ResourceExhaustedError(absl::StrCat(
+        "workflow json size ", json_text.size(),
+        " > limit ", opts.max_json_bytes));
+  }
+  auto root = ordered_json::parse(json_text, nullptr, /*allow_exceptions=*/false);
+  if (root.is_discarded()) {
+    return absl::InvalidArgumentError("malformed json");
+  }
+
+  proto::WorkflowSpec spec;
+  if (auto s = ParseRoot(root, &spec); !s.ok()) return s;
+
+  return FinalizeLoadedSpec(std::move(spec), root, host_tools,
+                            json_text.size(), opts);
 }
 
 absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::LoadFromFile(
