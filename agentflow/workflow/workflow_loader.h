@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include <absl/status/statusor.h>
+#include <asio/awaitable.hpp>
 
 #include "agentflow/core/event.h"
 #include "agentflow/tools/tool_registry.h"
@@ -54,6 +55,22 @@ class WorkflowLoader {
       const std::string& path,
       const ToolRegistry& host_tools) {
     return LoadFromFile(path, host_tools, Options{});
+  }
+
+  // Like Load, but also connects any top-level `mcp_servers` declared in the
+  // JSON, registering each server's tools into `registry` under the namespace
+  // `<id>.<remote>`. Servers that fail to connect are skipped (degrade); agent
+  // `tools[]` entries whose prefix names a skipped server are dropped. Requires
+  // an MCP-aware ToolRegistry (io_context ctor). lazy_start in JSON is ignored.
+  // On a non-OK return, some declared servers may already be connected; callers
+  // must still invoke `registry.ShutdownMcp()` to release those connections.
+  [[nodiscard]] static asio::awaitable<absl::StatusOr<std::shared_ptr<Workflow>>>
+  LoadAndAttach(std::string_view json_text, ToolRegistry& registry,
+                Options opts);
+
+  [[nodiscard]] static asio::awaitable<absl::StatusOr<std::shared_ptr<Workflow>>>
+  LoadAndAttach(std::string_view json_text, ToolRegistry& registry) {
+    return LoadAndAttach(json_text, registry, Options{});
   }
 };
 

@@ -102,3 +102,19 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "workflow_loader_mcp_test",
+    size = "small",
+    srcs = ["workflow_loader_mcp_test.cc"],
+    deps = [
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow_loader",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

@@ -123,6 +123,7 @@ cc_library(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
+        "@asio",
         "@boringssl//:crypto",
         "@com_google_protobuf//:protobuf",
         "@nlohmann_json//:json",

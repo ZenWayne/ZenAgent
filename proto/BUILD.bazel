@@ -42,6 +42,7 @@ proto_library(
     name = "workflow_spec_proto",
     srcs = ["workflow_spec.proto"],
     strip_import_prefix = "/proto",
+    deps = [":mcp_spec_proto"],
     visibility = ["//visibility:public"],
 )
 

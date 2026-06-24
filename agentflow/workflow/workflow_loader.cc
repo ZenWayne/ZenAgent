@@ -1,5 +1,8 @@
 #include "agentflow/workflow/workflow_loader.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -9,6 +12,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <asio/awaitable.hpp>
 
 #include <absl/status/status.h>
 #include <absl/strings/escaping.h>
@@ -187,6 +192,89 @@ absl::Status ParseSigning(const ordered_json& j,
   return absl::OkStatus();
 }
 
+absl::StatusOr<proto::McpServerSpec::Transport> ParseTransport(std::string v) {
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char ch) { return std::tolower(ch); });
+  if (v == "stdio") return proto::McpServerSpec::STDIO;
+  if (v == "http_sse" || v == "http" || v == "sse")
+    return proto::McpServerSpec::HTTP_SSE;
+  if (v == "websocket" || v == "ws") return proto::McpServerSpec::WEBSOCKET;
+  if (v == "tcp") return proto::McpServerSpec::TCP;
+  return absl::InvalidArgumentError(absl::StrCat("unknown transport '", v, "'"));
+}
+
+constexpr size_t kMaxMcpServers = 16;
+
+absl::Status ParseMcpServers(const ordered_json& arr,
+                             proto::WorkflowSpec* spec) {
+  if (!arr.is_array()) {
+    return absl::InvalidArgumentError("mcp_servers must be an array");
+  }
+  if (arr.size() > kMaxMcpServers) {
+    return absl::ResourceExhaustedError(absl::StrCat(
+        "mcp_servers count ", arr.size(), " > limit ", kMaxMcpServers));
+  }
+  std::unordered_set<std::string> seen;
+  for (const auto& e : arr) {
+    if (!e.is_object()) {
+      return absl::InvalidArgumentError("mcp_servers entries must be objects");
+    }
+    auto* decl = spec->add_mcp_servers();
+
+    auto idit = e.find("id");
+    if (idit == e.end() || !idit->is_string() ||
+        idit->get<std::string>().empty()) {
+      return absl::InvalidArgumentError(
+          "mcp_servers entry requires a non-empty string 'id'");
+    }
+    std::string id = idit->get<std::string>();
+    // '__' is the namespace separator in "mcp__<id>__<remote>"; forbid it in
+    // the id so the prefix can be parsed back out unambiguously.
+    if (id.find("__") != std::string::npos) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("mcp_server id '", id, "' must not contain '__'"));
+    }
+    if (!seen.insert(id).second) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("duplicate mcp_server id '", id, "'"));
+    }
+    decl->set_id(id);
+
+    auto* s = decl->mutable_spec();
+    std::string transport = "stdio";
+    if (auto t = e.find("transport"); t != e.end() && t->is_string()) {
+      transport = t->get<std::string>();
+    }
+    auto tr = ParseTransport(transport);
+    if (!tr.ok()) return tr.status();
+    s->set_transport(*tr);
+
+    if (auto c = e.find("command_or_url"); c != e.end() && c->is_string()) {
+      s->set_command_or_url(c->get<std::string>());
+    }
+    if (auto a = e.find("args"); a != e.end() && a->is_array()) {
+      for (const auto& x : *a)
+        if (x.is_string()) s->add_args(x.get<std::string>());
+    }
+    if (auto inc = e.find("include_tools"); inc != e.end() && inc->is_array()) {
+      for (const auto& x : *inc)
+        if (x.is_string()) s->add_include_tools(x.get<std::string>());
+    }
+    if (auto exc = e.find("exclude_tools"); exc != e.end() && exc->is_array()) {
+      for (const auto& x : *exc)
+        if (x.is_string()) s->add_exclude_tools(x.get<std::string>());
+    }
+    if (auto to = e.find("call_timeout_ms");
+        to != e.end() && to->is_number_integer()) {
+      s->set_call_timeout_ms(to->get<int32_t>());
+    }
+    if (auto lz = e.find("lazy_start"); lz != e.end() && lz->is_boolean()) {
+      s->set_lazy_start(lz->get<bool>());
+    }
+  }
+  return absl::OkStatus();
+}
+
 absl::Status ParseRoot(const ordered_json& root, proto::WorkflowSpec* spec) {
   if (!root.is_object()) {
     return absl::InvalidArgumentError("workflow root must be a JSON object");
@@ -217,6 +305,9 @@ absl::Status ParseRoot(const ordered_json& root, proto::WorkflowSpec* spec) {
       if (auto s = ParseAgentDef(a.key(), a.value(), &def); !s.ok()) return s;
       agents_map[a.key()] = std::move(def);
     }
+  }
+  if (auto it = root.find("mcp_servers"); it != root.end()) {
+    if (auto s = ParseMcpServers(*it, spec); !s.ok()) return s;
   }
   if (auto it = root.find("signing"); it != root.end()) {
     if (auto s = ParseSigning(*it, spec->mutable_signing()); !s.ok()) return s;
@@ -458,25 +549,10 @@ absl::Status VerifySignature(const std::string& canonical,
   return absl::OkStatus();
 }
 
-}  // namespace
-
-absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
-    std::string_view json_text,
-    const ToolRegistry& host_tools,
-    const Options& opts) {
-  if (json_text.size() > opts.max_json_bytes) {
-    return absl::ResourceExhaustedError(absl::StrCat(
-        "workflow json size ", json_text.size(),
-        " > limit ", opts.max_json_bytes));
-  }
-  auto root = ordered_json::parse(json_text, nullptr, /*allow_exceptions=*/false);
-  if (root.is_discarded()) {
-    return absl::InvalidArgumentError("malformed json");
-  }
-
-  proto::WorkflowSpec spec;
-  if (auto s = ParseRoot(root, &spec); !s.ok()) return s;
-
+absl::StatusOr<std::shared_ptr<Workflow>> FinalizeLoadedSpec(
+    proto::WorkflowSpec spec, const ordered_json& root,
+    const ToolRegistry& host_tools, size_t json_bytes,
+    const WorkflowLoader::Options& opts) {
   // Forward-leniency: treat absent/zero schema_version as the current min.
   if (spec.schema_version() == 0) spec.set_schema_version(1);
   if (spec.schema_version() > kCurrentWorkflowSchemaVersion) {
@@ -485,23 +561,13 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
         " > supported ", kCurrentWorkflowSchemaVersion));
   }
 
-  if (auto s = CheckResourceLimits(spec, json_text.size(), opts.max_json_bytes);
+  if (auto s = CheckResourceLimits(spec, json_bytes, opts.max_json_bytes);
       !s.ok())
     return s;
   if (auto s = CheckReferences(spec, host_tools); !s.ok()) return s;
   if (auto s = CheckAcyclic(spec); !s.ok()) return s;
   if (auto s = CheckTemplates(spec); !s.ok()) return s;
 
-  // Signing verification. The signature is computed over a canonical JSON
-  // form (sorted keys, no whitespace, top-level "signing" stripped) — this
-  // decouples the verifier from author-side formatting.
-  //
-  // Three cases:
-  //   1. has_signing && opts.key_resolver  → verify, must match.
-  //   2. has_signing && !opts.key_resolver → permissive (signature ignored).
-  //      This is the dev-host escape hatch; production hosts must wire a
-  //      resolver and (typically) set require_signed=true.
-  //   3. !has_signing && opts.require_signed → reject.
   const bool has_signing = spec.has_signing() &&
                            (!spec.signing().algo().empty() ||
                             !spec.signing().signature().empty());
@@ -512,24 +578,16 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
         return s;
       }
     }
-    // else: permissive — accept without verification. A future change may
-    // emit SIGNED_WORKFLOW_UNVERIFIED via opts.trace.
   } else if (opts.require_signed) {
     return absl::FailedPreconditionError("signature_required");
   }
 
-  // Tier-3 (proto_dynamic) state: build a DescriptorPool from the supplied
-  // FileDescriptorSet (preferred: descriptor_set_b64 inline; fallback:
-  // descriptor_set_path on disk). The pool is held on the Workflow so any
-  // State produced by NewEmptyState() remains valid for the workflow's
-  // lifetime. Reflection (ReadStringField/WriteStringField) on the resulting
-  // Message works unchanged.
   std::shared_ptr<google::protobuf::DescriptorPool> state_pool;
   if (spec.state().kind() == "proto_dynamic") {
     std::string desc_bytes;
     if (!spec.state().descriptor_set_b64().empty()) {
       if (!absl::Base64Unescape(spec.state().descriptor_set_b64(),
-                                  &desc_bytes)) {
+                                &desc_bytes)) {
         return absl::InvalidArgumentError("descriptor_set_b64 decode failed");
       }
     } else if (!spec.state().descriptor_set_path().empty()) {
@@ -558,8 +616,7 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
       }
     }
     if (spec.state().message_type().empty()) {
-      return absl::InvalidArgumentError(
-          "proto_dynamic requires message_type");
+      return absl::InvalidArgumentError("proto_dynamic requires message_type");
     }
     if (!state_pool->FindMessageTypeByName(spec.state().message_type())) {
       return absl::InvalidArgumentError(absl::StrCat(
@@ -573,6 +630,34 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
   return workflow;
 }
 
+}  // namespace
+
+absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::Load(
+    std::string_view json_text,
+    const ToolRegistry& host_tools,
+    const Options& opts) {
+  if (json_text.size() > opts.max_json_bytes) {
+    return absl::ResourceExhaustedError(absl::StrCat(
+        "workflow json size ", json_text.size(),
+        " > limit ", opts.max_json_bytes));
+  }
+  auto root = ordered_json::parse(json_text, nullptr, /*allow_exceptions=*/false);
+  if (root.is_discarded()) {
+    return absl::InvalidArgumentError("malformed json");
+  }
+
+  proto::WorkflowSpec spec;
+  if (auto s = ParseRoot(root, &spec); !s.ok()) return s;
+
+  if (spec.mcp_servers_size() > 0) {
+    return absl::InvalidArgumentError(
+        "workflow declares mcp_servers; use WorkflowLoader::LoadAndAttach");
+  }
+
+  return FinalizeLoadedSpec(std::move(spec), root, host_tools,
+                            json_text.size(), opts);
+}
+
 absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::LoadFromFile(
     const std::string& path,
     const ToolRegistry& host_tools,
@@ -584,6 +669,77 @@ absl::StatusOr<std::shared_ptr<Workflow>> WorkflowLoader::LoadFromFile(
   std::ostringstream buf;
   buf << in.rdbuf();
   return Load(buf.str(), host_tools, opts);
+}
+
+asio::awaitable<absl::StatusOr<std::shared_ptr<Workflow>>>
+WorkflowLoader::LoadAndAttach(std::string_view json_text,
+                             ToolRegistry& registry, Options opts) {
+  if (json_text.size() > opts.max_json_bytes) {
+    co_return absl::ResourceExhaustedError(absl::StrCat(
+        "workflow json size ", json_text.size(),
+        " > limit ", opts.max_json_bytes));
+  }
+  auto root = ordered_json::parse(json_text, nullptr, /*allow_exceptions=*/false);
+  if (root.is_discarded()) {
+    co_return absl::InvalidArgumentError("malformed json");
+  }
+
+  proto::WorkflowSpec spec;
+  if (auto s = ParseRoot(root, &spec); !s.ok()) co_return s;
+
+  // Connect declared MCP servers (eager). Failures degrade: warn + skip.
+  std::unordered_set<std::string> skipped_ids;
+  for (const auto& decl : spec.mcp_servers()) {
+    proto::McpServerSpec server = decl.spec();
+    if (server.lazy_start()) {
+      std::fprintf(stderr,
+                   "[WorkflowLoader] mcp_server '%s': lazy_start ignored "
+                   "(eager connect required for JSON-declared servers)\n",
+                   decl.id().c_str());
+      server.set_lazy_start(false);
+    }
+    absl::Status st = co_await registry.AttachMcpServer(server, decl.id());
+    if (!st.ok()) {
+      std::fprintf(stderr,
+                   "[WorkflowLoader] mcp_server '%s' attach failed: %s — "
+                   "skipping (degrade)\n",
+                   decl.id().c_str(), std::string(st.message()).c_str());
+      skipped_ids.insert(decl.id());
+    }
+  }
+
+  // Degrade-drop: remove agent tool refs whose prefix names a skipped server.
+  // Everything else is left for CheckReferences (undeclared prefix → error).
+  if (!skipped_ids.empty()) {
+    for (auto& [agent_name, def] : *spec.mutable_agents()) {
+      google::protobuf::RepeatedPtrField<std::string> kept;
+      for (const auto& t : def.tools()) {
+        if (!registry.Has(t)) {
+          // Tool refs are namespaced "mcp__<id>__<remote>"; extract <id>.
+          static constexpr char kNs[] = "mcp__";
+          if (t.rfind(kNs, 0) == 0) {
+            const std::string rest = t.substr(sizeof(kNs) - 1);
+            const auto sep = rest.find("__");
+            if (sep != std::string::npos) {
+              const std::string prefix = rest.substr(0, sep);
+              if (skipped_ids.count(prefix)) {
+                std::fprintf(stderr,
+                             "[WorkflowLoader] dropping tool '%s' from agent "
+                             "'%s' — server '%s' unavailable\n",
+                             t.c_str(), agent_name.c_str(), prefix.c_str());
+                continue;  // drop
+              }
+            }
+          }
+        }
+        *kept.Add() = t;
+      }
+      *def.mutable_tools() = std::move(kept);
+    }
+  }
+
+  co_return FinalizeLoadedSpec(std::move(spec), root, registry,
+                               json_text.size(), opts);
 }
 
 }  // namespace agentflow::workflow

@@ -16,3 +16,33 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "mcp_namespace_smoke_test",
+    size = "medium",
+    srcs = ["mcp_namespace_smoke_test.cc"],
+    data = ["echo_mcp_server.py"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "loader_mcp_smoke_test",
+    size = "medium",
+    srcs = ["loader_mcp_smoke_test.cc"],
+    data = ["echo_mcp_server.py"],
+    deps = [
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow_loader",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
