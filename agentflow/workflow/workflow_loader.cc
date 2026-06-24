@@ -228,9 +228,11 @@ absl::Status ParseMcpServers(const ordered_json& arr,
           "mcp_servers entry requires a non-empty string 'id'");
     }
     std::string id = idit->get<std::string>();
-    if (id.find('.') != std::string::npos) {
+    // '__' is the namespace separator in "mcp__<id>__<remote>"; forbid it in
+    // the id so the prefix can be parsed back out unambiguously.
+    if (id.find("__") != std::string::npos) {
       return absl::InvalidArgumentError(
-          absl::StrCat("mcp_server id '", id, "' must not contain '.'"));
+          absl::StrCat("mcp_server id '", id, "' must not contain '__'"));
     }
     if (!seen.insert(id).second) {
       return absl::InvalidArgumentError(
@@ -713,15 +715,20 @@ WorkflowLoader::LoadAndAttach(std::string_view json_text,
       google::protobuf::RepeatedPtrField<std::string> kept;
       for (const auto& t : def.tools()) {
         if (!registry.Has(t)) {
-          auto dot = t.find('.');
-          if (dot != std::string::npos) {
-            std::string prefix = t.substr(0, dot);
-            if (skipped_ids.count(prefix)) {
-              std::fprintf(stderr,
-                           "[WorkflowLoader] dropping tool '%s' from agent "
-                           "'%s' — server '%s' unavailable\n",
-                           t.c_str(), agent_name.c_str(), prefix.c_str());
-              continue;  // drop
+          // Tool refs are namespaced "mcp__<id>__<remote>"; extract <id>.
+          static constexpr char kNs[] = "mcp__";
+          if (t.rfind(kNs, 0) == 0) {
+            const std::string rest = t.substr(sizeof(kNs) - 1);
+            const auto sep = rest.find("__");
+            if (sep != std::string::npos) {
+              const std::string prefix = rest.substr(0, sep);
+              if (skipped_ids.count(prefix)) {
+                std::fprintf(stderr,
+                             "[WorkflowLoader] dropping tool '%s' from agent "
+                             "'%s' — server '%s' unavailable\n",
+                             t.c_str(), agent_name.c_str(), prefix.c_str());
+                continue;  // drop
+              }
             }
           }
         }

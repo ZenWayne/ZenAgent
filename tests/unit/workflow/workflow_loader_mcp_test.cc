@@ -52,28 +52,31 @@ TEST(WorkflowLoaderMcpTest, DuplicateServerIdRejected) {
   EXPECT_TRUE(absl::StrContains(r.status().message(), "duplicate"));
 }
 
-TEST(WorkflowLoaderMcpTest, DottedServerIdRejected) {
+TEST(WorkflowLoaderMcpTest, DoubleUnderscoreServerIdRejected) {
   asio::io_context io;
   ToolRegistry reg(io);
-  constexpr char kDot[] = R"({
+  // '__' is the namespace separator in "mcp__<id>__<remote>", so an id
+  // containing '__' would make the prefix ambiguous → rejected.
+  constexpr char kBad[] = R"({
     "schema_version":1,"name":"w","version":"v1",
     "state":{"kind":"dynamic_json","fields":{}},
-    "mcp_servers":[{"id":"a.b","transport":"stdio","command_or_url":"/a"}],
+    "mcp_servers":[{"id":"a__b","transport":"stdio","command_or_url":"/a"}],
     "agents":{"c":{"system_prompt":"h","tools":[]}},"main":"c"})";
-  auto r = RunLoadAndAttach(io, reg, kDot);
+  auto r = RunLoadAndAttach(io, reg, kBad);
   ASSERT_FALSE(r.ok());
-  EXPECT_TRUE(absl::StrContains(r.status().message(), "."));
+  EXPECT_TRUE(absl::StrContains(r.status().message(), "__"));
 }
 
 TEST(WorkflowLoaderMcpTest, UndeclaredPrefixIsHardError) {
   asio::io_context io;
   ToolRegistry reg(io);
-  // No servers declared; agent references 'ghost.echo' → CheckReferences error.
+  // No servers declared; agent references a tool for an undeclared server →
+  // CheckReferences error.
   constexpr char kJson[] = R"({
     "schema_version":1,"name":"w","version":"v1",
     "state":{"kind":"dynamic_json","fields":{}},
     "mcp_servers":[],
-    "agents":{"chat":{"system_prompt":"h","tools":["ghost.echo"]}},"main":"chat"})";
+    "agents":{"chat":{"system_prompt":"h","tools":["mcp__ghost__echo"]}},"main":"chat"})";
   auto r = RunLoadAndAttach(io, reg, kJson);
   ASSERT_FALSE(r.ok());
   EXPECT_TRUE(absl::StrContains(r.status().message(), "unknown tool"));
@@ -96,16 +99,16 @@ TEST(WorkflowLoaderMcpTest, FailedServerDropsItsToolsAndBuilds) {
   asio::io_context io;
   ToolRegistry reg(io);
   // 'fs' points at a non-existent command → connect fails → degrade.
-  // Agent references fs.echo → tool dropped, workflow still builds.
+  // Agent references mcp__fs__echo → tool dropped, workflow still builds.
   constexpr char kJson[] = R"({
     "schema_version":1,"name":"w","version":"v1",
     "state":{"kind":"dynamic_json","fields":{}},
     "mcp_servers":[{"id":"fs","transport":"stdio",
                     "command_or_url":"/nonexistent/mcp-server-xyz"}],
-    "agents":{"chat":{"system_prompt":"h","tools":["fs.echo"]}},"main":"chat"})";
+    "agents":{"chat":{"system_prompt":"h","tools":["mcp__fs__echo"]}},"main":"chat"})";
   auto r = RunLoadAndAttach(io, reg, kJson);
   ASSERT_TRUE(r.ok()) << r.status().message();
-  EXPECT_FALSE(reg.Has("fs.echo"));
+  EXPECT_FALSE(reg.Has("mcp__fs__echo"));
 }
 
 }  // namespace

@@ -1,7 +1,7 @@
 // tests/integration/tools/loader_mcp_smoke_test.cc
 //
 // End-to-end: a workflow JSON declares the stdio echo MCP server; LoadAndAttach
-// connects it, namespaces its tool as "echo.echo", and an agent referencing it
+// connects it, namespaces its tool as "mcp__echo__echo", and an agent using it
 // resolves cleanly. Also verifies lazy_start is ignored (eager connect still
 // registers tools).
 
@@ -35,7 +35,7 @@ std::string EchoServerPath() {
 }
 
 // Builds a workflow JSON that declares the echo server (id "echo") with the
-// given extra entry fields, and one agent referencing "echo.echo".
+// given extra entry fields, and one agent referencing "mcp__echo__echo".
 std::string MakeJson(const std::string& extra_server_fields) {
   return std::string(R"({
     "schema_version":1,"name":"w","version":"v1",
@@ -43,7 +43,7 @@ std::string MakeJson(const std::string& extra_server_fields) {
     "mcp_servers":[{"id":"echo","transport":"stdio",
                     "command_or_url":"/usr/bin/python3","args":[")") +
       EchoServerPath() + R"("])" + extra_server_fields + R"(}],
-    "agents":{"chat":{"system_prompt":"hi","tools":["echo.echo"]}},
+    "agents":{"chat":{"system_prompt":"hi","tools":["mcp__echo__echo"]}},
     "main":"chat"})";
 }
 
@@ -67,7 +67,7 @@ TEST(LoaderMcpSmokeTest, LoadAndAttachStdioEcho) {
   ToolRegistry reg(io);
   auto result = RunLoad(io, reg, MakeJson(""));
   ASSERT_TRUE(result.ok()) << result.status().message();
-  EXPECT_TRUE(reg.Has("echo.echo"));
+  EXPECT_TRUE(reg.Has("mcp__echo__echo"));
 }
 
 TEST(LoaderMcpSmokeTest, LazyStartIgnoredStillRegisters) {
@@ -75,7 +75,7 @@ TEST(LoaderMcpSmokeTest, LazyStartIgnoredStillRegisters) {
   ToolRegistry reg(io);
   auto result = RunLoad(io, reg, MakeJson(R"(,"lazy_start":true)"));
   ASSERT_TRUE(result.ok()) << result.status().message();
-  EXPECT_TRUE(reg.Has("echo.echo"));  // eager connect despite lazy_start
+  EXPECT_TRUE(reg.Has("mcp__echo__echo"));  // eager connect despite lazy_start
 }
 
 TEST(LoaderMcpSmokeTest, IncludeToolsKeepsListedTool) {
@@ -84,7 +84,7 @@ TEST(LoaderMcpSmokeTest, IncludeToolsKeepsListedTool) {
   auto result =
       RunLoad(io, reg, MakeJson(R"(,"include_tools":["echo"],"call_timeout_ms":5000)"));
   ASSERT_TRUE(result.ok()) << result.status().message();
-  EXPECT_TRUE(reg.Has("echo.echo"));
+  EXPECT_TRUE(reg.Has("mcp__echo__echo"));
 }
 
 TEST(LoaderMcpSmokeTest, ExcludeToolsDropsListedTool) {
@@ -104,7 +104,7 @@ TEST(LoaderMcpSmokeTest, ExcludeToolsDropsListedTool) {
     "main":"chat"})json";
   auto result = RunLoad(io, reg, json);
   ASSERT_TRUE(result.ok()) << result.status().message();
-  EXPECT_FALSE(reg.Has("echo.echo"));
+  EXPECT_FALSE(reg.Has("mcp__echo__echo"));
 }
 
 }  // namespace

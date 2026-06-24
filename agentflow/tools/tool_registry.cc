@@ -130,7 +130,10 @@ asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(
     const std::string remote_name = schema.name;
     ToolSchema registered_schema = schema;  // copy; mutate the registry-facing name
     if (!name_prefix.empty()) {
-      registered_schema.name = absl::StrCat(name_prefix, ".", remote_name);
+      // Namespace as "mcp__<server>__<remote>" (the conventional MCP tool name
+      // format). The remote name handed to McpToolAdapter stays raw.
+      registered_schema.name =
+          absl::StrCat("mcp__", name_prefix, "__", remote_name);
     }
     auto adapter = std::make_shared<mcp::McpToolAdapter>(
         client, remote_name, registered_schema, timeout);

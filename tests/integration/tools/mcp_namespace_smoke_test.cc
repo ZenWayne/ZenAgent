@@ -53,7 +53,7 @@ TEST(McpNamespaceSmokeTest, PrefixNamespacesToolAndCallsRawRemote) {
         attach_ok = st.ok();
         if (attach_ok) {
           CancelToken cancel;
-          invoke_out = co_await reg.Invoke("remote.echo",
+          invoke_out = co_await reg.Invoke("mcp__remote__echo",
                                            R"({"text":"hi-there"})", cancel);
         }
         reg.ShutdownMcp();
@@ -63,7 +63,7 @@ TEST(McpNamespaceSmokeTest, PrefixNamespacesToolAndCallsRawRemote) {
   io.run();
 
   ASSERT_TRUE(attach_ok);
-  EXPECT_TRUE(reg.Has("remote.echo"));
+  EXPECT_TRUE(reg.Has("mcp__remote__echo"));
   EXPECT_FALSE(reg.Has("echo"));
   EXPECT_NE(invoke_out.find("hi-there"), std::string::npos);
 }

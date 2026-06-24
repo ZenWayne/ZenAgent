@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让作者在 workflow JSON 里用顶层 `mcp_servers` 块声明 MCP server，加载时自动连接、发现工具、按 `id.toolname` 命名空间注册进共享 `ToolRegistry`，agent 通过现有 `tools[]` 引用；连接失败时降级跳过而非中断。
+**Goal:** 让作者在 workflow JSON 里用顶层 `mcp_servers` 块声明 MCP server，加载时自动连接、发现工具、按 `mcp__id__toolname` 命名空间注册进共享 `ToolRegistry`，agent 通过现有 `tools[]` 引用；连接失败时降级跳过而非中断。
+
+> **后续修订（实现后）：** 命名空间格式由最初的 `id.toolname` 改为约定俗成的 `mcp__id__toolname`（分隔符 `.` → `__`，`id` 改为不含 `__`）。下文各 Task 内嵌的代码片段为最初编写版本；仓库内已落地的代码与本说明一致（`tool_registry.cc` 用 `absl::StrCat("mcp__", prefix, "__", remote)`，`workflow_loader.cc` 从 `mcp__<id>__<remote>` 解析前缀、`id` 校验拒绝 `__`）。
 
 **Architecture:** 在 `ToolRegistry::AttachMcpServer` 上加可选 `name_prefix` 做命名空间；把 `WorkflowLoader::Load` 解析后的收尾逻辑抽成共享 helper `FinalizeLoadedSpec`；新增协程 `WorkflowLoader::LoadAndAttach`，在"解析 → 连接 MCP → 降级裁剪 tools → 收尾校验/构建"之间插入 MCP 连接步骤。同步 `Load` 行为不变（遇到 `mcp_servers` 直接报错，引导改用 `LoadAndAttach`）。
 
@@ -10,8 +12,8 @@
 
 ## Global Constraints
 
-- 命名空间分隔符为 `.`；server `id` 必须非空、唯一、**不含 `.`**。
-- 命名空间注册：注册键/对 LLM 暴露的名 = `id.<remote>`；对远端 `tools/call` 仍用 **原始** remote 名。
+- 命名空间格式为 `mcp__<id>__<remote>`，分隔符 `__`；server `id` 必须非空、唯一、**不含 `__`**。
+- 命名空间注册：注册键/对 LLM 暴露的名 = `mcp__<id>__<remote>`；对远端 `tools/call` 仍用 **原始** remote 名。
 - `include_tools` / `exclude_tools` 过滤按 **原始 remote 名** 匹配（加前缀之前）。
 - 失败语义：声明的 server 连接失败 → 警告 + 跳过（降级），不中断 load。
 - 引用裁剪：agent `tools[]` 中某项 registry 没有时——前缀属于"声明过但失败"的 server → 丢弃该项 + 警告；否则保留交给 `CheckReferences`（未声明前缀/拼写错 → 硬报错）。
@@ -1007,7 +1009,7 @@ git commit -m "test(integration): end-to-end LoadAndAttach over stdio echo MCP s
 
 **Spec 覆盖：**
 - 顶层 `mcp_servers` 声明 + agent `tools[]` 引用 → Task 3（proto + 解析 + LoadAndAttach）。✅
-- `id.toolname` 命名空间 → Task 1（registry 前缀，真实 echo 验证）+ Task 3（解析）。✅
+- `mcp__id__toolname` 命名空间 → Task 1（registry 前缀，真实 echo 验证）+ Task 3（解析）。✅
 - 连接失败降级跳过 → Task 4（真实 bad-command 触发）。✅
 - 声明过但失败的前缀丢工具+警告 / 未声明前缀硬报错 → Task 4 + Task 3（`UndeclaredPrefixIsHardError`）。✅
 - v1 忽略 `lazy_start` + 警告 → Task 3 实现，Task 5 `LazyStartIgnoredStillRegisters` 真实验证。✅
