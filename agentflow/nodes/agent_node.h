@@ -14,7 +14,7 @@
 #include "agentflow/core/event.h"
 #include "agentflow/core/node.h"
 #include "agentflow/core/state.h"
-#include "agentflow/core/token_channel.h"
+#include "agentflow/core/token_sink.h"
 #include "agentflow/inference/litert_lm_conversation.h"
 #include "agentflow/inference/litert_lm_engine.h"
 #include "agentflow/tools/tool.h"
@@ -70,11 +70,11 @@ struct AgentNodeConfig {
 
   // Optional direct token stream. When set (and streaming is active — i.e.
   // stream_tokens && !constrained_tool_calls), each generated text delta is
-  // also pushed onto this channel as it arrives, giving the top of the stack
-  // (e.g. the JNI bridge → a Kotlin callback/Flow) a direct streaming path
-  // that bypasses the proto::TraceEvent observability stream. Non-owning; the
-  // channel must outlive the run and live on the same io_context as io_ctx.
-  TokenChannel* token_channel = nullptr;
+  // handed to this sink as it arrives, giving the top of the stack (e.g. the
+  // JNI bridge → a Kotlin callback/Flow) a direct streaming path that bypasses
+  // the proto::TraceEvent observability stream. Called synchronously on the
+  // run's io thread; must outlive the run.
+  TokenSink on_delta;
 };
 
 class AgentNode : public Node {

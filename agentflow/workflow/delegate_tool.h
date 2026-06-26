@@ -5,11 +5,9 @@
 #include <string>
 #include <vector>
 
-#include "agentflow/core/token_channel.h"
+#include "agentflow/core/token_sink.h"
 #include "agentflow/tools/tool.h"
 #include "agentflow/workflow/sub_agent_context.h"
-
-namespace asio { class io_context; }
 
 namespace agentflow::workflow {
 
@@ -19,18 +17,16 @@ class SubAgentRuntime;
 // LLM calls delegate(agent="X", goal="..."). On invocation we spawn a fresh
 // sub-agent via the bound SubAgentRuntime.
 //
-// When both `io` and `top_channel` are non-null, each delegate call gets its
-// OWN TokenChannel (different sub-agents → different channels): the sub-agent
-// streams deltas onto it and a drain coroutine forwards them up to
-// `top_channel` (the run-wide stream the JNI/Kotlin layer consumes). Null →
-// no sub-agent streaming.
+// When `top_sink` is set, the spawned sub-agent streams each text delta to it
+// (the run-wide sink the JNI/Kotlin layer consumes). Sub-agents share the one
+// sink — fan-in is inherent to a callback, so there is no per-call channel or
+// drain coroutine. Empty → no sub-agent streaming.
 std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
     std::shared_ptr<SubAgentRuntime> runtime,
     std::string parent_agent,
     std::vector<std::string> allowed_children,
     SubAgentContext ctx,
-    ::asio::io_context* io = nullptr,
-    TokenChannel* top_channel = nullptr);
+    TokenSink top_sink = {});
 
 }  // namespace agentflow::workflow
 #endif

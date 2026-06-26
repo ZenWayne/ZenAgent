@@ -23,7 +23,7 @@ cc_library(
         "runner.h",
         "state.h",
         "stub_node.h",
-        "token_channel.h",
+        "token_sink.h",
     ],
     deps = [
         "//agentflow/persist",

@@ -226,17 +226,12 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
     co_return nlohmann::ordered_json{{"error", "engine_error"}};
   }
 
-  // Per-invocation token forwarding: push each streamed delta onto the
-  // caller-provided channel (set by the delegate tool, one per call). Unset →
-  // no-op (non-streaming or nobody listening). The conversation also won't
-  // stream when the child is constrained (handled inside the SendFn).
-  TokenSink on_token;
-  if (ctx.token_channel != nullptr) {
-    auto* ch = ctx.token_channel;
-    on_token = [ch](std::string_view delta) {
-      ch->try_send(asio::error_code{}, std::string(delta));
-    };
-  }
+  // Per-invocation token forwarding: hand each streamed delta to the run-wide
+  // sink (wired by the delegate tool). Unset → no-op (non-streaming or nobody
+  // listening). The conversation also won't stream when the child is
+  // constrained (handled inside the SendFn). ctx.token_sink is already the
+  // right type, so no adapter is needed.
+  const TokenSink& on_token = ctx.token_sink;
 
   nlohmann::ordered_json user_msg = {
       {"role", "user"},

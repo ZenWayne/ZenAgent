@@ -177,15 +177,10 @@ asio::awaitable<State> AgentNode::Run(
         std::string delta = ExtractAssistantText(cj);
         if (!delta.empty()) {
           emit.EmitToken(Id(), delta);  // clean text delta, not the envelope
-          if (cfg_.token_channel) {
-            // Direct streaming path to the top of the stack. as_tuple so a
-            // closed channel (consumer gone) yields an error instead of
-            // throwing — we just stop forwarding in that case.
-            auto [ec] = co_await cfg_.token_channel->async_send(
-                asio::error_code{}, delta,
-                asio::as_tuple(asio::use_awaitable));
-            (void)ec;
-          }
+          // Direct streaming path to the top of the stack: hand the delta to
+          // the sink synchronously (it runs on this io thread). The sink itself
+          // decides what to do if the consumer is gone.
+          if (cfg_.on_delta) cfg_.on_delta(delta);
           acc_text += delta;
         }
       }

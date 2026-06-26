@@ -5,7 +5,7 @@
 #include <string>
 
 #include "agentflow/core/cancel.h"
-#include "agentflow/core/token_channel.h"
+#include "agentflow/core/token_sink.h"
 
 namespace agentflow::workflow {
 
@@ -16,11 +16,11 @@ struct SubAgentContext {
   std::string root_invocation_id;
   const CancelToken* parent_cancel = nullptr;
 
-  // Optional per-invocation direct token stream. When set (and the child is
-  // unconstrained), each generated text delta is pushed onto this channel as
-  // it streams. The delegate tool creates one channel per call and drains it
-  // up to the top-level stream — different sub-agents use different channels.
-  TokenChannel* token_channel = nullptr;
+  // Optional direct token sink. When set (and the child is unconstrained), each
+  // generated text delta is handed to it as it streams. The delegate tool wires
+  // this to the run-wide sink, so every sub-agent shares it (fan-in is inherent
+  // to a callback).
+  TokenSink token_sink;
 };
 
 }  // namespace agentflow::workflow

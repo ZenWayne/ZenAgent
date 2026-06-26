@@ -20,12 +20,10 @@
 #include <utility>
 #include <vector>
 
-#include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
-#include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
 
 #include <thread>
@@ -39,7 +37,7 @@
 #include "agentflow/core/runner.h"
 #include "agentflow/core/state.h"
 #include "agentflow/core/stub_node.h"
-#include "agentflow/core/token_channel.h"
+#include "agentflow/core/token_sink.h"
 #include "agentflow/inference/litert_lm_engine.h"
 #include "agentflow/nodes/agent_node.h"
 #include "agentflow/tools/tool_registry.h"
@@ -299,8 +297,8 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflow(
 //   ): String
 //
 // Same workflow pipeline as runJsonWorkflow, but the main agent runs in
-// streaming mode: each generated text delta is pushed onto a TokenChannel and
-// forwarded to `onToken` as it arrives (a direct path, not the TraceEvent
+// streaming mode: each generated text delta is handed to a TokenSink that
+// forwards it to `onToken` as it arrives (a direct path, not the TraceEvent
 // stream). The full assistant reply is returned when the run completes.
 //
 // Streaming requires the unconstrained path (the constrained C bridge has no
@@ -358,10 +356,23 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     }
     auto wf = *wf_or;
 
-    // Run-wide token stream, created BEFORE BuildAgentNode so it can be wired
-    // into both the main agent and the delegate tool (each sub-agent gets its
-    // own per-call channel that drains up to this one).
-    af::TokenChannel channel(io, /*capacity=*/4096);
+    // Run-wide token sink: every generated delta (main agent or any delegated
+    // sub-agent) is marshalled onto the JVM callback inline. It runs on this io
+    // thread, so `env` is valid for CallVoidMethod (no AttachCurrentThread).
+    bool cb_failed = false;
+    auto on_delta = [&](std::string_view tok) {
+      if (on_token_mid == nullptr || cb_failed) return;
+      jstring js = env->NewStringUTF(std::string(tok).c_str());
+      env->CallVoidMethod(on_token_j, on_token_mid, js);
+      env->DeleteLocalRef(js);
+      if (env->ExceptionCheck()) {
+        // A Kotlin callback threw — leave the exception pending and stop
+        // forwarding (this lambda becomes a no-op for the rest of the run); it
+        // surfaces to the caller when JNI returns. A no-op sink never blocks
+        // the run, so there is no producer stall the old full-channel path had.
+        cb_failed = true;
+      }
+    };
 
     af::workflow::AgentNodeBuildSpec build_spec;
     build_spec.workflow      = wf;
@@ -372,7 +383,7 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     build_spec.input_field   = "user_query";
     build_spec.output_field  = "assistant_reply";
     build_spec.max_iter      = 5;
-    build_spec.token_channel = &channel;
+    build_spec.token_sink    = on_delta;
     auto built = af::workflow::BuildAgentNode(build_spec);
     if (built.cfg.system_prompt.empty() && !built.cfg.engine) {
       ThrowJava(env, "main agent not in roster");
@@ -381,7 +392,7 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     std::vector<std::shared_ptr<void>> keepalive = std::move(built.keepalive);
 
     // Streaming requires the unconstrained path (no streaming constrained C
-    // bridge). BuildAgentNode already set stream_tokens + token_channel.
+    // bridge). BuildAgentNode already set stream_tokens + on_delta.
     built.cfg.constrained_tool_calls = false;
 
     af::GraphBuilder b;
@@ -397,37 +408,15 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     std::string reply;
     std::exception_ptr run_exc;
 
-    // Producer side: run the graph, capture the reply, then close the channel
-    // to signal the drain loop that the stream is finished.
+    // One coroutine: the graph runs and each delta is delivered inline via
+    // on_delta during the run — there is no separate consumer. io.run() returns
+    // once the run completes.
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
       try {
         auto out = co_await runner.Run(af::State::From(init), cancel_tok);
         reply = out.As<af::test::TestState>().assistant_reply();
       } catch (...) {
         run_exc = std::current_exception();
-      }
-      channel.close();
-      co_return;
-    }, asio::detached);
-
-    // Consumer side: forward each token to the JVM callback. Runs on the same
-    // io thread as the JNI call, so `env` is valid for CallVoidMethod (no
-    // AttachCurrentThread needed).
-    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
-      for (;;) {
-        auto [ec, tok] = co_await channel.async_receive(
-            asio::as_tuple(asio::use_awaitable));
-        if (ec) break;  // channel closed → end of stream
-        if (on_token_mid != nullptr) {
-          jstring js = env->NewStringUTF(tok.c_str());
-          env->CallVoidMethod(on_token_j, on_token_mid, js);
-          env->DeleteLocalRef(js);
-          if (env->ExceptionCheck()) {
-            // A Kotlin callback threw — stop forwarding; the exception stays
-            // pending and surfaces to the caller when JNI returns.
-            break;
-          }
-        }
       }
       co_return;
     }, asio::detached);
@@ -590,9 +579,25 @@ Java_agentflow_jni_NativeBridge_nativeSessionSendMessage(
     }
 
     // Build a fresh single-turn graph that REUSES the session's engine and
-    // persistent conversation slot (so history carries across messages). The
-    // token channel lives on the session's io_context.
-    af::TokenChannel channel(sess->io, /*capacity=*/4096);
+    // persistent conversation slot (so history carries across messages). Each
+    // generated delta is marshalled onto the JVM callback inline by on_delta,
+    // which runs on the session WORKER thread (sess->io) — so it uses a global
+    // ref plus that thread's attached JNIEnv (`tenv`, set when the run
+    // coroutine starts, before any delta can arrive).
+    JNIEnv* tenv = nullptr;
+    bool cb_failed = false;
+    auto on_delta = [&](std::string_view tok) {
+      if (on_token_global == nullptr || tenv == nullptr || cb_failed) return;
+      jstring js = tenv->NewStringUTF(std::string(tok).c_str());
+      tenv->CallVoidMethod(on_token_global, on_token_mid, js);
+      tenv->DeleteLocalRef(js);
+      // Match the prior session behaviour: clear a throwing callback's
+      // exception and stop forwarding for the rest of the turn.
+      if (tenv->ExceptionCheck()) {
+        tenv->ExceptionClear();
+        cb_failed = true;
+      }
+    };
 
     af::workflow::AgentNodeBuildSpec build_spec;
     build_spec.workflow      = sess->workflow;
@@ -603,7 +608,7 @@ Java_agentflow_jni_NativeBridge_nativeSessionSendMessage(
     build_spec.input_field   = "user_query";
     build_spec.output_field  = "assistant_reply";
     build_spec.max_iter      = 5;
-    build_spec.token_channel = &channel;
+    build_spec.token_sink    = on_delta;
     auto built = af::workflow::BuildAgentNode(build_spec);
     if (built.cfg.system_prompt.empty() && !built.cfg.engine) {
       ThrowJava(env, "main agent not in roster");
@@ -630,30 +635,14 @@ Java_agentflow_jni_NativeBridge_nativeSessionSendMessage(
     std::string reply;
     std::exception_ptr run_exc;
 
-    // Producer: run the graph on the session io_context, then close the channel.
-    asio::co_spawn(sess->io, [&]() -> asio::awaitable<void> {
-      try {
-        auto out = co_await runner.Run(af::State::From(init), cancel_tok);
-        reply = out.As<af::test::TestState>().assistant_reply();
-      } catch (...) {
-        run_exc = std::current_exception();
-      }
-      channel.close();
-      co_return;
-    }, asio::detached);
-
-    // Consumer: forward each delta to the JVM callback. Runs on THIS JNI thread,
-    // which is a JVM thread (Kotlin called us), so `env` is valid directly.
-    // We pump the session io_context from here via a future barrier instead of
-    // io.run() (the worker thread already runs it), so use a completion latch.
+    // One coroutine on the session worker thread: attach it to the JVM for the
+    // turn (so on_delta can marshal each delta inline — no separate consumer),
+    // run the graph, then detach. The JNI calling thread blocks on the latch
+    // until the turn finishes, since the worker thread drives sess->io, not us.
     std::mutex done_mu;
     std::condition_variable done_cv;
     bool done = false;
     asio::co_spawn(sess->io, [&]() -> asio::awaitable<void> {
-      // The consumer coroutine runs on the single session worker thread (it
-      // always resumes on the same thread driving sess->io). Attach it to the
-      // JVM once for the whole loop, then detach when the turn ends.
-      JNIEnv* tenv = nullptr;
       bool attached = false;
       if (on_token_global != nullptr && g_vm != nullptr) {
         if (g_vm->GetEnv(reinterpret_cast<void**>(&tenv), JNI_VERSION_1_6) !=
@@ -662,17 +651,13 @@ Java_agentflow_jni_NativeBridge_nativeSessionSendMessage(
           attached = true;
         }
       }
-      for (;;) {
-        auto [ec, tok] = co_await channel.async_receive(
-            asio::as_tuple(asio::use_awaitable));
-        if (ec) break;  // channel closed → end of stream
-        if (tenv != nullptr) {
-          jstring js = tenv->NewStringUTF(tok.c_str());
-          tenv->CallVoidMethod(on_token_global, on_token_mid, js);
-          tenv->DeleteLocalRef(js);
-          if (tenv->ExceptionCheck()) tenv->ExceptionClear();
-        }
+      try {
+        auto out = co_await runner.Run(af::State::From(init), cancel_tok);
+        reply = out.As<af::test::TestState>().assistant_reply();
+      } catch (...) {
+        run_exc = std::current_exception();
       }
+      tenv = nullptr;  // no more deltas; stop on_delta touching the JVM
       if (attached) g_vm->DetachCurrentThread();
       {
         std::lock_guard<std::mutex> lk(done_mu);
@@ -682,7 +667,7 @@ Java_agentflow_jni_NativeBridge_nativeSessionSendMessage(
       co_return;
     }, asio::detached);
 
-    // Wait for the stream to finish (the worker thread drives sess->io).
+    // Wait for the turn to finish (the worker thread drives sess->io).
     {
       std::unique_lock<std::mutex> lk(done_mu);
       done_cv.wait(lk, [&] { return done; });

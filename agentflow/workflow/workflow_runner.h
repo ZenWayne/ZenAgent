@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "agentflow/core/event.h"
-#include "agentflow/core/token_channel.h"
+#include "agentflow/core/token_sink.h"
 #include "agentflow/nodes/agent_node.h"
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/workflow.h"
@@ -28,10 +28,10 @@ struct AgentNodeBuildSpec {
   std::string output_field = "assistant_reply";
   int max_iter = 8;
 
-  // Optional run-wide token stream. When set, the main agent streams onto it
-  // and each delegated sub-agent gets its own per-call channel that drains up
-  // to this one. Null → no streaming (default).
-  TokenChannel* token_channel = nullptr;
+  // Optional run-wide token sink. When set, the main agent and every delegated
+  // sub-agent hand each generated text delta to it (fan-in is inherent to a
+  // callback). Empty → no streaming (default).
+  TokenSink token_sink;
 };
 
 // Result: configured AgentNodeConfig + keepalive holders (SubAgentRuntime

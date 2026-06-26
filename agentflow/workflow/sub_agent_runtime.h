@@ -11,7 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentflow/core/event.h"
-#include "agentflow/core/token_channel.h"
+#include "agentflow/core/token_sink.h"
 #include "agentflow/inference/litert_lm_conversation.h"
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/sub_agent_context.h"
@@ -65,10 +65,9 @@ class SubAgentRuntime {
 
   // Async sub-agent run. Returns a JSON value (typically a string, or an error
   // object {"error":"<kind>",...}). NEVER throws. Runs entirely under the
-  // caller's io_context via co_await (no nested io.run()), so it composes with
-  // a concurrent token-channel drain at the top of the stack. When
-  // ctx.token_channel is set and the child is unconstrained, each generated
-  // text delta is pushed onto that channel as it streams.
+  // caller's io_context via co_await (no nested io.run()). When ctx.token_sink
+  // is set and the child is unconstrained, each generated text delta is handed
+  // to that sink as it streams.
   [[nodiscard]] asio::awaitable<nlohmann::ordered_json> RunAsync(
       std::string_view parent_agent, std::string_view child_agent,
       std::string_view goal, SubAgentContext ctx);
