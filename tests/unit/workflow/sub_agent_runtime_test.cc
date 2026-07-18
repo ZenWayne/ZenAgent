@@ -138,10 +138,10 @@ TEST(SubAgentRuntimeTest, ConversationCreationFailureIsEngineError) {
 }
 
 // A streaming fake pushes deltas through the TokenSink; RunAsync forwards them
-// straight to ctx.token_sink. Verifies the sub-agent → sink streaming path
-// deterministically (no engine). The sink collects deltas inline as the run
-// progresses — no channel, drain coroutine, or sentinel.
-TEST(SubAgentRuntimeTest, StreamsDeltasToSink) {
+// onto ctx.token_channel. Verifies the sub-agent → channel streaming path
+// deterministically (no engine). Uses an empty-string sentinel to end the
+// drain after RunAsync, mirroring the delegate tool.
+TEST(SubAgentRuntimeTest, StreamsDeltasToChannel) {
   asio::io_context io;
   ToolRegistry host_tools(io);
   auto wf = *WorkflowLoader::Load(kRosterJson, host_tools);
@@ -163,13 +163,30 @@ TEST(SubAgentRuntimeTest, StreamsDeltasToSink) {
   };
 
   SubAgentRuntime rt(wf, host_tools, emit, std::move(streaming_fake));
-  std::vector<std::string> got;
+  TokenChannel ch(io, /*capacity=*/16);
   SubAgentContext ctx;
-  ctx.token_sink = [&got](std::string_view delta) {
-    got.emplace_back(delta);
-  };
+  ctx.token_channel = &ch;
 
-  auto result = RunAsyncBlocking(rt, io, "parent", "child", "ping", ctx);
+  nlohmann::ordered_json result;
+  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    result = co_await rt.RunAsync("parent", "child", "ping", ctx);
+    auto [ec] = co_await ch.async_send(asio::error_code{}, std::string{},
+                                       asio::as_tuple(asio::use_awaitable));
+    (void)ec;
+  }, asio::detached);
+
+  std::vector<std::string> got;
+  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    for (;;) {
+      auto [ec, tok] =
+          co_await ch.async_receive(asio::as_tuple(asio::use_awaitable));
+      if (ec || tok.empty()) break;
+      got.push_back(tok);
+    }
+    co_return;
+  }, asio::detached);
+
+  io.run();
 
   ASSERT_TRUE(result.is_string());
   EXPECT_EQ(result.get<std::string>(), "Hello");
