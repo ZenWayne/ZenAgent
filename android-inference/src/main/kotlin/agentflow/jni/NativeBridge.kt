@@ -65,6 +65,34 @@ internal object NativeBridge {
         cancelId: Long,
     ): String
 
+    /**
+     * Creates a PERSISTENT multi-turn session: loads the engine (model) ONCE
+     * and starts a worker thread. Returns an opaque session id (>0), or throws
+     * on failure. Call [nativeSessionSendMessage] per user message to reuse the
+     * same engine + conversation (the engine owns dialogue history server-side,
+     * so messages continue the same conversation). Call [nativeCloseSession]
+     * when done to free the engine and stop the worker thread.
+     *
+     * This avoids recreating the engine per message — which both reloads the
+     * model (~GBs) and trips the engine factory's per-process registration.
+     */
+    external fun nativeCreateSession(modelPath: String, workflowJson: String): Long
+
+    /**
+     * Sends one user message on a persistent [sessionId], streaming reply deltas
+     * to [onToken]. Reuses the session's engine + conversation (multi-turn).
+     * Blocks until the turn completes, then returns the full assistant reply.
+     */
+    external fun nativeSessionSendMessage(
+        sessionId: Long,
+        userQuery: String,
+        onToken: TokenCallback,
+        cancelId: Long,
+    ): String
+
+    /** Tears down a persistent session (cancels in-flight decode, frees engine). */
+    external fun nativeCloseSession(sessionId: Long)
+
     /** Allocates a cancel handle. Returns its opaque id (0 means "none"). */
     external fun nativeNewCancel(): Long
 

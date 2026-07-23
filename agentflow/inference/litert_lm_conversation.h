@@ -85,8 +85,15 @@ class LiteRtLmConversation {
   // chunks stream in; complete after NextTokenAsync returns the empty string.
   std::string FullResponseJson() const;
 
-  // Cancels the in-flight request. Safe to call from any thread.
+  // Cancels the in-flight request AND permanently closes the conversation
+  // (single-use after this). Use for teardown. Safe to call from any thread.
   void Cancel();
+
+  // Cancels the in-flight decode for the current turn but KEEPS the
+  // conversation reusable for subsequent turns (does not close the channel or
+  // latch the cancelled flag). Use for cooperative per-turn "stop" on a
+  // persistent multi-turn conversation. Safe to call from any thread.
+  void CancelTurn();
 
  private:
   LiteRtLmConversation(::LiteRtLmConversation* conv,

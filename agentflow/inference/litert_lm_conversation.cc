@@ -183,6 +183,19 @@ void LiteRtLmConversation::Cancel() {
   channel_.close();
 }
 
+void LiteRtLmConversation::CancelTurn() {
+  // Cancel the in-flight engine decode for the CURRENT turn but keep the
+  // conversation reusable for the next turn: do NOT close channel_ (that would
+  // make it single-use) and do NOT latch cancelled_ (that would make
+  // StreamCallback drop every future turn). Unblock a pending NextTokenAsync
+  // by delivering the end-of-turn sentinel so the agent loop ends this turn
+  // cleanly.
+  if (conv_) {
+    litert_lm_conversation_cancel_process(conv_);
+  }
+  channel_.try_send(asio::error_code{}, std::string{});
+}
+
 void LiteRtLmConversation::StreamCallback(void* data, const char* chunk,
                                            bool is_final,
                                            const char* error_msg) {

@@ -11,6 +11,7 @@
 #include <jni.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -22,9 +23,14 @@
 #include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
+#include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
+
+#include <thread>
+
+#include "agentflow/inference/litert_lm_conversation.h"
 
 #include "agentflow/core/cancel.h"
 #include "agentflow/core/errors.h"
@@ -85,6 +91,49 @@ void ThrowJava(JNIEnv* env, const char* msg) {
 std::mutex g_cancel_mu;
 std::unordered_map<jlong, std::unique_ptr<::agentflow::CancelSource>> g_cancels;
 jlong g_next_cancel_id = 1;
+
+// Cached JavaVM, set in JNI_OnLoad. A persistent Session runs the engine on its
+// own worker thread (NOT a JVM thread), so token callbacks must attach to the
+// VM before calling back into Kotlin.
+JavaVM* g_vm = nullptr;
+
+// ── Persistent multi-turn session ────────────────────────────────────────────
+//
+// A Session owns the heavy, reusable inference state: ONE LiteRtLmEngine (the
+// model is loaded once — recreating it per message both reloads ~GBs and trips
+// the engine factory's per-process "ALREADY_EXISTS" registration), a persistent
+// io_context driven by a dedicated worker thread, the parsed workflow + its
+// host tools + keepalive (sub-agent runtime / delegate tools), and a persistent
+// conversation slot. Each SendMessage reuses all of it and continues the same
+// dialogue (the engine owns history server-side), so multi-turn just works.
+struct Session {
+  std::shared_ptr<af::LiteRtLmEngine> engine;
+  std::shared_ptr<af::workflow::Workflow> workflow;
+  std::shared_ptr<af::ToolRegistry> host_tools;
+  std::vector<std::shared_ptr<void>> keepalive;
+  // Persistent conversation reused across messages (created lazily on the first
+  // SendMessage, then continued). Lives on `io`.
+  std::shared_ptr<af::LiteRtLmConversation> conversation;
+
+  asio::io_context io;
+  // Keeps io.run() alive between messages (no work would otherwise return).
+  asio::executor_work_guard<asio::io_context::executor_type> work_guard;
+  std::thread worker;
+  // Serializes SendMessage calls — one decode at a time per session.
+  std::mutex send_mu;
+
+  Session() : work_guard(asio::make_work_guard(io)) {}
+};
+
+std::mutex g_session_mu;
+std::unordered_map<jlong, std::shared_ptr<Session>> g_sessions;
+jlong g_next_session_id = 1;
+
+std::shared_ptr<Session> LookupSession(jlong id) {
+  std::lock_guard<std::mutex> lk(g_session_mu);
+  auto it = g_sessions.find(id);
+  return it == g_sessions.end() ? nullptr : it->second;
+}
 
 }  // namespace
 
@@ -428,6 +477,252 @@ Java_agentflow_jni_NativeBridge_nativeFreeCancel(JNIEnv* /*env*/,
                                                  jlong cancel_id_j) {
   std::lock_guard<std::mutex> lk(g_cancel_mu);
   g_cancels.erase(cancel_id_j);
+}
+
+// ── Persistent session lifecycle (multi-turn) ────────────────────────────────
+
+// Caches the JavaVM so the session worker thread can attach for callbacks.
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+  g_vm = vm;
+  return JNI_VERSION_1_6;
+}
+
+// Creates a persistent session: loads the engine (model) ONCE, parses the
+// workflow, and starts a worker thread driving the session's io_context. The
+// conversation is created lazily on the first sendMessage. Returns an opaque
+// session id, or throws on failure (e.g. engine create / workflow parse).
+//
+// Java signature:
+//   external fun nativeCreateSession(modelPath: String, workflowJson: String): Long
+JNIEXPORT jlong JNICALL
+Java_agentflow_jni_NativeBridge_nativeCreateSession(
+    JNIEnv* env, jobject /*self*/,
+    jstring model_path_j,
+    jstring workflow_json_j) {
+  try {
+    const std::string model_path    = JString(env, model_path_j).str();
+    const std::string workflow_json = JString(env, workflow_json_j).str();
+
+    auto engine = af::LiteRtLmEngine::Create(
+        af::LiteRtLmEngineOptions{.model_path = model_path});
+    if (!engine) {
+      ThrowJava(env, "LiteRtLmEngine::Create failed");
+      return 0;
+    }
+
+    auto sess = std::make_shared<Session>();
+    sess->engine = std::move(engine);
+    sess->host_tools = std::make_shared<af::ToolRegistry>(sess->io);
+
+    auto wf_or =
+        af::workflow::WorkflowLoader::Load(workflow_json, *sess->host_tools);
+    if (!wf_or.ok()) {
+      ThrowJava(env, std::string(wf_or.status().message()).c_str());
+      return 0;
+    }
+    sess->workflow = *wf_or;
+
+    // Drive the io_context on a dedicated worker thread for the session's life.
+    sess->worker = std::thread([sess]() { sess->io.run(); });
+
+    std::lock_guard<std::mutex> lk(g_session_mu);
+    jlong id = g_next_session_id++;
+    g_sessions[id] = std::move(sess);
+    return id;
+  } catch (const std::exception& e) {
+    ThrowJava(env, e.what());
+    return 0;
+  } catch (...) {
+    ThrowJava(env, "unknown C++ exception");
+    return 0;
+  }
+}
+
+// Sends one user message on a persistent session and streams the reply deltas
+// to onToken. Reuses the session's engine + conversation (multi-turn). Blocks
+// until the turn completes, then returns the full assistant reply.
+//
+// Java signature:
+//   external fun nativeSessionSendMessage(
+//       sessionId: Long, userQuery: String, onToken: TokenCallback, cancelId: Long): String
+JNIEXPORT jstring JNICALL
+Java_agentflow_jni_NativeBridge_nativeSessionSendMessage(
+    JNIEnv* env, jobject /*self*/,
+    jlong session_id_j,
+    jstring user_query_j,
+    jobject on_token_j,
+    jlong cancel_id_j) {
+  auto sess = LookupSession(session_id_j);
+  if (!sess) {
+    ThrowJava(env, "invalid session id");
+    return nullptr;
+  }
+  // One decode at a time per session (the conversation is not concurrent-safe).
+  std::lock_guard<std::mutex> send_lk(sess->send_mu);
+
+  try {
+    const std::string user_query = JString(env, user_query_j).str();
+
+    ::agentflow::CancelToken cancel_tok;
+    if (cancel_id_j != 0) {
+      std::lock_guard<std::mutex> lk(g_cancel_mu);
+      auto it = g_cancels.find(cancel_id_j);
+      if (it != g_cancels.end()) cancel_tok = it->second->Token();
+    }
+
+    // The token callback is invoked from the session WORKER thread (the
+    // consumer coroutine runs on sess->io), so we must hold a GLOBAL ref to the
+    // callback object — a local ref like `on_token_j` is only valid on this JNI
+    // calling thread and using it from another thread crashes. jmethodID is
+    // thread-independent and stays valid.
+    jmethodID on_token_mid = nullptr;
+    jobject on_token_global = nullptr;
+    if (on_token_j != nullptr) {
+      jclass cb_cls = env->GetObjectClass(on_token_j);
+      on_token_mid =
+          env->GetMethodID(cb_cls, "onToken", "(Ljava/lang/String;)V");
+      env->DeleteLocalRef(cb_cls);
+      if (on_token_mid == nullptr) {
+        ThrowJava(env, "callback missing onToken(String) method");
+        return nullptr;
+      }
+      on_token_global = env->NewGlobalRef(on_token_j);
+    }
+
+    // Build a fresh single-turn graph that REUSES the session's engine and
+    // persistent conversation slot (so history carries across messages). The
+    // token channel lives on the session's io_context.
+    af::TokenChannel channel(sess->io, /*capacity=*/4096);
+
+    af::workflow::AgentNodeBuildSpec build_spec;
+    build_spec.workflow      = sess->workflow;
+    build_spec.agent_name    = sess->workflow->spec().main();
+    build_spec.host_tools    = sess->host_tools;
+    build_spec.engine        = sess->engine;
+    build_spec.io_ctx        = &sess->io;
+    build_spec.input_field   = "user_query";
+    build_spec.output_field  = "assistant_reply";
+    build_spec.max_iter      = 5;
+    build_spec.token_channel = &channel;
+    auto built = af::workflow::BuildAgentNode(build_spec);
+    if (built.cfg.system_prompt.empty() && !built.cfg.engine) {
+      ThrowJava(env, "main agent not in roster");
+      return nullptr;
+    }
+    // Keep sub-agent runtime / delegate tools alive for the whole session, not
+    // just this message (rebuilt each call is fine; just retain the latest).
+    sess->keepalive = std::move(built.keepalive);
+
+    built.cfg.constrained_tool_calls = false;
+    // Reuse the persistent conversation across messages.
+    built.cfg.conversation_slot = &sess->conversation;
+
+    af::GraphBuilder b;
+    b.AddNode(std::make_unique<af::AgentNode>(std::move(built.cfg)))
+     .AddNode(std::make_unique<af::StubNode>("sink", 0ms, nullptr, nullptr))
+     .AddEdge("agent", "sink");
+    auto graph = b.Build();
+
+    af::test::TestState init;
+    init.set_user_query(user_query);
+    af::Runner runner(std::move(graph), af::Runner::Options{});
+
+    std::string reply;
+    std::exception_ptr run_exc;
+
+    // Producer: run the graph on the session io_context, then close the channel.
+    asio::co_spawn(sess->io, [&]() -> asio::awaitable<void> {
+      try {
+        auto out = co_await runner.Run(af::State::From(init), cancel_tok);
+        reply = out.As<af::test::TestState>().assistant_reply();
+      } catch (...) {
+        run_exc = std::current_exception();
+      }
+      channel.close();
+      co_return;
+    }, asio::detached);
+
+    // Consumer: forward each delta to the JVM callback. Runs on THIS JNI thread,
+    // which is a JVM thread (Kotlin called us), so `env` is valid directly.
+    // We pump the session io_context from here via a future barrier instead of
+    // io.run() (the worker thread already runs it), so use a completion latch.
+    std::mutex done_mu;
+    std::condition_variable done_cv;
+    bool done = false;
+    asio::co_spawn(sess->io, [&]() -> asio::awaitable<void> {
+      // The consumer coroutine runs on the single session worker thread (it
+      // always resumes on the same thread driving sess->io). Attach it to the
+      // JVM once for the whole loop, then detach when the turn ends.
+      JNIEnv* tenv = nullptr;
+      bool attached = false;
+      if (on_token_global != nullptr && g_vm != nullptr) {
+        if (g_vm->GetEnv(reinterpret_cast<void**>(&tenv), JNI_VERSION_1_6) !=
+            JNI_OK) {
+          g_vm->AttachCurrentThread(reinterpret_cast<void**>(&tenv), nullptr);
+          attached = true;
+        }
+      }
+      for (;;) {
+        auto [ec, tok] = co_await channel.async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        if (ec) break;  // channel closed → end of stream
+        if (tenv != nullptr) {
+          jstring js = tenv->NewStringUTF(tok.c_str());
+          tenv->CallVoidMethod(on_token_global, on_token_mid, js);
+          tenv->DeleteLocalRef(js);
+          if (tenv->ExceptionCheck()) tenv->ExceptionClear();
+        }
+      }
+      if (attached) g_vm->DetachCurrentThread();
+      {
+        std::lock_guard<std::mutex> lk(done_mu);
+        done = true;
+      }
+      done_cv.notify_one();
+      co_return;
+    }, asio::detached);
+
+    // Wait for the stream to finish (the worker thread drives sess->io).
+    {
+      std::unique_lock<std::mutex> lk(done_mu);
+      done_cv.wait(lk, [&] { return done; });
+    }
+
+    if (on_token_global != nullptr) env->DeleteGlobalRef(on_token_global);
+    if (run_exc) std::rethrow_exception(run_exc);
+    return env->NewStringUTF(reply.c_str());
+  } catch (const std::exception& e) {
+    ThrowJava(env, e.what());
+    return nullptr;
+  } catch (...) {
+    ThrowJava(env, "unknown C++ exception");
+    return nullptr;
+  }
+}
+
+// Tears down a persistent session: cancels any in-flight decode, stops the
+// worker thread, and frees the engine/conversation. Safe to call once.
+//
+// Java signature:
+//   external fun nativeCloseSession(sessionId: Long)
+JNIEXPORT void JNICALL
+Java_agentflow_jni_NativeBridge_nativeCloseSession(JNIEnv* /*env*/,
+                                                   jobject /*self*/,
+                                                   jlong session_id_j) {
+  std::shared_ptr<Session> sess;
+  {
+    std::lock_guard<std::mutex> lk(g_session_mu);
+    auto it = g_sessions.find(session_id_j);
+    if (it == g_sessions.end()) return;
+    sess = std::move(it->second);
+    g_sessions.erase(it);
+  }
+  // Cancel the in-flight turn (permanently) and let the worker drain.
+  if (sess->conversation) sess->conversation->Cancel();
+  // Release the work guard so io.run() returns, then join the worker.
+  sess->work_guard.reset();
+  if (sess->worker.joinable()) sess->worker.join();
+  // engine / conversation / workflow destroyed when sess refcount drops here.
 }
 
 }  // extern "C"
