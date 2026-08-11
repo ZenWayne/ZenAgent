@@ -1642,7 +1642,7 @@ covered in CI for the first time."
 
 ---
 
-## Task 6: Migrate `LlmNode`, `SubAgentRuntime` and `WorkflowSpec`
+## Task 6: Migrate `LlmNode`, `SubAgentRuntime` and `AgentNodeBuildSpec`
 
 Spec §5.1. Finishes the migration so nothing outside `agentflow/inference/`
 mentions `LiteRtLmEngine`. After this task the LiteRT dependency is fully
@@ -1660,7 +1660,7 @@ behind the seam.
 - Produces:
   - `LlmNodeConfig.backend` replacing `.engine`.
   - `SubAgentRuntime::DefaultConversationFactory(std::shared_ptr<IChatBackend>) -> ConversationFactory` (the `io_context&` parameter is **gone** — the backend already holds it).
-  - `WorkflowSpec.backend` (default) and `WorkflowSpec.backends` (`std::map<std::string, std::shared_ptr<IChatBackend>>`). Task 7 validates against the map.
+  - `AgentNodeBuildSpec.backend` (default) and `AgentNodeBuildSpec.backends` (`std::map<std::string, std::shared_ptr<IChatBackend>>`), replacing `.engine` at `workflow_runner.h:24`. Task 7 validates against the map.
 
 > **Intentional behaviour change in `LlmNode`.** It currently drives the raw
 > **Session** API (`litert_lm_engine_create_session`) with a hand-built
@@ -1860,7 +1860,7 @@ add `#include "agentflow/inference/chat_backend.h"`.
 > `std::atomic_bool` cancel-registration guard and the envelope rebuild all now
 > live in `LiteRtLmChatBackend` (Task 4).
 
-- [ ] **Step 5: Migrate `WorkflowSpec`**
+- [ ] **Step 5: Migrate `AgentNodeBuildSpec`**
 
 In `agentflow/workflow/workflow_runner.h`, replace
 `std::shared_ptr<::agentflow::LiteRtLmEngine> engine;` with:
@@ -1877,7 +1877,8 @@ In `agentflow/workflow/workflow_runner.h`, replace
 ```
 
 Add `#include <map>` and `#include "agentflow/inference/chat_backend.h"`, and
-remove the `class LiteRtLmEngine;` forward declaration.
+remove the `namespace agentflow { class LiteRtLmEngine; }` forward declaration
+at `workflow_runner.h:14`.
 
 In `agentflow/workflow/workflow_runner.cc`:
 
@@ -1890,27 +1891,10 @@ In `agentflow/workflow/workflow_runner.cc`:
 - line 53: `SubAgentRuntime::DefaultConversationFactory(spec.engine, *spec.io_ctx)`
   → `SubAgentRuntime::DefaultConversationFactory(cfg.backend)`
 
-Add this file-local helper above its first use:
-
-```cpp
-namespace {
-// Resolves an agent's backend: its named backend if ModelSpec.backend is set,
-// otherwise the spec's default. Returns null when a named backend is missing;
-// workflow_loader rejects that case at load time (Task 7), so a null here
-// means the caller bypassed the loader.
-std::shared_ptr<::agentflow::IChatBackend> ResolveBackend(
-    const WorkflowSpec& spec, const proto::AgentDef& agent_def) {
-  const std::string& name = agent_def.model().backend();
-  if (name.empty()) return spec.backend;
-  auto it = spec.backends.find(name);
-  return it == spec.backends.end() ? nullptr : it->second;
-}
-}  // namespace
-```
-
-(`ModelSpec.backend` is added in Task 7; until then this returns `spec.backend`
-for every agent because the field does not exist yet — **write this helper in
-Task 7, not now**. For Task 6, set `cfg.backend = spec.backend;` directly.)
+**For this task, set `cfg.backend = spec.backend;` directly.** The
+`ModelSpec.backend` proto field does not exist yet, so per-agent resolution
+cannot be written until Task 7 adds it. The `backends` map is declared here but
+stays unread until then.
 
 - [ ] **Step 6: Update Bazel deps**
 
@@ -1959,6 +1943,862 @@ LiteRtLmChatBackend now.
 BEHAVIOUR CHANGE: LlmNode moves from the raw Session API to a Conversation, so
 the engine applies the model's chat template and the output field receives
 extracted assistant text. This is what lets LlmNode target a cloud backend."
+```
+
+---
+
+## Task 7: `ModelSpec.backend` — per-agent backend selection
+
+Spec §5. Adds the logical-name field and the resolution that turns it into a
+concrete backend, with a hard error when the name is unknown.
+
+> **Spec correction to apply in this task.** The design spec §5 says an unknown
+> backend name is *"a load-time error, reported by `workflow_loader`"*. That is
+> not implementable as written: `WorkflowLoader::Load` parses JSON into the
+> proto and has no access to the host's backends map, which is a runtime
+> object supplied later via `AgentNodeBuildSpec`. Validation therefore happens
+> at **build time**, in `BuildAgentNode`, which is the first point where both
+> the parsed `ModelSpec` and the map exist. `BuildAgentNode` returns by value
+> with no status channel, so it throws `AgentflowError` — the same failure
+> style `AgentNode`'s own constructor uses. The guarantee the spec cared about
+> is preserved exactly: an unknown name never silently falls back to the
+> default backend. Update spec §5 as part of this task's commit.
+
+**Files:**
+- Modify: `proto/workflow_spec.proto:28-31`
+- Modify: `agentflow/workflow/workflow_loader.cc` (parse `model.backend`)
+- Modify: `agentflow/workflow/workflow_runner.cc` (resolve + reject)
+- Modify: `docs/superpowers/specs/2026-08-11-remote-llm-backend-design.md` (§5 correction)
+- Create: `tests/unit/workflow/backend_selection_test.cc`
+- Modify: `tests/unit/workflow/BUILD.bazel`
+
+**Interfaces:**
+- Consumes: `AgentNodeBuildSpec.backend` / `.backends` (Task 6); `FakeChatBackend` (Task 2).
+- Produces: `proto::AgentDef::ModelSpec::backend` (a `string`); `BuildAgentNode` throwing `AgentflowError` on an unknown name. Task 12's example sets the field.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/workflow/backend_selection_test.cc`:
+
+```cpp
+// tests/unit/workflow/backend_selection_test.cc
+//
+// ModelSpec.backend names a logical backend the host registered. Credentials
+// and base URLs live in the host-constructed instance, never in the spec.
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <asio/io_context.hpp>
+#include <gtest/gtest.h>
+
+#include "agentflow/core/errors.h"
+#include "agentflow/tools/tool_registry.h"
+#include "agentflow/workflow/workflow_loader.h"
+#include "agentflow/workflow/workflow_runner.h"
+#include "tests/support/fake_chat_backend.h"
+
+namespace agentflow::workflow {
+namespace {
+
+// Minimal two-agent workflow: `local` takes the default backend, `cloud`
+// selects a named one.
+constexpr char kWorkflowJson[] = R"({
+  "name": "backend-selection",
+  "version": "1",
+  "state": {"fields": {}},
+  "agents": {
+    "local": {"system_prompt": "local agent"},
+    "cloud": {"system_prompt": "cloud agent",
+              "model": {"backend": "cloud-big"}}
+  },
+  "graph": {"nodes": [{"id": "local", "agent": "local"}], "edges": []}
+})";
+
+std::shared_ptr<Workflow> LoadWorkflow(const ToolRegistry& tools) {
+  auto wf_or = WorkflowLoader::Load(kWorkflowJson, tools);
+  EXPECT_TRUE(wf_or.ok()) << wf_or.status().message();
+  return *wf_or;
+}
+
+AgentNodeBuildSpec MakeSpec(std::shared_ptr<Workflow> wf,
+                             std::shared_ptr<ToolRegistry> tools,
+                             asio::io_context& io) {
+  AgentNodeBuildSpec spec;
+  spec.workflow = std::move(wf);
+  spec.host_tools = std::move(tools);
+  spec.io_ctx = &io;
+  return spec;
+}
+
+TEST(BackendSelectionTest, EmptyBackendNameUsesTheDefault) {
+  asio::io_context io;
+  auto tools = std::make_shared<ToolRegistry>();
+  auto spec = MakeSpec(LoadWorkflow(*tools), tools, io);
+
+  auto fallback = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{});
+  spec.backend = fallback;
+  spec.agent_name = "local";
+
+  auto built = BuildAgentNode(spec);
+  EXPECT_EQ(built.cfg.backend, fallback);
+}
+
+TEST(BackendSelectionTest, NamedBackendIsResolvedFromTheMap) {
+  asio::io_context io;
+  auto tools = std::make_shared<ToolRegistry>();
+  auto spec = MakeSpec(LoadWorkflow(*tools), tools, io);
+
+  auto fallback = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{});
+  auto cloud = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{});
+  spec.backend = fallback;
+  spec.backends["cloud-big"] = cloud;
+  spec.agent_name = "cloud";
+
+  auto built = BuildAgentNode(spec);
+  EXPECT_EQ(built.cfg.backend, cloud);
+  EXPECT_NE(built.cfg.backend, fallback);
+}
+
+TEST(BackendSelectionTest, UnknownBackendNameThrowsRatherThanFallingBack) {
+  asio::io_context io;
+  auto tools = std::make_shared<ToolRegistry>();
+  auto spec = MakeSpec(LoadWorkflow(*tools), tools, io);
+
+  // A default IS available — the point is that it must NOT be used. Silently
+  // demoting an agent from its intended cloud model to a local one would
+  // change answer quality invisibly (design spec §5).
+  spec.backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{});
+  spec.agent_name = "cloud";  // wants "cloud-big", which is not registered
+
+  EXPECT_THROW(BuildAgentNode(spec), AgentflowError);
+}
+
+}  // namespace
+}  // namespace agentflow::workflow
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bazel test //tests/unit/workflow:backend_selection_test`
+Expected: FAIL — the workflow JSON's `model.backend` key is rejected or
+ignored, and `BuildAgentNode` does not throw.
+
+- [ ] **Step 3: Add the proto field**
+
+In `proto/workflow_spec.proto`, extend `ModelSpec` (currently lines 28-31):
+
+```proto
+  message ModelSpec {
+    int32 max_output_tokens     = 1;
+    bool  constrained_tool_calls = 2;
+
+    // Logical name of a host-registered inference backend, e.g. "cloud-big".
+    // Empty selects the default backend. Deliberately NOT a base URL, model
+    // id, or credential — those live in host code so they never reach a
+    // serialized spec, a checkpoint, or a trace. See design spec §5.
+    string backend               = 3;
+  }
+```
+
+- [ ] **Step 4: Parse it in the loader**
+
+In `agentflow/workflow/workflow_loader.cc`, find where `ModelSpec`'s existing
+fields are parsed (search for `max_output_tokens`) and add alongside them:
+
+```cpp
+    if (jm.contains("backend")) {
+      if (!jm["backend"].is_string()) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("agent '", agent_name, "': model.backend must be a string"));
+      }
+      model->set_backend(jm["backend"].get<std::string>());
+    }
+```
+
+Match the surrounding code's variable names — if the local JSON object is not
+called `jm` or the message pointer not `model`, use whatever is already there.
+
+- [ ] **Step 5: Resolve and reject in the runner**
+
+In `agentflow/workflow/workflow_runner.cc`, add this file-local helper above
+`BuildAgentNode` and replace the `cfg.backend = spec.backend;` line from Task 6
+with a call to it:
+
+```cpp
+namespace {
+
+// Resolves an agent's inference backend. An empty ModelSpec.backend selects
+// the build spec's default; a name must be present in the backends map.
+//
+// An unknown name throws rather than falling back to the default: silently
+// demoting an agent from its intended cloud model to a local one would change
+// answer quality invisibly. Design spec §5.
+std::shared_ptr<::agentflow::IChatBackend> ResolveBackend(
+    const AgentNodeBuildSpec& spec, const proto::AgentDef& agent_def) {
+  const std::string& name = agent_def.model().backend();
+  if (name.empty()) return spec.backend;
+  auto it = spec.backends.find(name);
+  if (it == spec.backends.end()) {
+    throw AgentflowError("agent '" + spec.agent_name +
+                          "' requests backend '" + name +
+                          "' which the host did not register");
+  }
+  return it->second;
+}
+
+}  // namespace
+```
+
+Add `#include "agentflow/core/errors.h"` if it is not already included.
+
+Use the real accessor for the agent's `AgentDef` — the surrounding code already
+looks it up by `spec.agent_name` to read `system_prompt`; reuse that variable
+rather than looking it up a second time.
+
+- [ ] **Step 6: Declare the test target**
+
+Append to `tests/unit/workflow/BUILD.bazel`:
+
+```python
+cc_test(
+    name = "backend_selection_test",
+    size = "small",
+    srcs = ["backend_selection_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference:chat_backend",
+        "//agentflow/tools",
+        "//agentflow/workflow",
+        "//tests/support:fake_chat_backend",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+```
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `bazel test //tests/unit/workflow:backend_selection_test --test_output=all`
+Expected: PASS — 3 tests.
+
+- [ ] **Step 8: Correct the design spec**
+
+In `docs/superpowers/specs/2026-08-11-remote-llm-backend-design.md` §5, replace
+the bullet reading *"A `ModelSpec.backend` naming a logical backend absent from
+the map is a **load-time error**, reported by `workflow_loader` …"* with:
+
+```markdown
+- A `ModelSpec.backend` naming a logical backend absent from the map is a
+  **build-time error**: `BuildAgentNode` throws `AgentflowError`. Validation
+  cannot live in `workflow_loader`, which parses JSON into the proto and has
+  no access to the host's backends map. It is not silently resolved to the
+  default backend: falling back from an intended cloud model to a local one
+  would change answer quality invisibly.
+```
+
+- [ ] **Step 9: Run the full suite and commit**
+
+Run: `bazel test //tests/unit/... //tests/integration/...`
+Expected: all PASS.
+
+```bash
+git add proto/workflow_spec.proto agentflow/workflow/ tests/unit/workflow/ \
+        docs/superpowers/specs/2026-08-11-remote-llm-backend-design.md
+git commit -m "feat(workflow): per-agent backend selection via ModelSpec.backend
+
+An agent names a host-registered backend by logical name; credentials and
+base URLs stay in host code. An unknown name throws instead of falling back to
+the default, so an agent never silently drops from its intended cloud model to
+a local one.
+
+Corrects design spec 5: validation happens in BuildAgentNode, not
+workflow_loader, which has no access to the runtime backends map."
+```
+
+---
+
+## Task 8: HTTP parsing primitives (pure, no sockets)
+
+Spec §4, §7.3. Everything in `HttpsClient` that can be tested without a network
+is written and tested here first. Task 9 then only has to move bytes.
+
+**Files:**
+- Create: `agentflow/net/http_client.h` (interface only)
+- Create: `agentflow/net/http_parse.h`
+- Create: `agentflow/net/http_parse.cc`
+- Create: `tests/unit/net/http_parse_test.cc`
+- Modify: `agentflow/net/BUILD.bazel`
+- Modify: `tests/unit/net/BUILD.bazel`
+
+**Interfaces:**
+- Consumes: `CancelToken` (existing core).
+- Produces:
+  - `agentflow::net::HttpRequest{url, body, headers}`
+  - `agentflow::net::SseHandler = std::function<void(std::string_view)>`
+  - `agentflow::net::IHttpClient` with `PostSse(HttpRequest, const SseHandler&, const CancelToken&) -> asio::awaitable<absl::Status>` and `Post(HttpRequest, const CancelToken&) -> asio::awaitable<absl::StatusOr<std::string>>`
+  - `agentflow::net::ParseUrl(std::string_view) -> absl::StatusOr<ParsedUrl{host,port,target,tls}>`
+  - `agentflow::net::ParseResponseHead(std::string_view) -> absl::StatusOr<ResponseHead{status_code,headers,head_bytes,chunked,content_length}>`
+  - `agentflow::net::ChunkedDecoder` with `Feed(std::string_view) -> absl::StatusOr<std::string>`, `complete()`
+  - `agentflow::net::SseFramer` with `Feed(std::string_view) -> std::vector<std::string>`, `saw_done()`
+  - Task 9 implements `IHttpClient`; Task 12 consumes it.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/net/http_parse_test.cc`:
+
+```cpp
+// tests/unit/net/http_parse_test.cc
+#include "agentflow/net/http_parse.h"
+
+#include <string>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+namespace agentflow::net {
+namespace {
+
+TEST(ParseUrlTest, HttpsDefaultsToPort443) {
+  auto u = ParseUrl("https://api.openai.com/v1/chat/completions");
+  ASSERT_TRUE(u.ok()) << u.status().message();
+  EXPECT_EQ(u->host, "api.openai.com");
+  EXPECT_EQ(u->port, "443");
+  EXPECT_EQ(u->target, "/v1/chat/completions");
+  EXPECT_TRUE(u->tls);
+}
+
+TEST(ParseUrlTest, ExplicitPortAndPlainHttp) {
+  auto u = ParseUrl("http://127.0.0.1:11434/v1/chat/completions");
+  ASSERT_TRUE(u.ok());
+  EXPECT_EQ(u->host, "127.0.0.1");
+  EXPECT_EQ(u->port, "11434");
+  EXPECT_EQ(u->target, "/v1/chat/completions");
+  EXPECT_FALSE(u->tls);
+}
+
+TEST(ParseUrlTest, MissingPathBecomesRoot) {
+  auto u = ParseUrl("https://example.com");
+  ASSERT_TRUE(u.ok());
+  EXPECT_EQ(u->target, "/");
+}
+
+TEST(ParseUrlTest, RejectsUnsupportedScheme) {
+  EXPECT_FALSE(ParseUrl("ftp://example.com/x").ok());
+  EXPECT_FALSE(ParseUrl("example.com/x").ok());
+}
+
+TEST(ParseResponseHeadTest, ParsesStatusAndHeadersCaseInsensitively) {
+  const std::string raw =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/event-stream\r\n"
+      "Transfer-Encoding: chunked\r\n"
+      "\r\n"
+      "body-starts-here";
+  auto h = ParseResponseHead(raw);
+  ASSERT_TRUE(h.ok());
+  EXPECT_EQ(h->status_code, 200);
+  EXPECT_TRUE(h->chunked);
+  EXPECT_EQ(raw.substr(h->head_bytes), "body-starts-here");
+}
+
+TEST(ParseResponseHeadTest, ReportsContentLengthWhenNotChunked) {
+  auto h = ParseResponseHead(
+      "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 17\r\n\r\n");
+  ASSERT_TRUE(h.ok());
+  EXPECT_EQ(h->status_code, 429);
+  EXPECT_FALSE(h->chunked);
+  EXPECT_EQ(h->content_length, 17);
+}
+
+TEST(ParseResponseHeadTest, IncompleteHeadIsNotAnError) {
+  // The terminator has not arrived yet — the caller must read more bytes.
+  auto h = ParseResponseHead("HTTP/1.1 200 OK\r\nContent-Ty");
+  ASSERT_TRUE(h.ok());
+  EXPECT_EQ(h->head_bytes, 0u);  // 0 = "not complete yet"
+}
+
+TEST(ChunkedDecoderTest, DecodesChunksSplitAcrossFeeds) {
+  ChunkedDecoder d;
+  auto a = d.Feed("5\r\nhel");
+  ASSERT_TRUE(a.ok());
+  EXPECT_EQ(*a, "hel");
+  auto b = d.Feed("lo\r\n0\r\n\r\n");
+  ASSERT_TRUE(b.ok());
+  EXPECT_EQ(*b, "lo");
+  EXPECT_TRUE(d.complete());
+}
+
+TEST(ChunkedDecoderTest, HandlesAChunkSizeLineSplitMidNumber) {
+  ChunkedDecoder d;
+  auto a = d.Feed("1");
+  ASSERT_TRUE(a.ok());
+  EXPECT_EQ(*a, "");
+  auto b = d.Feed("0\r\n0123456789\r\n0\r\n\r\n");
+  ASSERT_TRUE(b.ok());
+  EXPECT_EQ(*b, "0123456789");
+  EXPECT_TRUE(d.complete());
+}
+
+TEST(SseFramerTest, SplitsFramesOnBlankLine) {
+  SseFramer f;
+  auto got = f.Feed("data: {\"a\":1}\n\ndata: {\"b\":2}\n\n");
+  EXPECT_EQ(got, (std::vector<std::string>{R"({"a":1})", R"({"b":2})"}));
+  EXPECT_FALSE(f.saw_done());
+}
+
+TEST(SseFramerTest, HoldsAPartialFrameUntilItCompletes) {
+  SseFramer f;
+  EXPECT_TRUE(f.Feed("data: {\"a\":").empty());
+  auto got = f.Feed("1}\n\n");
+  EXPECT_EQ(got, (std::vector<std::string>{R"({"a":1})"}));
+}
+
+TEST(SseFramerTest, DoneSentinelIsConsumedNotDelivered) {
+  SseFramer f;
+  auto got = f.Feed("data: {\"a\":1}\n\ndata: [DONE]\n\n");
+  EXPECT_EQ(got, (std::vector<std::string>{R"({"a":1})"}));
+  EXPECT_TRUE(f.saw_done());
+}
+
+TEST(SseFramerTest, IgnoresCommentsAndEventLines) {
+  SseFramer f;
+  auto got = f.Feed(": keep-alive\n\nevent: ping\ndata: {\"a\":1}\n\n");
+  EXPECT_EQ(got, (std::vector<std::string>{R"({"a":1})"}));
+}
+
+TEST(SseFramerTest, ToleratesCrLfLineEndings) {
+  SseFramer f;
+  auto got = f.Feed("data: {\"a\":1}\r\n\r\n");
+  EXPECT_EQ(got, (std::vector<std::string>{R"({"a":1})"}));
+}
+
+}  // namespace
+}  // namespace agentflow::net
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bazel test //tests/unit/net:http_parse_test`
+Expected: FAIL — `agentflow/net/http_parse.h` does not exist.
+
+- [ ] **Step 3: Write the client interface header**
+
+Create `agentflow/net/http_client.h`:
+
+```cpp
+// agentflow/net/http_client.h
+//
+// The HTTP surface the OpenAI backend consumes. Kept separate from the
+// implementation so tests can inject a fake and exercise request building and
+// response mapping with no network.
+#ifndef AGENTFLOW_NET_HTTP_CLIENT_H_
+#define AGENTFLOW_NET_HTTP_CLIENT_H_
+
+#include <functional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <absl/status/status.h>
+#include <absl/status/statusor.h>
+#include <asio/awaitable.hpp>
+
+#include "agentflow/core/cancel.h"
+
+namespace agentflow::net {
+
+struct HttpRequest {
+  std::string url;  // http(s)://host[:port]/path
+  std::string body;
+  std::vector<std::pair<std::string, std::string>> headers;
+};
+
+// One SSE frame's data payload, with "data: " already stripped. The [DONE]
+// sentinel is never delivered — it terminates the stream instead.
+using SseHandler = std::function<void(std::string_view data)>;
+
+class IHttpClient {
+ public:
+  virtual ~IHttpClient() = default;
+
+  // POSTs and streams the response, invoking `on_event` per SSE frame.
+  // Returns OK once the stream ends cleanly. A non-2xx status is reported as
+  // a non-OK Status whose message contains the response body (callers must
+  // scrub credentials before logging — the body itself never carries them).
+  virtual asio::awaitable<absl::Status> PostSse(
+      HttpRequest req, const SseHandler& on_event,
+      const CancelToken& cancel) = 0;
+
+  // POSTs and returns the whole response body.
+  virtual asio::awaitable<absl::StatusOr<std::string>> Post(
+      HttpRequest req, const CancelToken& cancel) = 0;
+};
+
+}  // namespace agentflow::net
+#endif  // AGENTFLOW_NET_HTTP_CLIENT_H_
+```
+
+- [ ] **Step 4: Write the parser header**
+
+Create `agentflow/net/http_parse.h`:
+
+```cpp
+// agentflow/net/http_parse.h
+//
+// Pure HTTP/1.1 and SSE parsing. No sockets, no TLS, no io_context — every
+// entity here is directly unit-testable, which is where the bulk of the
+// client's correctness risk lives.
+#ifndef AGENTFLOW_NET_HTTP_PARSE_H_
+#define AGENTFLOW_NET_HTTP_PARSE_H_
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <absl/status/statusor.h>
+
+namespace agentflow::net {
+
+struct ParsedUrl {
+  std::string host;
+  std::string port;    // always populated: "443" / "80" / explicit
+  std::string target;  // path + query; "/" when the URL has none
+  bool tls = false;
+};
+
+// Accepts http:// and https:// only. Any other scheme, or a missing scheme,
+// is an InvalidArgumentError.
+absl::StatusOr<ParsedUrl> ParseUrl(std::string_view url);
+
+struct ResponseHead {
+  int status_code = 0;
+  std::vector<std::pair<std::string, std::string>> headers;  // names lowercased
+  // Bytes consumed by the status line + headers + terminator. ZERO means the
+  // head is not complete yet and the caller must read more.
+  std::size_t head_bytes = 0;
+  bool chunked = false;
+  std::int64_t content_length = -1;  // -1 when absent
+};
+
+// Parses as much of a response head as `buf` contains. An incomplete head is
+// NOT an error — it returns head_bytes == 0. A malformed status line is.
+absl::StatusOr<ResponseHead> ParseResponseHead(std::string_view buf);
+
+// Incremental HTTP/1.1 chunked-transfer decoder. Feed raw body bytes as they
+// arrive; each call returns whatever decoded payload became available.
+class ChunkedDecoder {
+ public:
+  absl::StatusOr<std::string> Feed(std::string_view bytes);
+  // True once the terminating zero-length chunk has been seen.
+  bool complete() const { return complete_; }
+
+ private:
+  std::string buf_;         // undecoded remainder
+  std::size_t remaining_ = 0;  // bytes left in the current chunk
+  bool in_chunk_ = false;
+  bool complete_ = false;
+};
+
+// Incremental Server-Sent Events framer. Feed raw (already de-chunked) bytes;
+// each call returns the `data:` payloads of every frame that completed.
+//
+// Comments (": ..."), `event:` lines and other field names are ignored — the
+// OpenAI stream only uses `data:`. The literal payload "[DONE]" is consumed
+// and reported through saw_done() rather than delivered.
+class SseFramer {
+ public:
+  std::vector<std::string> Feed(std::string_view bytes);
+  bool saw_done() const { return saw_done_; }
+
+ private:
+  std::string buf_;
+  bool saw_done_ = false;
+};
+
+}  // namespace agentflow::net
+#endif  // AGENTFLOW_NET_HTTP_PARSE_H_
+```
+
+- [ ] **Step 5: Write the parser implementation**
+
+Create `agentflow/net/http_parse.cc`:
+
+```cpp
+// agentflow/net/http_parse.cc
+#include "agentflow/net/http_parse.h"
+
+#include <algorithm>
+#include <cctype>
+#include <charconv>
+
+#include <absl/status/status.h>
+#include <absl/strings/ascii.h>
+#include <absl/strings/str_cat.h>
+
+namespace agentflow::net {
+namespace {
+
+// Splits `s` at the first occurrence of `sep`. Returns npos-safe halves.
+std::pair<std::string_view, std::string_view> SplitOnce(std::string_view s,
+                                                         std::string_view sep) {
+  const auto pos = s.find(sep);
+  if (pos == std::string_view::npos) return {s, {}};
+  return {s.substr(0, pos), s.substr(pos + sep.size())};
+}
+
+std::string_view TrimAscii(std::string_view s) {
+  while (!s.empty() && absl::ascii_isspace(static_cast<unsigned char>(s.front()))) {
+    s.remove_prefix(1);
+  }
+  while (!s.empty() && absl::ascii_isspace(static_cast<unsigned char>(s.back()))) {
+    s.remove_suffix(1);
+  }
+  return s;
+}
+
+}  // namespace
+
+absl::StatusOr<ParsedUrl> ParseUrl(std::string_view url) {
+  ParsedUrl out;
+  std::string_view rest;
+  if (url.starts_with("https://")) {
+    out.tls = true;
+    out.port = "443";
+    rest = url.substr(8);
+  } else if (url.starts_with("http://")) {
+    out.tls = false;
+    out.port = "80";
+    rest = url.substr(7);
+  } else {
+    return absl::InvalidArgumentError(
+        absl::StrCat("unsupported URL scheme: ", url));
+  }
+
+  const auto slash = rest.find('/');
+  std::string_view authority = rest.substr(0, slash);
+  out.target = slash == std::string_view::npos
+                    ? "/"
+                    : std::string(rest.substr(slash));
+  if (authority.empty()) {
+    return absl::InvalidArgumentError(absl::StrCat("URL has no host: ", url));
+  }
+
+  const auto colon = authority.rfind(':');
+  if (colon != std::string_view::npos) {
+    out.host = std::string(authority.substr(0, colon));
+    out.port = std::string(authority.substr(colon + 1));
+  } else {
+    out.host = std::string(authority);
+  }
+  if (out.host.empty()) {
+    return absl::InvalidArgumentError(absl::StrCat("URL has no host: ", url));
+  }
+  return out;
+}
+
+absl::StatusOr<ResponseHead> ParseResponseHead(std::string_view buf) {
+  ResponseHead head;
+  const auto term = buf.find("\r\n\r\n");
+  if (term == std::string_view::npos) return head;  // incomplete; head_bytes==0
+
+  std::string_view h = buf.substr(0, term);
+  auto [status_line, header_block] = SplitOnce(h, "\r\n");
+
+  // "HTTP/1.1 200 OK"
+  auto [version, after_version] = SplitOnce(status_line, " ");
+  if (!version.starts_with("HTTP/")) {
+    return absl::InvalidArgumentError("malformed HTTP status line");
+  }
+  auto [code_str, _reason] = SplitOnce(after_version, " ");
+  int code = 0;
+  const auto res = std::from_chars(code_str.data(),
+                                    code_str.data() + code_str.size(), code);
+  if (res.ec != std::errc{} || code < 100 || code > 599) {
+    return absl::InvalidArgumentError("malformed HTTP status code");
+  }
+  head.status_code = code;
+
+  std::string_view remaining = header_block;
+  while (!remaining.empty()) {
+    auto [line, tail] = SplitOnce(remaining, "\r\n");
+    remaining = tail;
+    if (line.empty()) continue;
+    auto [name, value] = SplitOnce(line, ":");
+    std::string lname = absl::AsciiStrToLower(TrimAscii(name));
+    std::string lvalue(TrimAscii(value));
+    if (lname == "transfer-encoding" &&
+        absl::AsciiStrToLower(lvalue).find("chunked") != std::string::npos) {
+      head.chunked = true;
+    } else if (lname == "content-length") {
+      std::int64_t n = 0;
+      if (std::from_chars(lvalue.data(), lvalue.data() + lvalue.size(), n).ec ==
+          std::errc{}) {
+        head.content_length = n;
+      }
+    }
+    head.headers.emplace_back(std::move(lname), std::move(lvalue));
+  }
+
+  head.head_bytes = term + 4;
+  return head;
+}
+
+absl::StatusOr<std::string> ChunkedDecoder::Feed(std::string_view bytes) {
+  buf_.append(bytes);
+  std::string out;
+  std::size_t pos = 0;
+
+  for (;;) {
+    if (complete_) break;
+    if (in_chunk_) {
+      const std::size_t avail = buf_.size() - pos;
+      const std::size_t take = std::min(avail, remaining_);
+      out.append(buf_, pos, take);
+      pos += take;
+      remaining_ -= take;
+      if (remaining_ > 0) break;  // need more bytes
+      // Consume the CRLF that terminates the chunk body.
+      if (buf_.size() - pos < 2) break;
+      pos += 2;
+      in_chunk_ = false;
+      continue;
+    }
+    // Reading a chunk-size line.
+    const auto eol = buf_.find("\r\n", pos);
+    if (eol == std::string::npos) break;  // size line incomplete
+    std::string_view size_line(buf_.data() + pos, eol - pos);
+    // Strip any chunk extension (";name=value").
+    size_line = SplitOnce(size_line, ";").first;
+    std::size_t n = 0;
+    const auto res = std::from_chars(size_line.data(),
+                                      size_line.data() + size_line.size(), n, 16);
+    if (res.ec != std::errc{}) {
+      return absl::InvalidArgumentError("malformed chunk size");
+    }
+    pos = eol + 2;
+    if (n == 0) {
+      complete_ = true;
+      break;
+    }
+    remaining_ = n;
+    in_chunk_ = true;
+  }
+
+  buf_.erase(0, pos);
+  return out;
+}
+
+std::vector<std::string> SseFramer::Feed(std::string_view bytes) {
+  buf_.append(bytes);
+  std::vector<std::string> out;
+
+  for (;;) {
+    // A frame ends at a blank line. Accept both LF and CRLF forms.
+    std::size_t end = buf_.find("\n\n");
+    std::size_t sep_len = 2;
+    const std::size_t crlf = buf_.find("\r\n\r\n");
+    if (crlf != std::string::npos && (end == std::string::npos || crlf < end)) {
+      end = crlf;
+      sep_len = 4;
+    }
+    if (end == std::string::npos) break;
+
+    std::string_view frame(buf_.data(), end);
+    std::string payload;
+    while (!frame.empty()) {
+      auto [line, tail] = SplitOnce(frame, "\n");
+      frame = tail;
+      if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+      if (line.empty() || line.front() == ':') continue;  // blank or comment
+      auto [name, value] = SplitOnce(line, ":");
+      if (name != "data") continue;  // ignore event:, id:, retry:
+      // Per the SSE spec a single leading space after the colon is stripped.
+      if (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+      if (!payload.empty()) payload.push_back('\n');
+      payload.append(value);
+    }
+    buf_.erase(0, end + sep_len);
+
+    if (payload.empty()) continue;
+    if (payload == "[DONE]") {
+      saw_done_ = true;
+      continue;
+    }
+    out.push_back(std::move(payload));
+  }
+  return out;
+}
+
+}  // namespace agentflow::net
+```
+
+- [ ] **Step 6: Add the Bazel targets**
+
+Append to `agentflow/net/BUILD.bazel`:
+
+```python
+cc_library(
+    name = "http_client",
+    hdrs = ["http_client.h"],
+    deps = [
+        "//agentflow/core",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+    ],
+)
+
+cc_library(
+    name = "http_parse",
+    srcs = ["http_parse.cc"],
+    hdrs = ["http_parse.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+```
+
+Append to `tests/unit/net/BUILD.bazel`:
+
+```python
+cc_test(
+    name = "http_parse_test",
+    size = "small",
+    srcs = ["http_parse_test.cc"],
+    deps = [
+        "//agentflow/net:http_parse",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+```
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `bazel test //tests/unit/net:http_parse_test --test_output=all`
+Expected: PASS — 13 tests.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add agentflow/net/ tests/unit/net/
+git commit -m "feat(net): pure HTTP/1.1 and SSE parsing primitives
+
+URL parsing, response-head parsing, incremental chunked decoding and SSE
+framing, all socket-free and directly unit-tested. Adds the IHttpClient
+interface so the OpenAI backend can be tested against a fake."
 ```
 
 ---
