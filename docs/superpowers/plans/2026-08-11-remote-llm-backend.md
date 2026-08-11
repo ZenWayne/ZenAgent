@@ -2587,7 +2587,7 @@ absl::StatusOr<ParsedUrl> ParseUrl(std::string_view url) {
   const auto slash = rest.find('/');
   std::string_view authority = rest.substr(0, slash);
   out.target = slash == std::string_view::npos
-                    ? "/"
+                    ? std::string("/")
                     : std::string(rest.substr(slash));
   if (authority.empty()) {
     return absl::InvalidArgumentError(absl::StrCat("URL has no host: ", url));
@@ -3859,6 +3859,1018 @@ git commit -m "feat(openai): streaming delta accumulator
 Rejoins tool-call arguments fragmented across SSE frames, keyed by index so
 parallel calls stay separate. Malformed frames are ignored rather than
 aborting a half-finished answer."
+```
+
+---
+
+## Task 12: `OpenAiChatBackend` — wiring, retry, cancellation
+
+Spec §3.3, §6, §7.2. Assembles the pieces into an `IChatBackend`. This is where
+the retry constraint that protects the UI lives.
+
+**Files:**
+- Create: `agentflow/inference/openai/openai_chat_backend.h`
+- Create: `agentflow/inference/openai/openai_chat_backend.cc`
+- Create: `tests/support/fake_http_client.h`
+- Create: `tests/unit/inference/openai/openai_chat_backend_test.cc`
+- Modify: `agentflow/inference/openai/BUILD.bazel`
+- Modify: `tests/support/BUILD.bazel`
+- Modify: `tests/unit/inference/openai/BUILD.bazel`
+
+**Interfaces:**
+- Consumes: `IChatBackend`, `IConversation` (Task 2); `IHttpClient`, `HttpRequest` (Task 8); `SystemMessage`, `ToOpenAiMessages`, `BuildRequestBody`, `ResponseToCanonical` (Task 10); `StreamAccumulator` (Task 11).
+- Produces:
+  - `agentflow::openai::OpenAiOptions{base_url, api_key, model, max_retries, retry_base_delay}`
+  - `agentflow::openai::OpenAiChatBackend::Create(OpenAiOptions, net::IHttpClient&) -> std::shared_ptr<OpenAiChatBackend>` — note the **concrete** return type, not `shared_ptr<IChatBackend>`: callers need `last_warning()`, which is not on the interface. It converts implicitly wherever a `shared_ptr<IChatBackend>` is wanted (e.g. `spec.backends["cloud"]`).
+  - `OpenAiChatBackend::last_warning() -> const std::string&`
+  - Task 13's example constructs one.
+
+- [ ] **Step 1: Write the fake HTTP client**
+
+Create `tests/support/fake_http_client.h`:
+
+```cpp
+// tests/support/fake_http_client.h
+//
+// Replays canned SSE frames and canned non-streaming bodies so the OpenAI
+// backend's request building, mapping and retry policy can be tested with no
+// network.
+#ifndef TESTS_SUPPORT_FAKE_HTTP_CLIENT_H_
+#define TESTS_SUPPORT_FAKE_HTTP_CLIENT_H_
+
+#include <deque>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/status/status.h>
+#include <absl/status/statusor.h>
+
+#include "agentflow/net/http_client.h"
+
+namespace agentflow::testing {
+
+// One scripted attempt: either a status to fail with, or frames to deliver
+// (optionally emitting some frames BEFORE failing, to exercise the
+// "no retry after a token was emitted" rule).
+struct FakeHttpTurn {
+  std::vector<std::string> frames;   // SSE data payloads
+  absl::Status status = absl::OkStatus();
+  std::string body;                  // for Post()
+};
+
+class FakeHttpClient : public net::IHttpClient {
+ public:
+  explicit FakeHttpClient(std::vector<FakeHttpTurn> turns)
+      : turns_(turns.begin(), turns.end()) {}
+
+  asio::awaitable<absl::Status> PostSse(net::HttpRequest req,
+                                         const net::SseHandler& on_event,
+                                         const CancelToken& cancel) override {
+    requests_.push_back(req);
+    if (turns_.empty()) co_return absl::UnavailableError("fake: no turns left");
+    FakeHttpTurn turn = std::move(turns_.front());
+    turns_.pop_front();
+    for (const auto& f : turn.frames) {
+      if (cancel.IsCancelled()) co_return absl::CancelledError("cancelled");
+      if (on_event) on_event(f);
+    }
+    co_return turn.status;
+  }
+
+  asio::awaitable<absl::StatusOr<std::string>> Post(
+      net::HttpRequest req, const CancelToken&) override {
+    requests_.push_back(req);
+    if (turns_.empty()) co_return absl::UnavailableError("fake: no turns left");
+    FakeHttpTurn turn = std::move(turns_.front());
+    turns_.pop_front();
+    if (!turn.status.ok()) co_return turn.status;
+    co_return turn.body;
+  }
+
+  // Every request received, in order. Lets a test assert the request body and
+  // that credentials went into a header rather than the body.
+  const std::vector<net::HttpRequest>& requests() const { return requests_; }
+  int attempts() const { return static_cast<int>(requests_.size()); }
+
+ private:
+  std::deque<FakeHttpTurn> turns_;
+  std::vector<net::HttpRequest> requests_;
+};
+
+}  // namespace agentflow::testing
+#endif  // TESTS_SUPPORT_FAKE_HTTP_CLIENT_H_
+```
+
+Append to `tests/support/BUILD.bazel`:
+
+```python
+cc_library(
+    name = "fake_http_client",
+    testonly = True,
+    hdrs = ["fake_http_client.h"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/net:http_client",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+    ],
+)
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Create `tests/unit/inference/openai/openai_chat_backend_test.cc`:
+
+```cpp
+// tests/unit/inference/openai/openai_chat_backend_test.cc
+#include "agentflow/inference/openai/openai_chat_backend.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
+#include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+
+#include "agentflow/core/cancel.h"
+#include "tests/support/fake_http_client.h"
+
+namespace agentflow::openai {
+namespace {
+
+using json = nlohmann::json;
+
+OpenAiOptions TestOptions() {
+  OpenAiOptions o;
+  o.base_url = "https://api.example.com/v1";
+  o.api_key = "sk-secret";
+  o.model = "test-model";
+  o.max_retries = 3;
+  o.retry_base_delay = std::chrono::milliseconds(1);  // keep tests fast
+  return o;
+}
+
+std::string TextFrame(const std::string& piece) {
+  json f = {{"choices", json::array({{{"delta", {{"content", piece}}}}})}};
+  return f.dump();
+}
+
+struct SendResult {
+  absl::StatusOr<std::string> response;
+  std::vector<std::string> deltas;
+};
+
+SendResult Send(IConversation& conv, const std::string& message_json,
+                 asio::io_context& io, const CancelToken& cancel) {
+  SendResult r;
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<absl::StatusOr<std::string>> {
+        co_return co_await conv.SendAsync(
+            message_json,
+            [&](std::string_view d) { r.deltas.emplace_back(d); }, cancel);
+      },
+      asio::use_future);
+  io.run();
+  io.restart();
+  r.response = fut.get();
+  return r;
+}
+
+TEST(OpenAiChatBackendTest, DescribeNamesTheModelAndHidesTheKey) {
+  asio::io_context io;
+  testing::FakeHttpClient http({});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  EXPECT_EQ(backend->Describe(), "openai:test-model");
+  EXPECT_EQ(std::string(backend->Describe()).find("sk-secret"),
+            std::string::npos);
+}
+
+TEST(OpenAiChatBackendTest, StreamsDeltasAndReturnsCanonicalJson) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("He"), TextFrame("llo")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  auto r = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"hi"}]})",
+                 io, cancel.Token());
+
+  ASSERT_TRUE(r.response.ok()) << r.response.status().message();
+  EXPECT_EQ(r.deltas, (std::vector<std::string>{"He", "llo"}));
+  EXPECT_EQ(json::parse(*r.response)["content"][0]["text"], "Hello");
+}
+
+TEST(OpenAiChatBackendTest, ApiKeyTravelsInTheHeaderNeverTheBody) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("ok")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  Send(*conv, R"({"role":"user","content":[{"type":"text","text":"hi"}]})", io,
+       cancel.Token());
+
+  ASSERT_EQ(http.requests().size(), 1u);
+  const auto& req = http.requests()[0];
+  EXPECT_EQ(req.url, "https://api.example.com/v1/chat/completions");
+  EXPECT_EQ(req.body.find("sk-secret"), std::string::npos);
+  bool found = false;
+  for (const auto& [k, v] : req.headers) {
+    if (k == "Authorization") {
+      EXPECT_EQ(v, "Bearer sk-secret");
+      found = true;
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+TEST(OpenAiChatBackendTest, HistoryIsOwnedSoTurnTwoCarriesTurnOne) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("first")}},
+                                {.frames = {TextFrame("second")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  Send(*conv, R"({"role":"user","content":[{"type":"text","text":"one"}]})", io,
+       cancel.Token());
+  Send(*conv, R"({"role":"user","content":[{"type":"text","text":"two"}]})", io,
+       cancel.Token());
+
+  ASSERT_EQ(http.requests().size(), 2u);
+  json body2 = json::parse(http.requests()[1].body);
+  // user "one", assistant "first", user "two"
+  ASSERT_EQ(body2["messages"].size(), 3u);
+  EXPECT_EQ(body2["messages"][0]["content"], "one");
+  EXPECT_EQ(body2["messages"][1]["role"], "assistant");
+  EXPECT_EQ(body2["messages"][1]["content"], "first");
+  EXPECT_EQ(body2["messages"][2]["content"], "two");
+}
+
+TEST(OpenAiChatBackendTest, RetriesUnavailableBeforeAnyTokenIsEmitted) {
+  asio::io_context io;
+  testing::FakeHttpClient http({
+      {.status = absl::UnavailableError("503")},
+      {.status = absl::UnavailableError("503")},
+      {.frames = {TextFrame("ok")}},
+  });
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  auto r = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"x"}]})",
+                 io, cancel.Token());
+
+  ASSERT_TRUE(r.response.ok());
+  EXPECT_EQ(http.attempts(), 3);
+  EXPECT_EQ(r.deltas, (std::vector<std::string>{"ok"}));
+}
+
+TEST(OpenAiChatBackendTest, DoesNotRetryOnceATokenHasBeenEmitted) {
+  // THE UI-protecting rule (design spec §6): retrying after the user has
+  // already seen partial output would duplicate it on screen.
+  asio::io_context io;
+  testing::FakeHttpClient http({
+      {.frames = {TextFrame("par")}, .status = absl::UnavailableError("dropped")},
+      {.frames = {TextFrame("whole answer")}},  // must never be reached
+  });
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  auto r = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"x"}]})",
+                 io, cancel.Token());
+
+  EXPECT_FALSE(r.response.ok());
+  EXPECT_EQ(http.attempts(), 1);
+  EXPECT_EQ(r.deltas, (std::vector<std::string>{"par"}));
+}
+
+TEST(OpenAiChatBackendTest, DoesNotRetryClientErrors) {
+  asio::io_context io;
+  testing::FakeHttpClient http({
+      {.status = absl::PermissionDeniedError("401 bad key")},
+      {.frames = {TextFrame("never")}},
+  });
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  auto r = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"x"}]})",
+                 io, cancel.Token());
+
+  EXPECT_FALSE(r.response.ok());
+  EXPECT_EQ(r.response.status().code(), absl::StatusCode::kPermissionDenied);
+  EXPECT_EQ(http.attempts(), 1);
+}
+
+TEST(OpenAiChatBackendTest, GivesUpAfterMaxRetries) {
+  asio::io_context io;
+  testing::FakeHttpClient http({
+      {.status = absl::UnavailableError("1")},
+      {.status = absl::UnavailableError("2")},
+      {.status = absl::UnavailableError("3")},
+  });
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  auto r = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"x"}]})",
+                 io, cancel.Token());
+
+  EXPECT_FALSE(r.response.ok());
+  EXPECT_EQ(http.attempts(), 3);
+}
+
+TEST(OpenAiChatBackendTest, ToolResultMessageBecomesOneOpenAiMessagePerResult) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("done")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  Send(*conv,
+       R"({"role":"tool","content":[)"
+       R"({"id":"c1","name":"a","response":{"value":"A"}},)"
+       R"({"id":"c2","name":"b","response":{"value":"B"}}]})",
+       io, cancel.Token());
+
+  json body = json::parse(http.requests()[0].body);
+  ASSERT_EQ(body["messages"].size(), 2u);
+  EXPECT_EQ(body["messages"][0]["tool_call_id"], "c1");
+  EXPECT_EQ(body["messages"][1]["tool_call_id"], "c2");
+}
+
+TEST(OpenAiChatBackendTest, ConstrainedToolCallsIsReportedNotSilentlyDropped) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("ok")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+
+  ChatConversationOptions opts;
+  opts.constrained_tool_calls = true;
+  auto conv = backend->CreateConversation(std::move(opts));
+  ASSERT_NE(conv, nullptr);  // still usable — it runs unconstrained
+
+  CancelSource cancel;
+  auto r = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"x"}]})",
+                 io, cancel.Token());
+  EXPECT_TRUE(r.response.ok());
+  EXPECT_TRUE(backend->last_warning().find("constrained") != std::string::npos);
+}
+
+}  // namespace
+}  // namespace agentflow::openai
+```
+
+- [ ] **Step 3: Run it to verify it fails**
+
+Run: `bazel test //tests/unit/inference/openai:openai_chat_backend_test`
+Expected: FAIL — `openai_chat_backend.h` does not exist.
+
+- [ ] **Step 4: Write the header**
+
+Create `agentflow/inference/openai/openai_chat_backend.h`:
+
+```cpp
+// agentflow/inference/openai/openai_chat_backend.h
+#ifndef AGENTFLOW_INFERENCE_OPENAI_OPENAI_CHAT_BACKEND_H_
+#define AGENTFLOW_INFERENCE_OPENAI_OPENAI_CHAT_BACKEND_H_
+
+#include <chrono>
+#include <memory>
+#include <string>
+#include <string_view>
+
+#include "agentflow/inference/chat_backend.h"
+#include "agentflow/net/http_client.h"
+
+namespace agentflow::openai {
+
+struct OpenAiOptions {
+  // Without a trailing slash; "/chat/completions" is appended.
+  // e.g. "https://api.deepseek.com/v1", "http://127.0.0.1:11434/v1".
+  std::string base_url;
+  // Sent as "Authorization: Bearer <key>". NEVER placed in the request body,
+  // in Describe(), or in any error message.
+  std::string api_key;
+  std::string model;
+
+  // Total attempts, not retries-after-the-first. 1 disables retrying.
+  int max_retries = 3;
+  std::chrono::milliseconds retry_base_delay{100};
+};
+
+// IChatBackend over an OpenAI-compatible /v1/chat/completions endpoint.
+//
+// Covers OpenAI, DeepSeek, Volcengine ARK, Kimi, GLM, MiniMax, OpenRouter,
+// Ollama, vLLM and LiteLLM gateways — they differ only in base_url, api_key
+// and model.
+//
+// HTTP is stateless, so each conversation owns its own messages array and
+// resends the history every turn. (The on-device backend does the opposite:
+// the engine owns history so the KV cache is reused. Both satisfy the same
+// IConversation contract.)
+class OpenAiChatBackend : public IChatBackend {
+ public:
+  // `http` must outlive the backend and every conversation it creates.
+  static std::shared_ptr<OpenAiChatBackend> Create(OpenAiOptions opts,
+                                                    net::IHttpClient& http);
+
+  std::shared_ptr<IConversation> CreateConversation(
+      ChatConversationOptions opts) override;
+
+  // "openai:<model>". Never contains the key.
+  std::string_view Describe() const override { return describe_; }
+
+  // The most recent capability warning, e.g. that constrained_tool_calls was
+  // requested but cannot be honoured. Empty when none. Hosts surface this;
+  // the backend never silently drops a correctness guarantee.
+  const std::string& last_warning() const { return last_warning_; }
+
+ private:
+  OpenAiChatBackend(OpenAiOptions opts, net::IHttpClient& http);
+
+  OpenAiOptions opts_;
+  net::IHttpClient& http_;
+  std::string describe_;
+  std::string last_warning_;
+};
+
+}  // namespace agentflow::openai
+#endif  // AGENTFLOW_INFERENCE_OPENAI_OPENAI_CHAT_BACKEND_H_
+```
+
+- [ ] **Step 5: Write the implementation**
+
+Create `agentflow/inference/openai/openai_chat_backend.cc`:
+
+```cpp
+// agentflow/inference/openai/openai_chat_backend.cc
+#include "agentflow/inference/openai/openai_chat_backend.h"
+
+#include <utility>
+#include <vector>
+
+#include <absl/status/status.h>
+#include <absl/strings/str_cat.h>
+#include <asio/steady_timer.hpp>
+#include <asio/use_awaitable.hpp>
+#include <nlohmann/json.hpp>
+
+#include "agentflow/inference/openai/message_map.h"
+#include "agentflow/inference/openai/stream_accumulator.h"
+
+namespace agentflow::openai {
+namespace {
+
+using json = nlohmann::json;
+
+// Only transport-level and server-side failures are worth another attempt.
+// A 4xx will fail identically every time.
+bool IsRetryable(const absl::Status& s) {
+  return s.code() == absl::StatusCode::kUnavailable ||
+         s.code() == absl::StatusCode::kResourceExhausted;
+}
+
+class OpenAiConversation : public IConversation {
+ public:
+  OpenAiConversation(OpenAiOptions opts, net::IHttpClient& http,
+                      ChatConversationOptions conv_opts)
+      : opts_(std::move(opts)),
+        http_(http),
+        conv_opts_(std::move(conv_opts)) {
+    if (auto sys = SystemMessage(conv_opts_.system_message_json)) {
+      messages_.push_back(*std::move(sys));
+    }
+  }
+
+  asio::awaitable<absl::StatusOr<std::string>> SendAsync(
+      std::string message_json, const TokenSink& on_token,
+      const CancelToken& cancel) override {
+    auto incoming = ToOpenAiMessages(message_json);
+    if (!incoming.ok()) co_return incoming.status();
+    for (auto& m : *incoming) messages_.push_back(std::move(m));
+
+    net::HttpRequest req;
+    req.url = absl::StrCat(opts_.base_url, "/chat/completions");
+    req.headers = {{"Content-Type", "application/json"},
+                   {"Authorization", absl::StrCat("Bearer ", opts_.api_key)}};
+    req.body = BuildRequestBody(opts_.model, conv_opts_, messages_,
+                                 /*stream=*/true);
+
+    absl::Status last = absl::UnknownError("no attempt made");
+    for (int attempt = 0; attempt < opts_.max_retries; ++attempt) {
+      if (cancel.IsCancelled()) co_return absl::CancelledError("cancelled");
+
+      StreamAccumulator acc;
+      bool emitted = false;
+      auto status = co_await http_.PostSse(
+          req,
+          [&](std::string_view frame) {
+            std::string delta = acc.Feed(frame);
+            if (delta.empty()) return;
+            emitted = true;
+            if (on_token) on_token(delta);
+          },
+          cancel);
+
+      if (status.ok()) {
+        std::string canonical = acc.Canonical();
+        // Record the assistant turn so the next Send resends full history —
+        // HTTP is stateless, unlike the on-device engine.
+        auto assistant = ToOpenAiMessages(canonical);
+        if (assistant.ok()) {
+          for (auto& m : *assistant) messages_.push_back(std::move(m));
+        }
+        co_return canonical;
+      }
+
+      last = status;
+      if (cancel.IsCancelled()) co_return absl::CancelledError("cancelled");
+
+      // The UI-protecting rule (design spec §6): once the user has seen part
+      // of an answer, retrying would duplicate it on screen. Report instead.
+      if (emitted) {
+        co_return absl::Status(
+            status.code(),
+            absl::StrCat("stream interrupted after partial output: ",
+                          status.message()));
+      }
+      if (!IsRetryable(status)) co_return status;
+      if (attempt + 1 >= opts_.max_retries) break;
+
+      // Exponential backoff: base, 2×base, 4×base…
+      asio::steady_timer timer(co_await asio::this_coro::executor);
+      timer.expires_after(opts_.retry_base_delay * (1 << attempt));
+      auto [ec] = co_await timer.async_wait(
+          asio::as_tuple(asio::use_awaitable));
+      (void)ec;
+    }
+    co_return last;
+  }
+
+  void Cancel() override {
+    // The in-flight HTTP request is broken by the CancelToken hook the client
+    // registered; nothing extra is owned here.
+  }
+
+ private:
+  OpenAiOptions opts_;
+  net::IHttpClient& http_;
+  ChatConversationOptions conv_opts_;
+  std::vector<json> messages_;
+};
+
+}  // namespace
+
+OpenAiChatBackend::OpenAiChatBackend(OpenAiOptions opts, net::IHttpClient& http)
+    : opts_(std::move(opts)),
+      http_(http),
+      describe_(absl::StrCat("openai:", opts_.model)) {}
+
+std::shared_ptr<OpenAiChatBackend> OpenAiChatBackend::Create(
+    OpenAiOptions opts, net::IHttpClient& http) {
+  return std::shared_ptr<OpenAiChatBackend>(
+      new OpenAiChatBackend(std::move(opts), http));
+}
+
+std::shared_ptr<IConversation> OpenAiChatBackend::CreateConversation(
+    ChatConversationOptions opts) {
+  if (opts.constrained_tool_calls) {
+    // Do not degrade silently: an OpenAI-compatible endpoint has no equivalent
+    // of LLGuidance grammar constraints, so the caller must be able to see
+    // that the guarantee was dropped (design spec §6).
+    last_warning_ = absl::StrCat(
+        "backend ", describe_,
+        " does not support constrained tool calls; running unconstrained");
+  }
+  return std::make_shared<OpenAiConversation>(opts_, http_, std::move(opts));
+}
+
+}  // namespace agentflow::openai
+```
+
+Add `#include <asio/as_tuple.hpp>` and `#include <asio/this_coro.hpp>` if the
+compiler asks for them.
+
+- [ ] **Step 6: Add the Bazel targets**
+
+Append to `agentflow/inference/openai/BUILD.bazel`:
+
+```python
+cc_library(
+    name = "openai_chat_backend",
+    srcs = ["openai_chat_backend.cc"],
+    hdrs = ["openai_chat_backend.h"],
+    deps = [
+        ":message_map",
+        ":stream_accumulator",
+        "//agentflow/inference:chat_backend",
+        "//agentflow/net:http_client",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@asio",
+        "@nlohmann_json//:json",
+    ],
+)
+```
+
+Append to `tests/unit/inference/openai/BUILD.bazel`:
+
+```python
+cc_test(
+    name = "openai_chat_backend_test",
+    size = "small",
+    srcs = ["openai_chat_backend_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference/openai:openai_chat_backend",
+        "//tests/support:fake_http_client",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+```
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `bazel test //tests/unit/inference/openai:openai_chat_backend_test --test_output=all`
+Expected: PASS — 10 tests.
+
+- [ ] **Step 8: Run the whole suite**
+
+Run: `bazel test //tests/unit/... //tests/integration/...`
+Expected: all PASS.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add agentflow/inference/openai/ tests/support/ tests/unit/inference/openai/
+git commit -m "feat(openai): OpenAiChatBackend with retry and cancellation
+
+An OpenAI-compatible endpoint is now a first-class IChatBackend, usable
+anywhere the on-device backend is. Each conversation owns its messages array
+since HTTP is stateless.
+
+Retry is deliberately suppressed once a token has been emitted: retrying after
+the user has seen partial output would duplicate it on screen. Client errors
+are never retried. constrained_tool_calls is reported through last_warning()
+rather than silently dropped."
+```
+
+---
+
+## Task 13: Host wiring, example and documentation
+
+Spec §1, §5, §9. Proves the end-to-end path and writes down how a host actually
+uses it — including the credential rule, which is only enforceable if it is
+documented where people look.
+
+**Files:**
+- Create: `examples/remote-llm/main.cc`
+- Create: `examples/remote-llm/workflow.json`
+- Create: `examples/remote-llm/BUILD.bazel`
+- Create: `tests/integration/remote_llm_e2e_test.cc`
+- Create: `tests/integration/BUILD.bazel` (if absent; otherwise modify)
+- Modify: `README.md`
+
+**Interfaces:**
+- Consumes: everything from Tasks 2-12.
+- Produces: no new library API — a runnable example and the documented host recipe.
+
+- [ ] **Step 1: Write the example workflow**
+
+Create `examples/remote-llm/workflow.json`:
+
+```json
+{
+  "name": "remote-llm-demo",
+  "version": "1",
+  "state": {
+    "fields": {
+      "user_query": "string",
+      "assistant_reply": "string"
+    }
+  },
+  "agents": {
+    "assistant": {
+      "system_prompt": "You are a concise assistant.",
+      "model": {"backend": "cloud", "max_output_tokens": 512}
+    }
+  },
+  "graph": {
+    "nodes": [{"id": "assistant", "agent": "assistant"}],
+    "edges": []
+  }
+}
+```
+
+Note `"backend": "cloud"` — a logical name only. No URL, no key, no provider
+model id ever appears in a workflow file.
+
+- [ ] **Step 2: Write the example host**
+
+Create `examples/remote-llm/main.cc`:
+
+```cpp
+// examples/remote-llm/main.cc
+//
+// Runs one agent against an OpenAI-compatible endpoint.
+//
+//   export AGENTFLOW_LLM_BASE_URL=https://api.deepseek.com/v1
+//   export AGENTFLOW_LLM_MODEL=deepseek-chat
+//   export AGENTFLOW_LLM_API_KEY=sk-...
+//   bazel run //examples/remote-llm:remote_llm -- "your question"
+//
+// The key is read from the environment here. On Android the equivalent host
+// code reads it from EncryptedSharedPreferences. Either way it is supplied by
+// the HOST and never appears in the workflow JSON.
+#include <cstdlib>
+#include <iostream>
+#include <memory>
+#include <string>
+
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
+
+#include "agentflow/core/cancel.h"
+#include "agentflow/inference/openai/openai_chat_backend.h"
+#include "agentflow/net/https_client.h"
+#include "agentflow/observability/callback_event_emitter.h"
+#include "agentflow/tools/tool_registry.h"
+#include "agentflow/workflow/workflow_loader.h"
+#include "agentflow/workflow/workflow_runner.h"
+
+namespace {
+
+std::string RequiredEnv(const char* name) {
+  const char* v = std::getenv(name);
+  if (!v || !*v) {
+    std::cerr << "missing required environment variable: " << name << "\n";
+    std::exit(2);
+  }
+  return v;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  const std::string question =
+      argc > 1 ? argv[1] : "Say hello in one short sentence.";
+
+  asio::io_context io;
+
+  // 1. Build the HTTP client and the remote backend. This is the ONLY place
+  //    credentials appear.
+  agentflow::net::HttpsClientOptions http_opts;
+  http_opts.ca_path = "/etc/ssl/certs/ca-certificates.crt";
+  agentflow::net::HttpsClient http(io, http_opts);
+
+  agentflow::openai::OpenAiOptions llm;
+  llm.base_url = RequiredEnv("AGENTFLOW_LLM_BASE_URL");
+  llm.model = RequiredEnv("AGENTFLOW_LLM_MODEL");
+  llm.api_key = RequiredEnv("AGENTFLOW_LLM_API_KEY");
+  auto cloud = agentflow::openai::OpenAiChatBackend::Create(llm, http);
+
+  // 2. Load the workflow and register the backend under its logical name.
+  auto tools = std::make_shared<agentflow::ToolRegistry>();
+  auto wf_or = agentflow::workflow::WorkflowLoader::LoadFromFile(
+      "examples/remote-llm/workflow.json", *tools);
+  if (!wf_or.ok()) {
+    std::cerr << "failed to load workflow: " << wf_or.status().message() << "\n";
+    return 1;
+  }
+
+  agentflow::workflow::AgentNodeBuildSpec spec;
+  spec.workflow = *wf_or;
+  spec.agent_name = "assistant";
+  spec.host_tools = tools;
+  spec.io_ctx = &io;
+  spec.backends["cloud"] = cloud;  // matches workflow.json's model.backend
+
+  auto built = agentflow::workflow::BuildAgentNode(spec);
+  agentflow::AgentNode node(std::move(built.cfg));
+
+  // 3. Stream the answer to stdout as it arrives.
+  agentflow::CallbackEventEmitter emit(
+      [](const agentflow::proto::TraceEvent& e) {
+        if (e.has_token()) {
+          std::cout << e.token().token() << std::flush;
+        }
+      });
+
+  agentflow::test::TestState state;  // replace with your own state proto
+  state.set_user_query(question);
+
+  agentflow::CancelSource cancel;
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<agentflow::State> {
+        co_return co_await node.Run(
+            agentflow::State::From(std::move(state)), cancel.Token(), emit);
+      },
+      asio::use_future);
+  io.run();
+
+  auto out = fut.get();
+  std::cout << "\n---\n"
+            << out.As<agentflow::test::TestState>().assistant_reply() << "\n";
+  return 0;
+}
+```
+
+If `//proto:agentflow_proto`'s `test::TestState` is not appropriate for an
+example, define a two-field state message in
+`examples/remote-llm/demo_state.proto` and use that instead — the example must
+not depend on a test-only proto if the repository's other examples do not.
+Check `examples/agent-demo/` and follow whatever it does.
+
+- [ ] **Step 3: Declare the example target**
+
+Create `examples/remote-llm/BUILD.bazel`, mirroring
+`examples/agent-demo/BUILD.bazel`:
+
+```python
+# examples/remote-llm/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "remote_llm",
+    srcs = ["main.cc"],
+    data = ["workflow.json"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference/openai:openai_chat_backend",
+        "//agentflow/net:https_client",
+        "//agentflow/nodes",
+        "//agentflow/observability",
+        "//agentflow/tools",
+        "//agentflow/workflow",
+        "//proto:agentflow_proto",
+        "@asio",
+    ],
+)
+```
+
+- [ ] **Step 4: Write the opt-in end-to-end test**
+
+Create `tests/integration/remote_llm_e2e_test.cc`:
+
+```cpp
+// tests/integration/remote_llm_e2e_test.cc
+//
+// Opt-in end-to-end check against a real endpoint. Requires:
+//   AGENTFLOW_LLM_BASE_URL, AGENTFLOW_LLM_MODEL, AGENTFLOW_LLM_API_KEY
+// Skipped by default so CI stays offline and free.
+#include <cstdlib>
+#include <memory>
+#include <string>
+
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
+#include <gtest/gtest.h>
+
+#include "agentflow/core/cancel.h"
+#include "agentflow/inference/canonical_message.h"
+#include "agentflow/inference/openai/openai_chat_backend.h"
+#include "agentflow/net/https_client.h"
+
+namespace agentflow {
+namespace {
+
+TEST(RemoteLlmE2ETest, RealEndpointStreamsAnAnswer) {
+  const char* base = std::getenv("AGENTFLOW_LLM_BASE_URL");
+  const char* model = std::getenv("AGENTFLOW_LLM_MODEL");
+  const char* key = std::getenv("AGENTFLOW_LLM_API_KEY");
+  if (!base || !model || !key) {
+    GTEST_SKIP() << "AGENTFLOW_LLM_* not set";
+  }
+
+  asio::io_context io;
+  net::HttpsClientOptions http_opts;
+  http_opts.ca_path = "/etc/ssl/certs/ca-certificates.crt";
+  net::HttpsClient http(io, http_opts);
+
+  openai::OpenAiOptions opts;
+  opts.base_url = base;
+  opts.model = model;
+  opts.api_key = key;
+  auto backend = openai::OpenAiChatBackend::Create(opts, http);
+
+  ChatConversationOptions conv_opts;
+  conv_opts.system_message_json =
+      R"([{"type":"text","text":"Answer in one short sentence."}])";
+  auto conv = backend->CreateConversation(std::move(conv_opts));
+  ASSERT_NE(conv, nullptr);
+
+  std::string deltas;
+  CancelSource cancel;
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<absl::StatusOr<std::string>> {
+        co_return co_await conv->SendAsync(
+            R"({"role":"user","content":[{"type":"text","text":"Say hello."}]})",
+            [&](std::string_view d) { deltas.append(d); }, cancel.Token());
+      },
+      asio::use_future);
+  io.run();
+
+  auto resp = fut.get();
+  ASSERT_TRUE(resp.ok()) << resp.status().message();
+  EXPECT_FALSE(deltas.empty()) << "expected streamed deltas";
+  EXPECT_EQ(deltas, ExtractAssistantText(*resp));
+}
+
+}  // namespace
+}  // namespace agentflow
+```
+
+Add the corresponding `cc_test` to `tests/integration/BUILD.bazel` with
+`size = "small"` and deps on `//agentflow/inference:canonical_message`,
+`//agentflow/inference/openai:openai_chat_backend`,
+`//agentflow/net:https_client`, `//agentflow/core`, `@asio`, and googletest.
+
+- [ ] **Step 5: Document the host recipe**
+
+In `README.md`, after the Architecture section, add:
+
+````markdown
+### Remote inference backends
+
+An agent runs on whichever backend the host registers under the logical name
+in its `model.backend`. On-device and cloud agents coexist in one workflow:
+
+```json
+{"agents": {
+  "triage":   {"system_prompt": "...", "model": {"backend": ""}},
+  "research": {"system_prompt": "...", "model": {"backend": "cloud"}}
+}}
+```
+
+`triage` uses the default (on-device) backend; `research` uses the named one.
+The host supplies both:
+
+```cpp
+spec.backend           = LiteRtLmChatBackend::Create(engine, io);   // default
+spec.backends["cloud"] = openai::OpenAiChatBackend::Create(opts, http);
+```
+
+**Credentials never go in a workflow.** `base_url`, `api_key` and the provider
+model id live only in host code — an environment variable on desktop,
+`EncryptedSharedPreferences` on Android. A workflow JSON carries a logical name
+and nothing else, so it stays safe to serialize, checkpoint, log and hot-push.
+A name the host did not register is an error at build time, never a silent
+fallback to the default backend.
+
+Any OpenAI-compatible endpoint works: OpenAI, DeepSeek, Volcengine ARK, Kimi,
+GLM, MiniMax, OpenRouter, and local Ollama / vLLM / LiteLLM gateways.
+
+Known limitations: one connection per request (no pooling); no HTTP/2; a remote
+backend cannot honour `constrained_tool_calls` and reports that through
+`last_warning()`.
+````
+
+- [ ] **Step 6: Verify the example builds and the suite is green**
+
+Run: `bazel build //examples/remote-llm:remote_llm`
+Expected: builds successfully.
+
+Run: `bazel test //tests/...`
+Expected: all PASS, with the opt-in cases skipped.
+
+- [ ] **Step 7: Run it against a real endpoint once**
+
+```bash
+export AGENTFLOW_LLM_BASE_URL=https://api.deepseek.com/v1
+export AGENTFLOW_LLM_MODEL=deepseek-chat
+export AGENTFLOW_LLM_API_KEY=sk-...
+bazel run //examples/remote-llm:remote_llm -- "Name three primary colours."
+```
+
+Expected: the answer streams to stdout token by token, then the final reply
+prints after `---`.
+
+**This is the acceptance check for the whole plan.** If tokens appear in one
+burst rather than incrementally, SSE framing or the token sink is broken —
+revisit Tasks 8 and 12 before declaring done.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add examples/remote-llm/ tests/integration/ README.md
+git commit -m "docs(remote-llm): runnable example, e2e test and host recipe
+
+Demonstrates a workflow whose agent names a logical backend the host registers,
+with credentials supplied entirely by host code. Documents the credential rule
+and the known limitations in README."
 ```
 
 ---
