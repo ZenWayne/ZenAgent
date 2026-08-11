@@ -2802,3 +2802,1063 @@ interface so the OpenAI backend can be tested against a fake."
 ```
 
 ---
+
+## Task 9: `HttpsClient` — sockets and TLS
+
+Spec §4.1, §4.2, §7.3. The only file in this plan that touches the network.
+All parsing is already done and tested (Task 8), so this task is transport
+only.
+
+**Files:**
+- Create: `agentflow/net/https_client.h`
+- Create: `agentflow/net/https_client.cc`
+- Create: `tests/unit/net/https_client_integration_test.cc`
+- Modify: `agentflow/net/BUILD.bazel`
+- Modify: `tests/unit/net/BUILD.bazel`
+
+**Interfaces:**
+- Consumes: `IHttpClient`, `HttpRequest`, `SseHandler` (Task 8); `ParseUrl`, `ParseResponseHead`, `ChunkedDecoder`, `SseFramer` (Task 8).
+- Produces: `agentflow::net::HttpsClientOptions{ca_path, connect_timeout, read_timeout}` and `agentflow::net::HttpsClient(asio::io_context&, HttpsClientOptions)` implementing `IHttpClient`. Task 12 constructs one.
+
+**Use the variant Task 1 selected.** Variant A (`asio::ssl`) if the probe
+passed; Variant B (manual BoringSSL memory BIOs) if it failed to compile. The
+header below is identical either way — only `https_client.cc`'s internals
+differ.
+
+- [ ] **Step 1: Write the header**
+
+Create `agentflow/net/https_client.h`:
+
+```cpp
+// agentflow/net/https_client.h
+#ifndef AGENTFLOW_NET_HTTPS_CLIENT_H_
+#define AGENTFLOW_NET_HTTPS_CLIENT_H_
+
+#include <chrono>
+#include <memory>
+#include <string>
+
+#include <asio/io_context.hpp>
+
+#include "agentflow/net/http_client.h"
+
+namespace agentflow::net {
+
+struct HttpsClientOptions {
+  // Either a CA bundle FILE (desktop, e.g.
+  // /etc/ssl/certs/ca-certificates.crt) or a hashed CA DIRECTORY (Android,
+  // /system/etc/security/cacerts/). Both forms are accepted; the client
+  // stats the path to decide. Required for https:// URLs — there is
+  // deliberately no option to skip verification.
+  std::string ca_path;
+
+  std::chrono::milliseconds connect_timeout{10'000};
+  // Idle timeout BETWEEN reads, not a whole-response deadline: a slow model
+  // that streams steadily must not be killed mid-answer.
+  std::chrono::milliseconds read_timeout{60'000};
+};
+
+// Minimal HTTP/1.1 client. POST only. Supports chunked and SSE bodies.
+//
+// Deliberately NOT supported (design spec §4): redirect following, connection
+// pooling (one connection per request), HTTP/2.
+class HttpsClient : public IHttpClient {
+ public:
+  HttpsClient(asio::io_context& io, HttpsClientOptions opts);
+  ~HttpsClient() override;
+
+  asio::awaitable<absl::Status> PostSse(HttpRequest req,
+                                         const SseHandler& on_event,
+                                         const CancelToken& cancel) override;
+
+  asio::awaitable<absl::StatusOr<std::string>> Post(
+      HttpRequest req, const CancelToken& cancel) override;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace agentflow::net
+#endif  // AGENTFLOW_NET_HTTPS_CLIENT_H_
+```
+
+- [ ] **Step 2: Implement the transport**
+
+Create `agentflow/net/https_client.cc`. Structure both variants the same way —
+one `Impl` exposing a `Connect` / `Write` / `ReadSome` / `Close` quartet, with
+`PostSse` and `Post` written once on top of it:
+
+```cpp
+// agentflow/net/https_client.cc
+#include "agentflow/net/https_client.h"
+
+#include <sys/stat.h>
+
+#include <absl/status/status.h>
+#include <absl/strings/str_cat.h>
+#include <asio/connect.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/read.hpp>
+#include <asio/use_awaitable.hpp>
+#include <asio/write.hpp>
+
+#include "agentflow/net/http_parse.h"
+
+// VARIANT A only:
+#include <asio/ssl.hpp>
+
+namespace agentflow::net {
+namespace {
+
+// Builds the request bytes. Connection: close because there is no pooling —
+// the server closing the socket is our end-of-body signal for non-chunked
+// responses.
+std::string BuildRequestBytes(const ParsedUrl& url, const HttpRequest& req,
+                               bool sse) {
+  std::string out = absl::StrCat("POST ", url.target, " HTTP/1.1\r\n",
+                                  "Host: ", url.host, "\r\n",
+                                  "Connection: close\r\n",
+                                  "Content-Length: ", req.body.size(), "\r\n");
+  if (sse) absl::StrAppend(&out, "Accept: text/event-stream\r\n");
+  for (const auto& [k, v] : req.headers) {
+    absl::StrAppend(&out, k, ": ", v, "\r\n");
+  }
+  absl::StrAppend(&out, "\r\n", req.body);
+  return out;
+}
+
+bool IsDirectory(const std::string& path) {
+  struct stat st{};
+  return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+}  // namespace
+```
+
+Then write `HttpsClient::Impl` with these responsibilities, in this order:
+
+1. **Connect.** `ParseUrl(req.url)`; resolve with `asio::ip::tcp::resolver`;
+   `asio::async_connect`. On `url.tls`, perform the handshake:
+   - **Variant A:** an `asio::ssl::context{tls_client}` with
+     `set_verify_mode(verify_peer)`; `load_verify_file(ca_path)` when
+     `ca_path` is a file, `add_verify_path(ca_path)` when `IsDirectory`;
+     `set_verify_callback(asio::ssl::host_name_verification(url.host))`;
+     `SSL_set_tlsext_host_name(stream.native_handle(), url.host.c_str())`
+     **before** `async_handshake(client)`.
+   - **Variant B:** keep a plain `tcp::socket`; create `SSL_CTX` with
+     `TLS_client_method()`, `SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr)`,
+     `SSL_CTX_load_verify_locations(ctx, file_or_null, dir_or_null)`; create
+     `SSL*`, `SSL_set_tlsext_host_name`, `SSL_set1_host(ssl, host)`, and two
+     `BIO_new(BIO_s_mem())` attached via `SSL_set_bio`. Drive the handshake by
+     looping `SSL_do_handshake`, and after each call flush the network BIO to
+     the socket with `BIO_read` + `async_write`, then feed socket bytes back in
+     with `async_read_some` + `BIO_write`, until it returns 1. Treat
+     `SSL_ERROR_WANT_READ`/`WANT_WRITE` as "pump again", anything else as
+     `absl::UnavailableError`.
+2. **Cancellation.** Register once:
+   `cancel.OnCancel([sock]{ asio::error_code ig; sock->close(ig); })`. A closed
+   socket makes the in-flight `co_await` fail, which both entry points map to
+   `absl::CancelledError`.
+3. **Write** the bytes from `BuildRequestBytes`.
+4. **Read the head.** Accumulate into a `std::string` and call
+   `ParseResponseHead` after each read until `head_bytes != 0`.
+5. **Reject non-2xx early.** Read the remaining body (bounded to 8 KiB — enough
+   for any provider's error JSON) and return
+   `absl::Status(MapHttpStatus(code), absl::StrCat("HTTP ", code, ": ", body))`
+   where `MapHttpStatus` is:
+
+```cpp
+absl::StatusCode MapHttpStatus(int code) {
+  if (code == 401 || code == 403) return absl::StatusCode::kPermissionDenied;
+  if (code == 429) return absl::StatusCode::kResourceExhausted;
+  if (code >= 500) return absl::StatusCode::kUnavailable;
+  if (code >= 400) return absl::StatusCode::kInvalidArgument;
+  return absl::StatusCode::kUnknown;
+}
+```
+
+This is the mapping design spec §6 specifies; Task 12's retry policy reads
+exactly these codes.
+
+6. **Stream the body.** For `PostSse`: feed each read through `ChunkedDecoder`
+   when `head.chunked`, then through `SseFramer`, invoking `on_event` for every
+   payload; stop when `saw_done()` or the peer closes. For `Post`: accumulate
+   until `content_length` is satisfied or the peer closes, then return the body.
+7. **Close** the socket in all paths, including error paths.
+
+Map a socket error after cancellation to `absl::CancelledError`, and any other
+transport failure to `absl::UnavailableError` — never let an asio exception
+escape into the coroutine's caller.
+
+- [ ] **Step 3: Write the opt-in integration test**
+
+Socket and TLS behaviour cannot be asserted in an offline CI environment, so
+this test skips unless an endpoint is supplied.
+
+Create `tests/unit/net/https_client_integration_test.cc`:
+
+```cpp
+// tests/unit/net/https_client_integration_test.cc
+//
+// Opt-in. Set AGENTFLOW_TEST_HTTP_URL to an endpoint that accepts a POST and
+// returns a body — a local Ollama (http://127.0.0.1:11434/api/tags) exercises
+// the plain path; any https:// URL exercises TLS. Skipped by default.
+#include "agentflow/net/https_client.h"
+
+#include <cstdlib>
+#include <string>
+
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
+#include <gtest/gtest.h>
+
+#include "agentflow/core/cancel.h"
+
+namespace agentflow::net {
+namespace {
+
+TEST(HttpsClientIntegrationTest, PostReturnsABody) {
+  const char* url = std::getenv("AGENTFLOW_TEST_HTTP_URL");
+  if (!url) GTEST_SKIP() << "AGENTFLOW_TEST_HTTP_URL not set";
+
+  asio::io_context io;
+  HttpsClientOptions opts;
+  opts.ca_path = "/etc/ssl/certs/ca-certificates.crt";
+  HttpsClient client(io, opts);
+
+  HttpRequest req;
+  req.url = url;
+  req.body = "{}";
+  req.headers = {{"Content-Type", "application/json"}};
+
+  CancelSource cancel;
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<absl::StatusOr<std::string>> {
+        co_return co_await client.Post(req, cancel.Token());
+      },
+      asio::use_future);
+  io.run();
+
+  auto body = fut.get();
+  ASSERT_TRUE(body.ok()) << body.status().message();
+  EXPECT_FALSE(body->empty());
+}
+
+TEST(HttpsClientIntegrationTest, RejectsUnsupportedScheme) {
+  // Runs everywhere: URL validation needs no network.
+  asio::io_context io;
+  HttpsClient client(io, HttpsClientOptions{});
+
+  HttpRequest req;
+  req.url = "ftp://example.com/x";
+
+  CancelSource cancel;
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<absl::StatusOr<std::string>> {
+        co_return co_await client.Post(req, cancel.Token());
+      },
+      asio::use_future);
+  io.run();
+
+  auto r = fut.get();
+  EXPECT_FALSE(r.ok());
+  EXPECT_EQ(r.status().code(), absl::StatusCode::kInvalidArgument);
+}
+
+}  // namespace
+}  // namespace agentflow::net
+```
+
+- [ ] **Step 4: Add the Bazel targets**
+
+Append to `agentflow/net/BUILD.bazel`:
+
+```python
+cc_library(
+    name = "https_client",
+    srcs = ["https_client.cc"],
+    hdrs = ["https_client.h"],
+    deps = [
+        ":http_client",
+        ":http_parse",
+        "//agentflow/core",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@asio",
+        "@boringssl//:crypto",
+        "@boringssl//:ssl",
+    ],
+)
+```
+
+Append to `tests/unit/net/BUILD.bazel`:
+
+```python
+cc_test(
+    name = "https_client_integration_test",
+    size = "small",
+    srcs = ["https_client_integration_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/net:https_client",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+```
+
+- [ ] **Step 5: Run the tests**
+
+Run: `bazel test //tests/unit/net:https_client_integration_test --test_output=all`
+Expected: PASS — 1 run (`RejectsUnsupportedScheme`), 1 skipped.
+
+Then, if a local Ollama or any reachable endpoint is available, verify the real
+path once by hand:
+
+```bash
+AGENTFLOW_TEST_HTTP_URL=https://example.com \
+  bazel test //tests/unit/net:https_client_integration_test \
+  --test_output=all --test_env=AGENTFLOW_TEST_HTTP_URL
+```
+
+Expected: both PASS. **Do not skip this manual check** — it is the only
+verification that the handshake, CA loading and SNI actually work end to end.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add agentflow/net/ tests/unit/net/
+git commit -m "feat(net): HttpsClient — POST with chunked/SSE bodies over TLS
+
+asio + BoringSSL, no new third-party dependency. One connection per request:
+no pooling, no redirects, no HTTP/2, all deliberate (design spec 4).
+Certificate verification is mandatory and accepts either a CA bundle file or a
+hashed CA directory, covering desktop and Android.
+
+HTTP status codes are mapped to the absl codes the retry policy keys on."
+```
+
+---
+
+## Task 10: canonical ↔ OpenAI message mapping (pure)
+
+Spec §4.3. The whole protocol adaptation, with no I/O. This is where the
+one-to-many tool-result expansion that §3.2's `id` passthrough exists for
+actually happens.
+
+**Files:**
+- Create: `agentflow/inference/openai/message_map.h`
+- Create: `agentflow/inference/openai/message_map.cc`
+- Create: `agentflow/inference/openai/BUILD.bazel`
+- Create: `tests/unit/inference/openai/message_map_test.cc`
+- Create: `tests/unit/inference/openai/BUILD.bazel`
+
+**Interfaces:**
+- Consumes: `ChatConversationOptions` (Task 2).
+- Produces (all in `namespace agentflow::openai`):
+  - `ToOpenAiMessages(std::string_view canonical_message_json) -> absl::StatusOr<std::vector<nlohmann::json>>` — 1 canonical message in, 1..N OpenAI messages out
+  - `SystemMessage(std::string_view system_message_json) -> std::optional<nlohmann::json>`
+  - `BuildRequestBody(std::string_view model, const ChatConversationOptions&, const std::vector<nlohmann::json>& messages, bool stream) -> std::string`
+  - `ResponseToCanonical(std::string_view body) -> absl::StatusOr<std::string>`
+  - Task 12 calls all four.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/inference/openai/message_map_test.cc`:
+
+```cpp
+// tests/unit/inference/openai/message_map_test.cc
+#include "agentflow/inference/openai/message_map.h"
+
+#include <string>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+
+namespace agentflow::openai {
+namespace {
+
+using json = nlohmann::json;
+
+TEST(SystemMessageTest, BareContentArrayBecomesAStringContent) {
+  // ChatConversationOptions.system_message_json is a BARE array, not an object.
+  auto m = SystemMessage(R"([{"type":"text","text":"You are helpful."}])");
+  ASSERT_TRUE(m.has_value());
+  EXPECT_EQ(*m, json({{"role", "system"}, {"content", "You are helpful."}}));
+}
+
+TEST(SystemMessageTest, ConcatenatesMultipleTextItems) {
+  auto m = SystemMessage(
+      R"([{"type":"text","text":"a"},{"type":"text","text":"b"}])");
+  ASSERT_TRUE(m.has_value());
+  EXPECT_EQ((*m)["content"], "ab");
+}
+
+TEST(SystemMessageTest, EmptyOrUnparseableYieldsNothing) {
+  EXPECT_FALSE(SystemMessage("").has_value());
+  EXPECT_FALSE(SystemMessage("not json").has_value());
+}
+
+TEST(ToOpenAiMessagesTest, UserContentArrayFlattensToAString) {
+  auto r = ToOpenAiMessages(
+      R"({"role":"user","content":[{"type":"text","text":"hi"}]})");
+  ASSERT_TRUE(r.ok());
+  ASSERT_EQ(r->size(), 1u);
+  EXPECT_EQ((*r)[0], json({{"role", "user"}, {"content", "hi"}}));
+}
+
+TEST(ToOpenAiMessagesTest, AssistantWithToolCallsIsPassedThrough) {
+  auto r = ToOpenAiMessages(
+      R"({"role":"assistant","content":[{"type":"text","text":"let me look"}],)"
+      R"("tool_calls":[{"id":"call_1","function":{"name":"s","arguments":"{}"}}]})");
+  ASSERT_TRUE(r.ok());
+  ASSERT_EQ(r->size(), 1u);
+  const json& m = (*r)[0];
+  EXPECT_EQ(m["role"], "assistant");
+  EXPECT_EQ(m["content"], "let me look");
+  ASSERT_EQ(m["tool_calls"].size(), 1u);
+  EXPECT_EQ(m["tool_calls"][0]["id"], "call_1");
+  EXPECT_EQ(m["tool_calls"][0]["type"], "function");
+}
+
+TEST(ToOpenAiMessagesTest, OneToolMessageExpandsToOnePerResult) {
+  // THE reason ChatConversationOptions carries tool-call ids (design spec §3.2):
+  // OpenAI needs one message per result, each with its own tool_call_id.
+  auto r = ToOpenAiMessages(
+      R"({"role":"tool","content":[)"
+      R"({"id":"call_1","name":"search","response":{"value":"A"}},)"
+      R"({"id":"call_2","name":"lookup","response":{"value":"B"}}]})");
+  ASSERT_TRUE(r.ok());
+  ASSERT_EQ(r->size(), 2u);
+  EXPECT_EQ((*r)[0], json({{"role", "tool"},
+                           {"tool_call_id", "call_1"},
+                           {"content", "A"}}));
+  EXPECT_EQ((*r)[1], json({{"role", "tool"},
+                           {"tool_call_id", "call_2"},
+                           {"content", "B"}}));
+}
+
+TEST(ToOpenAiMessagesTest, ToolResultWithoutAnIdIsRejected) {
+  // Better a clear error than a request OpenAI rejects with an opaque 400.
+  auto r = ToOpenAiMessages(
+      R"({"role":"tool","content":[{"name":"search","response":{"value":"A"}}]})");
+  EXPECT_FALSE(r.ok());
+}
+
+TEST(BuildRequestBodyTest, CarriesModelStreamToolsAndMessages) {
+  ChatConversationOptions opts;
+  opts.tools_json =
+      R"([{"type":"function","function":{"name":"s","description":"d",)"
+      R"("parameters":{"type":"object"}}}])";
+  opts.max_output_tokens = 256;
+
+  std::vector<json> msgs = {{{"role", "user"}, {"content", "hi"}}};
+  json body = json::parse(BuildRequestBody("deepseek-chat", opts, msgs,
+                                            /*stream=*/true));
+
+  EXPECT_EQ(body["model"], "deepseek-chat");
+  EXPECT_EQ(body["stream"], true);
+  EXPECT_EQ(body["max_tokens"], 256);
+  EXPECT_EQ(body["messages"][0]["content"], "hi");
+  // BuildToolsJson already emits the OpenAI shape — passed through verbatim.
+  EXPECT_EQ(body["tools"][0]["function"]["name"], "s");
+}
+
+TEST(BuildRequestBodyTest, OmitsToolsWhenThereAreNone) {
+  ChatConversationOptions opts;  // tools_json defaults to "[]"
+  std::vector<json> msgs = {{{"role", "user"}, {"content", "hi"}}};
+  json body = json::parse(BuildRequestBody("m", opts, msgs, false));
+  EXPECT_FALSE(body.contains("tools"));
+  EXPECT_EQ(body["stream"], false);
+}
+
+TEST(ResponseToCanonicalTest, PlainTextAnswer) {
+  auto c = ResponseToCanonical(
+      R"({"choices":[{"message":{"role":"assistant","content":"42"}}]})");
+  ASSERT_TRUE(c.ok());
+  EXPECT_EQ(json::parse(*c),
+            json::parse(
+                R"({"role":"assistant","content":[{"type":"text","text":"42"}]})"));
+}
+
+TEST(ResponseToCanonicalTest, ToolCallsArePassedThroughVerbatim) {
+  auto c = ResponseToCanonical(
+      R"({"choices":[{"message":{"role":"assistant","content":null,)"
+      R"("tool_calls":[{"id":"call_9","type":"function",)"
+      R"("function":{"name":"s","arguments":"{\"q\":1}"}}]}}]})");
+  ASSERT_TRUE(c.ok());
+  json got = json::parse(*c);
+  ASSERT_TRUE(got.contains("tool_calls"));
+  EXPECT_EQ(got["tool_calls"][0]["id"], "call_9");
+  EXPECT_EQ(got["tool_calls"][0]["function"]["name"], "s");
+}
+
+TEST(ResponseToCanonicalTest, MalformedOrEmptyChoicesIsAnError) {
+  EXPECT_FALSE(ResponseToCanonical("not json").ok());
+  EXPECT_FALSE(ResponseToCanonical(R"({"choices":[]})").ok());
+}
+
+}  // namespace
+}  // namespace agentflow::openai
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bazel test //tests/unit/inference/openai:message_map_test`
+Expected: FAIL — `agentflow/inference/openai/message_map.h` does not exist.
+
+- [ ] **Step 3: Write the header**
+
+Create `agentflow/inference/openai/message_map.h`:
+
+```cpp
+// agentflow/inference/openai/message_map.h
+//
+// Pure conversion between agentflow's canonical message shape (which is
+// LiteRT-LM's) and the OpenAI /v1/chat/completions shape. No I/O.
+#ifndef AGENTFLOW_INFERENCE_OPENAI_MESSAGE_MAP_H_
+#define AGENTFLOW_INFERENCE_OPENAI_MESSAGE_MAP_H_
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <absl/status/statusor.h>
+#include <nlohmann/json.hpp>
+
+#include "agentflow/inference/chat_backend.h"
+
+namespace agentflow::openai {
+
+// ChatConversationOptions.system_message_json is a BARE content array
+// ([{"type":"text","text":"..."}]), not a {role,content} object — LiteRT-LM
+// wraps it itself. Returns nullopt when empty or unparseable.
+std::optional<nlohmann::json> SystemMessage(
+    std::string_view system_message_json);
+
+// Converts ONE canonical message into 1..N OpenAI messages.
+//
+// The one-to-many case is `role:"tool"`: a single canonical tool message can
+// carry several results, and OpenAI requires each to be its own message with
+// its own tool_call_id. A result entry missing `id` is an InvalidArgumentError
+// rather than a request the server will reject opaquely.
+absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
+    std::string_view canonical_message_json);
+
+// Builds the request body. `opts.tools_json` is already the OpenAI tools shape
+// (AgentNode::BuildToolsJson emits it), so it is passed through verbatim; an
+// empty array is omitted entirely.
+std::string BuildRequestBody(std::string_view model,
+                              const ChatConversationOptions& opts,
+                              const std::vector<nlohmann::json>& messages,
+                              bool stream);
+
+// Converts a NON-streaming /v1/chat/completions response body into canonical
+// assistant JSON. (The streaming path uses StreamAccumulator instead.)
+absl::StatusOr<std::string> ResponseToCanonical(std::string_view body);
+
+}  // namespace agentflow::openai
+#endif  // AGENTFLOW_INFERENCE_OPENAI_MESSAGE_MAP_H_
+```
+
+- [ ] **Step 4: Write the implementation**
+
+Create `agentflow/inference/openai/message_map.cc`:
+
+```cpp
+// agentflow/inference/openai/message_map.cc
+#include "agentflow/inference/openai/message_map.h"
+
+#include <absl/status/status.h>
+#include <absl/strings/str_cat.h>
+
+namespace agentflow::openai {
+namespace {
+
+using json = nlohmann::json;
+
+// Flattens a canonical content array into a single string. Canonical content
+// is [{"type":"text","text":"..."}]; OpenAI wants a plain string.
+std::string FlattenContent(const json& content) {
+  if (content.is_string()) return content.get<std::string>();
+  if (!content.is_array()) return {};
+  std::string out;
+  for (const auto& item : content) {
+    if (item.value("type", "") == "text" && item.contains("text") &&
+        item["text"].is_string()) {
+      out.append(item["text"].get<std::string>());
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+std::optional<nlohmann::json> SystemMessage(
+    std::string_view system_message_json) {
+  if (system_message_json.empty()) return std::nullopt;
+  json arr = json::parse(system_message_json, nullptr, false);
+  if (arr.is_discarded()) return std::nullopt;
+  std::string text = FlattenContent(arr);
+  if (text.empty()) return std::nullopt;
+  return json{{"role", "system"}, {"content", std::move(text)}};
+}
+
+absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
+    std::string_view canonical_message_json) {
+  json m = json::parse(canonical_message_json, nullptr, false);
+  if (m.is_discarded() || !m.is_object()) {
+    return absl::InvalidArgumentError("canonical message is not a JSON object");
+  }
+  const std::string role = m.value("role", "");
+  std::vector<json> out;
+
+  if (role == "tool") {
+    if (!m.contains("content") || !m["content"].is_array()) {
+      return absl::InvalidArgumentError("tool message has no content array");
+    }
+    for (const auto& entry : m["content"]) {
+      const std::string id = entry.value("id", "");
+      if (id.empty()) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "tool result for '", entry.value("name", "?"),
+            "' has no id; OpenAI requires tool_call_id on every tool message"));
+      }
+      std::string value;
+      if (entry.contains("response") && entry["response"].contains("value")) {
+        const auto& v = entry["response"]["value"];
+        value = v.is_string() ? v.get<std::string>() : v.dump();
+      }
+      out.push_back({{"role", "tool"},
+                     {"tool_call_id", id},
+                     {"content", std::move(value)}});
+    }
+    return out;
+  }
+
+  json msg = {{"role", role.empty() ? "user" : role}};
+  msg["content"] = m.contains("content") ? FlattenContent(m["content"])
+                                          : std::string{};
+  if (m.contains("tool_calls") && m["tool_calls"].is_array() &&
+      !m["tool_calls"].empty()) {
+    json calls = json::array();
+    for (const auto& tc : m["tool_calls"]) {
+      json call = tc;
+      // OpenAI requires an explicit type discriminator; LiteRT-LM omits it.
+      if (!call.contains("type")) call["type"] = "function";
+      calls.push_back(std::move(call));
+    }
+    msg["tool_calls"] = std::move(calls);
+  }
+  out.push_back(std::move(msg));
+  return out;
+}
+
+std::string BuildRequestBody(std::string_view model,
+                              const ChatConversationOptions& opts,
+                              const std::vector<nlohmann::json>& messages,
+                              bool stream) {
+  json body;
+  body["model"] = std::string(model);
+  body["messages"] = messages;
+  body["stream"] = stream;
+  if (opts.max_output_tokens > 0) body["max_tokens"] = opts.max_output_tokens;
+
+  json tools = json::parse(opts.tools_json, nullptr, false);
+  if (!tools.is_discarded() && tools.is_array() && !tools.empty()) {
+    body["tools"] = std::move(tools);
+  }
+  return body.dump();
+}
+
+absl::StatusOr<std::string> ResponseToCanonical(std::string_view body) {
+  json resp = json::parse(body, nullptr, false);
+  if (resp.is_discarded()) {
+    return absl::InternalError("OpenAI response is not valid JSON");
+  }
+  if (!resp.contains("choices") || !resp["choices"].is_array() ||
+      resp["choices"].empty()) {
+    return absl::InternalError("OpenAI response has no choices");
+  }
+  const json& msg = resp["choices"][0]["message"];
+
+  json out = {{"role", "assistant"}};
+  std::string text;
+  if (msg.contains("content") && msg["content"].is_string()) {
+    text = msg["content"].get<std::string>();
+  }
+  out["content"] = json::array({{{"type", "text"}, {"text", text}}});
+
+  if (msg.contains("tool_calls") && msg["tool_calls"].is_array() &&
+      !msg["tool_calls"].empty()) {
+    out["tool_calls"] = msg["tool_calls"];
+  }
+  return out.dump();
+}
+
+}  // namespace agentflow::openai
+```
+
+- [ ] **Step 5: Add the Bazel targets**
+
+Create `agentflow/inference/openai/BUILD.bazel`:
+
+```python
+# agentflow/inference/openai/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "message_map",
+    srcs = ["message_map.cc"],
+    hdrs = ["message_map.h"],
+    deps = [
+        "//agentflow/inference:chat_backend",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
+```
+
+Create `tests/unit/inference/openai/BUILD.bazel`:
+
+```python
+# tests/unit/inference/openai/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "message_map_test",
+    size = "small",
+    srcs = ["message_map_test.cc"],
+    deps = [
+        "//agentflow/inference/openai:message_map",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `bazel test //tests/unit/inference/openai:message_map_test --test_output=all`
+Expected: PASS — 12 tests.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add agentflow/inference/openai/ tests/unit/inference/openai/
+git commit -m "feat(openai): canonical <-> OpenAI message mapping
+
+Pure, socket-free protocol adaptation. The tool-result path expands one
+canonical message into N OpenAI messages, each carrying the tool_call_id that
+AgentNode threads through the canonical shape; a result without an id is a
+clear error rather than an opaque server-side 400."
+```
+
+---
+
+## Task 11: OpenAI streaming accumulator (pure)
+
+Spec §4.4, §7.2. The single most error-prone piece of OpenAI streaming:
+tool-call arguments arrive fragmented across frames and must be rejoined by
+index.
+
+**Files:**
+- Create: `agentflow/inference/openai/stream_accumulator.h`
+- Create: `agentflow/inference/openai/stream_accumulator.cc`
+- Create: `tests/unit/inference/openai/stream_accumulator_test.cc`
+- Modify: `agentflow/inference/openai/BUILD.bazel`
+- Modify: `tests/unit/inference/openai/BUILD.bazel`
+
+**Interfaces:**
+- Consumes: nothing (pure JSON).
+- Produces: `agentflow::openai::StreamAccumulator` with `std::string Feed(std::string_view frame_json)` (returns this frame's text delta, `""` if none) and `std::string Canonical() const`. Task 12 drives it from the `SseHandler`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/unit/inference/openai/stream_accumulator_test.cc`:
+
+```cpp
+// tests/unit/inference/openai/stream_accumulator_test.cc
+#include "agentflow/inference/openai/stream_accumulator.h"
+
+#include <string>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+
+namespace agentflow::openai {
+namespace {
+
+using json = nlohmann::json;
+
+std::string TextFrame(const std::string& piece) {
+  json f = {{"choices", json::array({{{"delta", {{"content", piece}}}}})}};
+  return f.dump();
+}
+
+TEST(StreamAccumulatorTest, JoinsTextDeltasAndReportsEachOne) {
+  StreamAccumulator a;
+  EXPECT_EQ(a.Feed(TextFrame("He")), "He");
+  EXPECT_EQ(a.Feed(TextFrame("llo")), "llo");
+
+  EXPECT_EQ(json::parse(a.Canonical()),
+            json::parse(
+                R"({"role":"assistant","content":[{"type":"text","text":"Hello"}]})"));
+}
+
+TEST(StreamAccumulatorTest, RejoinsToolCallArgumentsSplitAcrossFrames) {
+  // id and function.name appear ONLY in the first frame for an index; later
+  // frames carry bare argument fragments.
+  StreamAccumulator a;
+  a.Feed(R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",)"
+         R"("function":{"name":"search","arguments":"{\"q\":"}}]}}]})");
+  a.Feed(R"({"choices":[{"delta":{"tool_calls":[{"index":0,)"
+         R"("function":{"arguments":"\"zen\"}"}}]}}]})");
+
+  json got = json::parse(a.Canonical());
+  ASSERT_TRUE(got.contains("tool_calls"));
+  ASSERT_EQ(got["tool_calls"].size(), 1u);
+  EXPECT_EQ(got["tool_calls"][0]["id"], "call_1");
+  EXPECT_EQ(got["tool_calls"][0]["function"]["name"], "search");
+  // Arguments stay a STRING, as OpenAI sends and AgentNode expects.
+  EXPECT_EQ(got["tool_calls"][0]["function"]["arguments"], R"({"q":"zen"})");
+}
+
+TEST(StreamAccumulatorTest, MergesParallelToolCallsByIndex) {
+  StreamAccumulator a;
+  a.Feed(R"({"choices":[{"delta":{"tool_calls":[)"
+         R"({"index":0,"id":"c0","function":{"name":"a","arguments":"{}"}},)"
+         R"({"index":1,"id":"c1","function":{"name":"b","arguments":"{"}}]}}]})");
+  a.Feed(R"({"choices":[{"delta":{"tool_calls":[)"
+         R"({"index":1,"function":{"arguments":"}"}}]}}]})");
+
+  json got = json::parse(a.Canonical());
+  ASSERT_EQ(got["tool_calls"].size(), 2u);
+  EXPECT_EQ(got["tool_calls"][0]["id"], "c0");
+  EXPECT_EQ(got["tool_calls"][1]["id"], "c1");
+  EXPECT_EQ(got["tool_calls"][1]["function"]["arguments"], "{}");
+}
+
+TEST(StreamAccumulatorTest, HandlesTextAndToolCallsInOneStream) {
+  StreamAccumulator a;
+  EXPECT_EQ(a.Feed(TextFrame("thinking")), "thinking");
+  a.Feed(R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c",)"
+         R"("function":{"name":"n","arguments":"{}"}}]}}]})");
+
+  json got = json::parse(a.Canonical());
+  EXPECT_EQ(got["content"][0]["text"], "thinking");
+  EXPECT_EQ(got["tool_calls"][0]["id"], "c");
+}
+
+TEST(StreamAccumulatorTest, IgnoresRoleOnlyAndEmptyDeltaFrames) {
+  StreamAccumulator a;
+  EXPECT_EQ(a.Feed(R"({"choices":[{"delta":{"role":"assistant"}}]})"), "");
+  EXPECT_EQ(a.Feed(R"({"choices":[{"delta":{}}]})"), "");
+  EXPECT_EQ(a.Feed(R"({"choices":[{"delta":{"content":null}}]})"), "");
+  EXPECT_EQ(json::parse(a.Canonical())["content"][0]["text"], "");
+}
+
+TEST(StreamAccumulatorTest, IgnoresMalformedFramesRatherThanThrowing) {
+  // A provider emitting a stray keep-alive or truncated frame must not abort
+  // a half-finished answer.
+  StreamAccumulator a;
+  EXPECT_EQ(a.Feed("not json"), "");
+  EXPECT_EQ(a.Feed(R"({"no_choices":true})"), "");
+  EXPECT_EQ(a.Feed(TextFrame("ok")), "ok");
+  EXPECT_EQ(json::parse(a.Canonical())["content"][0]["text"], "ok");
+}
+
+}  // namespace
+}  // namespace agentflow::openai
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bazel test //tests/unit/inference/openai:stream_accumulator_test`
+Expected: FAIL — `stream_accumulator.h` does not exist.
+
+- [ ] **Step 3: Write the header**
+
+Create `agentflow/inference/openai/stream_accumulator.h`:
+
+```cpp
+// agentflow/inference/openai/stream_accumulator.h
+#ifndef AGENTFLOW_INFERENCE_OPENAI_STREAM_ACCUMULATOR_H_
+#define AGENTFLOW_INFERENCE_OPENAI_STREAM_ACCUMULATOR_H_
+
+#include <map>
+#include <string>
+#include <string_view>
+
+namespace agentflow::openai {
+
+// Accumulates OpenAI streaming frames into one canonical assistant message.
+//
+// Tool-call arguments arrive fragmented: for a given `index`, the first frame
+// carries `id` and `function.name`, and every later frame carries only another
+// piece of `function.arguments` to concatenate. Getting this wrong produces
+// truncated or interleaved JSON arguments, so it is covered exhaustively by
+// stream_accumulator_test.
+//
+// Malformed frames are ignored rather than treated as errors — a stray
+// keep-alive must not abort a half-finished answer.
+class StreamAccumulator {
+ public:
+  // Feeds one SSE data payload (already stripped; never "[DONE]").
+  // Returns the text delta this frame contained, or "" if it carried none.
+  std::string Feed(std::string_view frame_json);
+
+  // The canonical assistant JSON for everything fed so far.
+  std::string Canonical() const;
+
+ private:
+  struct PartialCall {
+    std::string id;
+    std::string name;
+    std::string arguments;
+  };
+
+  std::string text_;
+  // Keyed by the stream's `index` so parallel calls stay separate and ordered.
+  std::map<int, PartialCall> calls_;
+};
+
+}  // namespace agentflow::openai
+#endif  // AGENTFLOW_INFERENCE_OPENAI_STREAM_ACCUMULATOR_H_
+```
+
+- [ ] **Step 4: Write the implementation**
+
+Create `agentflow/inference/openai/stream_accumulator.cc`:
+
+```cpp
+// agentflow/inference/openai/stream_accumulator.cc
+#include "agentflow/inference/openai/stream_accumulator.h"
+
+#include <nlohmann/json.hpp>
+
+namespace agentflow::openai {
+namespace {
+using json = nlohmann::json;
+}  // namespace
+
+std::string StreamAccumulator::Feed(std::string_view frame_json) {
+  json f = json::parse(frame_json, nullptr, /*allow_exceptions=*/false);
+  if (f.is_discarded()) return {};
+  if (!f.contains("choices") || !f["choices"].is_array() ||
+      f["choices"].empty()) {
+    return {};
+  }
+  const json& choice = f["choices"][0];
+  if (!choice.contains("delta") || !choice["delta"].is_object()) return {};
+  const json& delta = choice["delta"];
+
+  std::string text_delta;
+  if (delta.contains("content") && delta["content"].is_string()) {
+    text_delta = delta["content"].get<std::string>();
+    text_.append(text_delta);
+  }
+
+  if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
+    for (const auto& tc : delta["tool_calls"]) {
+      const int index = tc.value("index", 0);
+      PartialCall& call = calls_[index];
+      // id and name appear only in this index's FIRST frame; never overwrite
+      // them with a later frame's absent value.
+      if (tc.contains("id") && tc["id"].is_string()) {
+        call.id = tc["id"].get<std::string>();
+      }
+      if (tc.contains("function") && tc["function"].is_object()) {
+        const json& fn = tc["function"];
+        if (fn.contains("name") && fn["name"].is_string()) {
+          call.name = fn["name"].get<std::string>();
+        }
+        if (fn.contains("arguments") && fn["arguments"].is_string()) {
+          // Fragment — append, never replace.
+          call.arguments.append(fn["arguments"].get<std::string>());
+        }
+      }
+    }
+  }
+  return text_delta;
+}
+
+std::string StreamAccumulator::Canonical() const {
+  json out = {{"role", "assistant"}};
+  out["content"] = json::array({{{"type", "text"}, {"text", text_}}});
+
+  if (!calls_.empty()) {
+    json arr = json::array();
+    for (const auto& [index, call] : calls_) {  // std::map → ordered by index
+      arr.push_back({{"id", call.id},
+                     {"type", "function"},
+                     {"function",
+                      {{"name", call.name}, {"arguments", call.arguments}}}});
+    }
+    out["tool_calls"] = std::move(arr);
+  }
+  return out.dump();
+}
+
+}  // namespace agentflow::openai
+```
+
+- [ ] **Step 5: Add the Bazel targets**
+
+Append to `agentflow/inference/openai/BUILD.bazel`:
+
+```python
+cc_library(
+    name = "stream_accumulator",
+    srcs = ["stream_accumulator.cc"],
+    hdrs = ["stream_accumulator.h"],
+    deps = ["@nlohmann_json//:json"],
+)
+```
+
+Append to `tests/unit/inference/openai/BUILD.bazel`:
+
+```python
+cc_test(
+    name = "stream_accumulator_test",
+    size = "small",
+    srcs = ["stream_accumulator_test.cc"],
+    deps = [
+        "//agentflow/inference/openai:stream_accumulator",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `bazel test //tests/unit/inference/openai:stream_accumulator_test --test_output=all`
+Expected: PASS — 6 tests.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add agentflow/inference/openai/ tests/unit/inference/openai/
+git commit -m "feat(openai): streaming delta accumulator
+
+Rejoins tool-call arguments fragmented across SSE frames, keyed by index so
+parallel calls stay separate. Malformed frames are ignored rather than
+aborting a half-finished answer."
+```
+
+---
