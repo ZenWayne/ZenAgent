@@ -28,6 +28,21 @@ cc_test(
 )
 
 cc_test(
+    name = "litert_lm_chat_backend_test",
+    size = "small",
+    srcs = ["litert_lm_chat_backend_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference",
+        "//agentflow/inference:canonical_message",
+        "//agentflow/inference:chat_backend",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "canonical_message_test",
     size = "small",
     srcs = ["canonical_message_test.cc"],
