@@ -4,6 +4,7 @@
 
 #include <asio/io_context.hpp>
 
+#include "agentflow/core/errors.h"
 #include "agentflow/workflow/delegate_tool.h"
 #include "agentflow/workflow/sub_agent_context.h"
 #include "agentflow/workflow/sub_agent_runtime.h"
@@ -11,12 +12,34 @@
 
 namespace agentflow::workflow {
 
+namespace {
+
+// Resolves an agent's inference backend. An empty ModelSpec.backend selects
+// the build spec's default; a name must be present in the backends map.
+//
+// An unknown name throws rather than falling back to the default: silently
+// demoting an agent from its intended cloud model to a local one would change
+// answer quality invisibly. Design spec §5.
+std::shared_ptr<::agentflow::IChatBackend> ResolveBackend(
+    const AgentNodeBuildSpec& spec, const proto::WorkflowSpec::AgentDef& agent_def) {
+  const std::string& name = agent_def.model().backend();
+  if (name.empty()) return spec.backend;
+  auto it = spec.backends.find(name);
+  if (it == spec.backends.end()) {
+    throw AgentflowError("agent '" + spec.agent_name +
+                          "' requests backend '" + name +
+                          "' which the host did not register");
+  }
+  return it->second;
+}
+
+}  // namespace
+
 BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   BuiltAgentNode out;
   AgentNodeConfig& cfg = out.cfg;
-  // ModelSpec.backend (per-agent named-backend selection) does not exist in
-  // the proto yet — Task 7 adds it and per-agent resolution against
-  // spec.backends. Until then every agent uses the spec-wide default.
+  // Default backend, used if the agent isn't found below (caller checks cfg
+  // validity in that case) or if the agent's ModelSpec.backend is empty.
   cfg.backend = spec.backend;
   cfg.io_ctx = spec.io_ctx;
   cfg.tool_registry = spec.host_tools;
@@ -31,6 +54,10 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   auto it = agents.find(spec.agent_name);
   if (it == agents.end()) return out;  // caller checks cfg validity
   const auto& agent_def = it->second;
+
+  // Per-agent backend selection (Task 7): an unknown logical name throws
+  // rather than silently falling back to cfg.backend set above.
+  cfg.backend = ResolveBackend(spec, agent_def);
 
   cfg.system_prompt = agent_def.system_prompt();
   cfg.constrained_tool_calls = agent_def.model().constrained_tool_calls();

@@ -91,6 +91,23 @@ cc_test(
 )
 
 cc_test(
+    name = "backend_selection_test",
+    size = "small",
+    srcs = ["backend_selection_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference:chat_backend",
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow_loader",
+        "//agentflow/workflow:workflow_runner",
+        "//tests/support:fake_chat_backend",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "workflow_registry_test",
     size = "small",
     srcs = ["workflow_registry_test.cc"],

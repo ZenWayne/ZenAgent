@@ -319,10 +319,11 @@ a real leak surface on Android.
   wherever it belongs on that platform (an environment variable on desktop,
   `EncryptedSharedPreferences` on Android).
 - A `ModelSpec.backend` naming a logical backend absent from the map is a
-  **load-time error**, reported by `workflow_loader` alongside its other
-  validation failures. It is not silently resolved to the default backend:
-  falling back from an intended cloud model to a local one would change
-  answer quality invisibly.
+  **build-time error**: `BuildAgentNode` throws `AgentflowError`. Validation
+  cannot live in `workflow_loader`, which parses JSON into the proto and has
+  no access to the host's backends map. It is not silently resolved to the
+  default backend: falling back from an intended cloud model to a local one
+  would change answer quality invisibly.
 
 Accepted trade-off: a workflow JSON alone does not reveal which provider an
 agent runs against — only the logical name. Resolution lives in host code.

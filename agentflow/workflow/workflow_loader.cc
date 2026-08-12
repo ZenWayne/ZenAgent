@@ -147,6 +147,13 @@ absl::Status ParseAgentDef(const std::string& agent_name,
         t != it->end() && t->is_boolean()) {
       m->set_constrained_tool_calls(t->get<bool>());
     }
+    if (auto t = it->find("backend"); t != it->end()) {
+      if (!t->is_string()) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "agent '", agent_name, "': model.backend must be a string"));
+      }
+      m->set_backend(t->get<std::string>());
+    }
   }
   if (auto it = j.find("tools"); it != j.end()) {
     if (!it->is_array()) {

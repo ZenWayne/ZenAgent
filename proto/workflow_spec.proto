@@ -28,6 +28,12 @@ message WorkflowSpec {
   message ModelSpec {
     int32 max_output_tokens     = 1;
     bool  constrained_tool_calls = 2;
+
+    // Logical name of a host-registered inference backend, e.g. "cloud-big".
+    // Empty selects the default backend. Deliberately NOT a base URL, model
+    // id, or credential — those live in host code so they never reach a
+    // serialized spec, a checkpoint, or a trace. See design spec §5.
+    string backend               = 3;
   }
 
   message DelegateSpec {
