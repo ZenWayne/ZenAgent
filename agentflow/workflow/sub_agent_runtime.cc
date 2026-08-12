@@ -1,6 +1,5 @@
 #include "agentflow/workflow/sub_agent_runtime.h"
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <random>
@@ -9,13 +8,11 @@
 #include <utility>
 #include <vector>
 
-#include <asio/co_spawn.hpp>
-#include <asio/io_context.hpp>
-#include <asio/use_future.hpp>
+#include <asio/as_tuple.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include "agentflow/core/cancel.h"
-#include "agentflow/inference/litert_lm_conversation.h"
-#include "agentflow/inference/litert_lm_engine.h"
+#include "agentflow/inference/chat_backend.h"
 #include "agentflow/workflow/json_path.h"
 #include "agentflow/workflow/template_engine.h"
 #include "workflow_spec.pb.h"
@@ -38,22 +35,6 @@ const proto::WorkflowSpec::AgentDef* FindAgent(const Workflow& wf,
   return &it->second;
 }
 
-// Pulls the text out of an assistant message-JSON envelope:
-//   {"role":"assistant","content":[{"type":"text","text":"..."}, ...]}
-std::string ExtractTextDelta(const nlohmann::ordered_json& msg) {
-  if (!msg.contains("content")) return {};
-  const auto& content = msg["content"];
-  if (!content.is_array()) return {};
-  std::string out;
-  for (const auto& item : content) {
-    if (item.value("type", "") == "text" && item.contains("text") &&
-        item["text"].is_string()) {
-      out += item["text"].get<std::string>();
-    }
-  }
-  return out;
-}
-
 }  // namespace
 
 SubAgentRuntime::SubAgentRuntime(
@@ -66,73 +47,15 @@ SubAgentRuntime::SubAgentRuntime(
 
 SubAgentRuntime::ConversationFactory
 SubAgentRuntime::DefaultConversationFactory(
-    std::shared_ptr<::agentflow::LiteRtLmEngine> engine,
-    ::asio::io_context& io) {
-  return [engine = std::move(engine), &io](
-             LiteRtLmConversationOptions opts) -> SendFn {
-    const bool constrained = opts.constrained_tool_calls;
-    auto conv = LiteRtLmConversation::Create(engine, std::move(opts), io);
+    std::shared_ptr<::agentflow::IChatBackend> backend) {
+  return [backend = std::move(backend)](
+             ::agentflow::ChatConversationOptions opts) -> SendFn {
+    auto conv = backend->CreateConversation(std::move(opts));
     if (!conv) return SendFn{};
-    // The conversation owns history server-side; capture it so successive
-    // SendFn calls form a multi-turn exchange.
-    return [conv, constrained,
-            registered = std::make_shared<std::atomic_bool>(false)](
-               const std::string& message_json, const TokenSink& on_token,
-               const ::agentflow::CancelToken& cancel)
+    return [conv](const std::string& message_json, const TokenSink& on_token,
+                   const ::agentflow::CancelToken& cancel)
                -> asio::awaitable<absl::StatusOr<std::string>> {
-      // Register the in-flight cancel hook once: a cancel breaks the engine
-      // request (streaming or sync) mid-decode, not just at turn boundaries.
-      if (!registered->exchange(true)) {
-        cancel.OnCancel([conv]() { conv->Cancel(); });
-      }
-      // Non-streaming path: constrained conversations have no streaming C
-      // bridge, and a missing sink means nobody wants deltas. SendMessageSync
-      // blocks the io thread for the turn (same as the constrained AgentNode
-      // path).
-      if (constrained || !on_token) {
-        co_return conv->SendMessageSync(message_json);
-      }
-      // Streaming path: drive the async stream, forward each text delta, and
-      // rebuild ONE canonical response JSON (each chunk is a full message-JSON
-      // envelope; raw concatenation would be invalid). Mirrors AgentNode.
-      conv->SendMessage(message_json);
-      std::string acc_text;
-      nlohmann::ordered_json tool_call_msg;
-      bool saw_tool_calls = false;
-      for (;;) {
-        std::string chunk;
-        try {
-          chunk = co_await conv->NextTokenAsync();
-        } catch (const std::exception&) {
-          co_return absl::InternalError("sub-agent streaming send failed");
-        }
-        if (chunk.empty()) break;  // end of turn
-        auto cj = nlohmann::ordered_json::parse(chunk, nullptr, false);
-        if (cj.is_discarded()) {
-          on_token(chunk);
-          acc_text += chunk;
-          continue;
-        }
-        if (cj.contains("tool_calls") && cj["tool_calls"].is_array() &&
-            !cj["tool_calls"].empty()) {
-          saw_tool_calls = true;
-          tool_call_msg = std::move(cj);
-          continue;
-        }
-        std::string delta = ExtractTextDelta(cj);
-        if (!delta.empty()) {
-          on_token(delta);
-          acc_text += delta;
-        }
-      }
-      if (saw_tool_calls) {
-        co_return tool_call_msg.dump();
-      }
-      nlohmann::ordered_json msg = {
-          {"role", "assistant"},
-          {"content", nlohmann::ordered_json::array(
-                          {{{"type", "text"}, {"text", acc_text}}})}};
-      co_return msg.dump();
+      co_return co_await conv->SendAsync(message_json, on_token, cancel);
     };
   };
 }
@@ -203,10 +126,10 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
       std::span<const std::string>(child_tools));
   if (tools_json.empty()) tools_json = "[]";
 
-  // Build the LiteRtLmConversation. system_message_json must be the full
+  // Build the conversation options. system_message_json must be the full
   // {"role":"system","content":"..."} JSON object — that's what the engine
   // feeds the chat template.
-  LiteRtLmConversationOptions opts;
+  ::agentflow::ChatConversationOptions opts;
   if (!system_text.empty()) {
     nlohmann::ordered_json sys_msg = {{"role", "system"},
                                         {"content", system_text}};
@@ -233,8 +156,15 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
   TokenSink on_token;
   if (ctx.token_channel != nullptr) {
     auto* ch = ctx.token_channel;
-    on_token = [ch](std::string_view delta) {
-      ch->try_send(asio::error_code{}, std::string(delta));
+    on_token = [ch](std::string_view delta) -> asio::awaitable<void> {
+      // Back-pressured: a slow consumer slows the sub-agent's decode loop
+      // rather than losing tokens. as_tuple so a closed channel yields an
+      // error instead of throwing.
+      auto [ec] = co_await ch->async_send(asio::error_code{},
+                                           std::string(delta),
+                                           asio::as_tuple(asio::use_awaitable));
+      (void)ec;
+      co_return;
     };
   }
 
@@ -244,7 +174,7 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
                        {{{"type", "text"}, {"text", std::string(goal)}}})}};
 
   // Multi-turn tool dispatch. The sub-agent's tool slice is host_tools_ +
-  // child.tools[]. The LiteRtLmConversation carries history server-side.
+  // child.tools[]. The backend's Conversation carries history server-side.
   std::string message_json = user_msg.dump();
   std::string raw_response;
   constexpr int kSubAgentMaxIter = 8;

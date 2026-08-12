@@ -100,6 +100,12 @@ asio::awaitable<State> AgentNode::Run(
 
     // One path for both streaming and non-streaming: the backend decides
     // whether deltas are available and reports them through the sink.
+    //
+    // NOTE: a constrained conversation produces no deltas — the backend never
+    // invokes this sink while constrained_tool_calls is set, so no token or
+    // trace events are emitted for that combination. Deliberate: constrained
+    // decoding has no real increments, and emitting the whole response as one
+    // "delta" would misrepresent it to a streaming UI.
     TokenSink sink;
     if (cfg_.stream_tokens) {
       sink = [this, &emit](std::string_view delta)
@@ -144,6 +150,10 @@ asio::awaitable<State> AgentNode::Run(
       // message back with each result.
       json tool_content = json::array();
       for (const auto& tc : resp["tool_calls"]) {
+        // json::value() THROWS type_error.306 on a non-object, and the
+        // try/catch above covers only the outer parse. Model output is
+        // untrusted — skip anything that is not an object.
+        if (!tc.is_object()) continue;
         std::string name = tc.value("name", tc.value("function",
                                                       json::object())
                                                 .value("name", ""));

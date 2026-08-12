@@ -65,28 +65,23 @@ AgentNodeConfig BaseConfig(std::shared_ptr<IChatBackend> backend,
 //
 // AgentNode::Run() keeps its Conversation alive by registering
 // cancel.OnCancel() on the CALLER's CancelSource (agent_node.cc's
-// "Cooperative cancellation" hook) — that is the only strong reference left
-// once Run() itself returns. A plain stack-local CancelSource here would be
-// destroyed the instant RunNode() returns, dropping that reference before a
-// test gets to inspect the conversation via
+// "Cooperative cancellation" hook), but that is no longer the only reference:
+// FakeChatBackend holds its last conversation STRONGLY (see
+// tests/support/fake_chat_backend.h), so a test can inspect it via
 // FakeChatBackend::last_conversation() (see
-// ToolCallIsDispatchedAndItsIdEchoedBack below, which does exactly that).
-// Keep every CancelSource alive for the process's lifetime instead — this is
-// not a real leak, since it stays reachable through kKeepAlive.
+// ToolCallIsDispatchedAndItsIdEchoedBack below) even after RunNode's local
+// CancelSource is destroyed.
 State RunNode(AgentNodeConfig cfg, const std::string& query,
                asio::io_context& io, EventCapture& cap) {
-  static std::vector<std::shared_ptr<CancelSource>> kKeepAlive;
-
   auto node = std::make_unique<AgentNode>(std::move(cfg));
   test::TestState raw;
   raw.set_user_query(query);
 
-  auto cancel = std::make_shared<CancelSource>();
-  kKeepAlive.push_back(cancel);
+  CancelSource cancel;
   auto fut = asio::co_spawn(io,
       [&]() -> asio::awaitable<State> {
         State state = State::From(std::move(raw));
-        co_return co_await node->Run(std::move(state), cancel->Token(),
+        co_return co_await node->Run(std::move(state), cancel.Token(),
                                       cap.emitter);
       },
       asio::use_future);
@@ -199,6 +194,24 @@ TEST(AgentNodeTest, StreamedDeltasReachTheEventEmitter) {
   EventCapture cap;
   RunNode(BaseConfig(backend, io), "hi", io, cap);
   EXPECT_EQ(cap.tokens(), (std::vector<std::string>{"a", "b"}));
+}
+
+TEST(AgentNodeTest, NonObjectToolCallEntryIsSkippedWithoutThrowing) {
+  asio::io_context io;
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","tool_calls":[42,{"id":"call_1",)"
+          R"("function":{"name":"search","arguments":"{}"}}]})",
+          R"({"role":"assistant","content":[{"type":"text","text":"done"}]})"});
+
+  auto cfg = BaseConfig(backend, io);
+  cfg.tool_registry = RegistryWith("search", "OK");
+  EventCapture cap;
+  State out = RunNode(std::move(cfg), "go", io, cap);
+
+  // The bare 42 is skipped; the real call still dispatches and the run
+  // completes instead of dying on an uncaught type_error.306.
+  EXPECT_EQ(out.As<test::TestState>().assistant_reply(), "done");
 }
 
 }  // namespace

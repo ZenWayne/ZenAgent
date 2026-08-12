@@ -1,17 +1,18 @@
 #ifndef AGENTFLOW_WORKFLOW_WORKFLOW_RUNNER_H_
 #define AGENTFLOW_WORKFLOW_WORKFLOW_RUNNER_H_
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "agentflow/core/event.h"
 #include "agentflow/core/token_channel.h"
+#include "agentflow/inference/chat_backend.h"
 #include "agentflow/nodes/agent_node.h"
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/workflow.h"
 
-namespace agentflow { class LiteRtLmEngine; }
 namespace asio { class io_context; }
 
 namespace agentflow::workflow {
@@ -21,7 +22,16 @@ struct AgentNodeBuildSpec {
   std::shared_ptr<Workflow> workflow;
   std::string agent_name;                       // which agent in the spec
   std::shared_ptr<ToolRegistry> host_tools;     // shared with caller
-  std::shared_ptr<::agentflow::LiteRtLmEngine> engine;
+
+  // Default inference backend, used by any agent whose ModelSpec.backend is
+  // empty.
+  std::shared_ptr<::agentflow::IChatBackend> backend;
+
+  // Named backends the host registered. An agent selects one by logical name
+  // via ModelSpec.backend. Credentials live in the host-constructed instance,
+  // never in the spec.
+  std::map<std::string, std::shared_ptr<::agentflow::IChatBackend>> backends;
+
   ::asio::io_context* io_ctx = nullptr;
   EventEmitter* emit = nullptr;                  // null → NullEventEmitter for sub-agent traces
   std::string input_field  = "user_query";

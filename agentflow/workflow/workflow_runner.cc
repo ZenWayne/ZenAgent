@@ -4,8 +4,6 @@
 
 #include <asio/io_context.hpp>
 
-#include "agentflow/inference/litert_lm_chat_backend.h"
-#include "agentflow/inference/litert_lm_engine.h"
 #include "agentflow/workflow/delegate_tool.h"
 #include "agentflow/workflow/sub_agent_context.h"
 #include "agentflow/workflow/sub_agent_runtime.h"
@@ -16,12 +14,10 @@ namespace agentflow::workflow {
 BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   BuiltAgentNode out;
   AgentNodeConfig& cfg = out.cfg;
-  // TODO(Task 6): AgentNodeBuildSpec.engine is replaced by .backend /
-  // .backends there; this wraps the still-concrete engine in the seam just
-  // enough to keep AgentNodeConfig.backend populated in the interim.
-  if (spec.engine && spec.io_ctx) {
-    cfg.backend = LiteRtLmChatBackend::Create(spec.engine, *spec.io_ctx);
-  }
+  // ModelSpec.backend (per-agent named-backend selection) does not exist in
+  // the proto yet — Task 7 adds it and per-agent resolution against
+  // spec.backends. Until then every agent uses the spec-wide default.
+  cfg.backend = spec.backend;
   cfg.io_ctx = spec.io_ctx;
   cfg.tool_registry = spec.host_tools;
   cfg.input_field = spec.input_field;
@@ -49,14 +45,14 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   for (const auto& t : agent_def.tools()) cfg.tool_names.push_back(t);
 
   // Auto-wire the delegate tool if this agent delegates.
-  if (agent_def.has_delegates() && spec.engine && spec.io_ctx) {
+  if (agent_def.has_delegates() && cfg.backend && spec.io_ctx) {
     EventEmitter* emit = spec.emit;
     static NullEventEmitter kNullEmit;
     if (!emit) emit = &kNullEmit;
 
     auto runtime = std::make_shared<SubAgentRuntime>(
         spec.workflow, *spec.host_tools, *emit,
-        SubAgentRuntime::DefaultConversationFactory(spec.engine, *spec.io_ctx));
+        SubAgentRuntime::DefaultConversationFactory(cfg.backend));
 
     std::vector<std::string> allowed;
     allowed.reserve(agent_def.delegates().agents_size());

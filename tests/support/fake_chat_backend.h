@@ -82,15 +82,19 @@ class FakeChatBackend : public IChatBackend {
   // Options the node passed in — lets a test assert the system prompt and
   // tools JSON were built correctly.
   const ChatConversationOptions& last_options() const { return last_options_; }
+
+  // Held STRONGLY (not weak_ptr): the fake exists precisely so tests can
+  // observe the conversation after a run completes, and nothing else in a
+  // test necessarily keeps it alive.
   std::shared_ptr<FakeConversation> last_conversation() const {
-    return last_conversation_.lock();
+    return last_conversation_;
   }
 
  private:
   std::deque<std::string> responses_;
   std::vector<std::string> deltas_;
   ChatConversationOptions last_options_;
-  std::weak_ptr<FakeConversation> last_conversation_;
+  std::shared_ptr<FakeConversation> last_conversation_;
 };
 
 }  // namespace agentflow::testing

@@ -79,10 +79,11 @@ cc_test(
     size = "small",
     srcs = ["workflow_runner_test.cc"],
     deps = [
-        "//agentflow/inference",
+        "//agentflow/inference:chat_backend",
         "//agentflow/tools",
         "//agentflow/workflow:workflow_loader",
         "//agentflow/workflow:workflow_runner",
+        "//tests/support:fake_chat_backend",
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",

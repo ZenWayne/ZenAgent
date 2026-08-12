@@ -2,13 +2,15 @@
 #include "agentflow/nodes/llm_node.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <nlohmann/json.hpp>
 
+#include <absl/status/status.h>
+
 #include "agentflow/core/errors.h"
-#include "agentflow/inference/litert_lm_session.h"
-#include "c/engine.h"
+#include "agentflow/inference/canonical_message.h"
 
 namespace agentflow {
 
@@ -45,32 +47,8 @@ void WriteField(State& s, const std::string& f, const std::string& v) {
 
 LlmNode::LlmNode(LlmNodeConfig cfg) : cfg_(std::move(cfg)) {
   if (cfg_.id.empty()) throw AgentflowError("LlmNode: id required");
-  if (!cfg_.engine) throw AgentflowError("LlmNode: engine required");
+  if (!cfg_.backend) throw AgentflowError("LlmNode: backend required");
   if (!cfg_.io_ctx) throw AgentflowError("LlmNode: io_ctx required");
-}
-
-std::string LlmNode::BuildConversationJson(const State& state) const {
-  json msgs = json::array();
-  if (!cfg_.system_prompt.empty()) {
-    msgs.push_back({{"role", "system"}, {"content", cfg_.system_prompt}});
-  }
-  // (messages_field history append left as a follow-up; AgentNode no-ops the
-  // same way today — keep parity for now.)
-  msgs.push_back(
-      {{"role", "user"}, {"content", ReadField(state, cfg_.input_field)}});
-
-  json full;
-  full["messages"] = msgs;
-  full["max_tokens"] = cfg_.max_output_tokens;
-  full["stream"] = cfg_.stream_tokens;
-
-  // Publish tool schemas so the model can emit function-calling JSON. We do
-  // not dispatch the call here — that's the caller's job.
-  if (cfg_.tool_registry) {
-    auto tools_json = cfg_.tool_registry->ExportToolsJson(cfg_.tool_names);
-    full["tools"] = json::parse(tools_json);
-  }
-  return full.dump();
 }
 
 void LlmNode::WriteOutput(State& state, const std::string& text) const {
@@ -81,25 +59,50 @@ asio::awaitable<State> LlmNode::Run(State state, const CancelToken& cancel,
                                      EventEmitter& emit) {
   if (cancel.IsCancelled()) co_return std::move(state);
 
-  auto* raw_session = litert_lm_engine_create_session(
-      cfg_.engine->Get(), /*session_config=*/nullptr);
-  if (!raw_session) {
-    throw AgentflowError("LlmNode: failed to create LiteRT-LM session");
+  ChatConversationOptions opts;
+  if (!cfg_.system_prompt.empty()) {
+    // A BARE content array — the backend wraps it into {role:system,...}.
+    json sys = json::array({{{"type", "text"}, {"text", cfg_.system_prompt}}});
+    opts.system_message_json = sys.dump();
   }
-  LiteRtLmSession session(raw_session, *cfg_.io_ctx);
+  // Publish tool schemas so the model can emit function-calling JSON. LlmNode
+  // never dispatches a call — the raw reply is left for the next node.
+  if (cfg_.tool_registry) {
+    opts.tools_json = cfg_.tool_registry->ExportToolsJson(cfg_.tool_names);
+  }
+  opts.max_output_tokens = cfg_.max_output_tokens;
 
-  session.Start(BuildConversationJson(state));
+  auto conv = cfg_.backend->CreateConversation(std::move(opts));
+  if (!conv) {
+    throw AgentflowError("LlmNode: failed to create conversation on backend " +
+                          std::string(cfg_.backend->Describe()));
+  }
+  cancel.OnCancel([conv]() { conv->Cancel(); });
 
-  std::string accum;
-  while (true) {
-    if (cancel.IsCancelled()) break;
-    std::string tok = co_await session.NextTokenAsync();
-    if (tok.empty()) break;
-    accum += tok;
-    if (cfg_.stream_tokens) emit.EmitToken(Id(), tok);
+  TokenSink sink;
+  if (cfg_.stream_tokens) {
+    sink = [this, &emit](std::string_view delta) -> asio::awaitable<void> {
+      emit.EmitToken(Id(), delta);
+      co_return;
+    };
   }
 
-  WriteOutput(state, accum);
+  json user = {
+      {"role", "user"},
+      {"content", json::array({{{"type", "text"},
+                                {"text", ReadField(state, cfg_.input_field)}}})},
+  };
+  auto resp_or = co_await conv->SendAsync(user.dump(), sink, cancel);
+  if (!resp_or.ok()) {
+    if (absl::IsCancelled(resp_or.status())) co_return std::move(state);
+    throw AgentflowError("LlmNode: backend send failed: " +
+                          std::string(resp_or.status().message()));
+  }
+
+  // The raw reply may carry tool_calls; the next node interprets it. When it
+  // is plain text, write the extracted text rather than the JSON envelope.
+  std::string text = ExtractAssistantText(*resp_or);
+  WriteOutput(state, text.empty() ? *resp_or : text);
   co_return std::move(state);
 }
 

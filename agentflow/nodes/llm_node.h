@@ -14,14 +14,14 @@
 #include "agentflow/core/event.h"
 #include "agentflow/core/node.h"
 #include "agentflow/core/state.h"
-#include "agentflow/inference/litert_lm_engine.h"
+#include "agentflow/inference/chat_backend.h"
 #include "agentflow/tools/tool_registry.h"
-#include "c/engine.h"  // LiteRtLmSamplerParams
 
 namespace agentflow {
 
 // Configuration for a single-shot LLM call. The LlmNode runs ONE
-// LiteRtLmSession and writes the accumulated reply into `output_field`.
+// Conversation against `backend` and writes the extracted assistant text
+// into `output_field`.
 //
 // It MAY include tool schemas in the conversation prompt (so the model can
 // emit function-calling JSON), but it never dispatches a tool — the raw
@@ -29,12 +29,11 @@ namespace agentflow {
 // to interpret (AgentNode for ReAct, or a separate tool-dispatching node).
 struct LlmNodeConfig {
   std::string id;
-  std::shared_ptr<LiteRtLmEngine> engine;
+  std::shared_ptr<IChatBackend> backend;
   asio::io_context* io_ctx = nullptr;
 
   std::string system_prompt;
 
-  LiteRtLmSamplerParams sampler{};
   int max_output_tokens = 512;
   bool stream_tokens = true;
 
@@ -64,7 +63,6 @@ class LlmNode : public Node {
                               EventEmitter& emit) override;
 
  private:
-  std::string BuildConversationJson(const State& state) const;
   void WriteOutput(State& state, const std::string& text) const;
 
   LlmNodeConfig cfg_;

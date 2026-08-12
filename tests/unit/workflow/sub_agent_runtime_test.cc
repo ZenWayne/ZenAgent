@@ -43,7 +43,7 @@ nlohmann::ordered_json RunAsyncBlocking(SubAgentRuntime& rt,
 // Factory whose conversation must never be created — the gating checks
 // (depth/roster) return before RunSync reaches the LLM path.
 SubAgentRuntime::ConversationFactory NoLlmFactory() {
-  return [](LiteRtLmConversationOptions) -> SubAgentRuntime::SendFn {
+  return [](ChatConversationOptions) -> SubAgentRuntime::SendFn {
     ADD_FAILURE() << "conversation factory should not be invoked";
     return {};
   };
@@ -100,7 +100,7 @@ TEST(SubAgentRuntimeTest, InjectedConversationDrivesRun) {
   NullEventEmitter emit;
 
   SubAgentRuntime::ConversationFactory fake =
-      [](LiteRtLmConversationOptions) -> SubAgentRuntime::SendFn {
+      [](ChatConversationOptions) -> SubAgentRuntime::SendFn {
     return [](const std::string&, const SubAgentRuntime::TokenSink&,
               const CancelToken&)
                -> asio::awaitable<absl::StatusOr<std::string>> {
@@ -126,7 +126,7 @@ TEST(SubAgentRuntimeTest, ConversationCreationFailureIsEngineError) {
   NullEventEmitter emit;
 
   SubAgentRuntime::ConversationFactory broken =
-      [](LiteRtLmConversationOptions) -> SubAgentRuntime::SendFn {
+      [](ChatConversationOptions) -> SubAgentRuntime::SendFn {
     return {};
   };
 
@@ -148,13 +148,13 @@ TEST(SubAgentRuntimeTest, StreamsDeltasToChannel) {
   NullEventEmitter emit;
 
   SubAgentRuntime::ConversationFactory streaming_fake =
-      [](LiteRtLmConversationOptions) -> SubAgentRuntime::SendFn {
+      [](ChatConversationOptions) -> SubAgentRuntime::SendFn {
     return [](const std::string&, const SubAgentRuntime::TokenSink& on_token,
               const CancelToken&)
                -> asio::awaitable<absl::StatusOr<std::string>> {
       if (on_token) {
-        on_token("Hel");
-        on_token("lo");
+        co_await on_token("Hel");
+        co_await on_token("lo");
       }
       co_return std::string(
           R"({"role":"assistant",)"
