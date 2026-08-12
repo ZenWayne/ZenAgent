@@ -21,8 +21,15 @@ cc_library(
     ],
     deps = [
         "//agentflow/core",
+        # NOTE: llm_node.cc still needs the full //agentflow/inference target
+        # (litert_lm_engine.h, litert_lm_session.h, c/engine.h) until Task 6
+        # migrates it onto IChatBackend, so it stays alongside the two seam
+        # targets agent_node.cc now needs directly (layering_check).
         "//agentflow/inference",
+        "//agentflow/inference:canonical_message",
+        "//agentflow/inference:chat_backend",
         "//agentflow/tools",
+        "@abseil-cpp//absl/status",
         "@asio",
         "@nlohmann_json//:json",
     ],

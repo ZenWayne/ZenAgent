@@ -3,20 +3,21 @@ load("@rules_cc//cc:defs.bzl", "cc_test")
 
 cc_test(
     name = "agent_node_test",
-    size = "large",
+    size = "small",
     srcs = ["agent_node_test.cc"],
     deps = [
         "//agentflow/core",
+        "//agentflow/inference:chat_backend",
         "//agentflow/nodes",
         "//agentflow/observability",
         "//agentflow/tools",
         "//proto:agentflow_proto",
+        "//tests/support:fake_chat_backend",
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
         "@nlohmann_json//:json",
     ],
-    tags = ["manual"],  # requires MODEL_PATH env
 )
 
 cc_test(
