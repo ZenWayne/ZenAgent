@@ -1986,6 +1986,73 @@ In `agentflow/workflow/workflow_runner.cc`:
 cannot be written until Task 7 adds it. The `backends` map is declared here but
 stays unread until then.
 
+- [ ] **Step 5b: Guard the tool_calls traversal in `AgentNode`**
+
+Carried over from Task 5's review, upgraded to must-fix by human ruling.
+`agent_node.cc` iterates `resp["tool_calls"]` calling `tc.value(...)` with no
+`is_object()` guard, and the surrounding `try`/`catch` wraps only the outer
+`json::parse`, not this loop. `json::value()` throws `type_error.306` on a
+non-object. Today the array comes from the on-device engine; from Task 12 on it
+comes from a remote provider, so this reads untrusted data.
+
+In the tool-dispatch loop in `agentflow/nodes/agent_node.cc`, make this the
+first statement of the `for (const auto& tc : resp["tool_calls"])` body:
+
+```cpp
+        // json::value() THROWS type_error.306 on a non-object, and the
+        // try/catch above covers only the outer parse. Model output is
+        // untrusted — skip anything that is not an object.
+        if (!tc.is_object()) continue;
+```
+
+Add a case to `tests/unit/nodes/agent_node_test.cc` proving it. Model the setup
+on `ToolCallIsDispatchedAndItsIdEchoedBack`, but have turn 1 return a
+`tool_calls` array whose first element is a bare scalar:
+
+```cpp
+TEST(AgentNodeTest, NonObjectToolCallEntryIsSkippedWithoutThrowing) {
+  asio::io_context io;
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","tool_calls":[42,{"id":"call_1",)"
+          R"("function":{"name":"search","arguments":"{}"}}]})",
+          R"({"role":"assistant","content":[{"type":"text","text":"done"}]})"});
+
+  auto cfg = BaseConfig(backend, io);
+  cfg.tool_registry = RegistryWith("search", "OK");
+  EventCapture cap;
+  State out = RunNode(std::move(cfg), "go", io, cap);
+
+  // The bare 42 is skipped; the real call still dispatches and the run
+  // completes instead of dying on an uncaught type_error.306.
+  EXPECT_EQ(out.As<test::TestState>().assistant_reply(), "done");
+}
+```
+
+- [ ] **Step 5c: Record the constrained-mode observability change**
+
+Also carried over from Task 5's review. Collapsing `AgentNode`'s two branches
+dropped the old behaviour where `stream_tokens && constrained_tool_calls`
+emitted the whole response as a single `EmitToken` "for trace observability":
+the sink is now created whenever `stream_tokens` is set, but
+`LiteRtLmChatConversation::SendAsync` never invokes it while `constrained_` is
+true, so that combination emits nothing.
+
+**Human ruling: accept this, do not restore the old emit.** Constrained
+decoding has no real token increments, and emitting one large blob through a
+per-delta channel misrepresents it to a UI. Record it rather than fix it — add
+this comment where the sink is built in `agent_node.cc`:
+
+```cpp
+    // NOTE: a constrained conversation produces no deltas — the backend never
+    // invokes this sink while constrained_tool_calls is set, so no token or
+    // trace events are emitted for that combination. Deliberate: constrained
+    // decoding has no real increments, and emitting the whole response as one
+    // "delta" would misrepresent it to a streaming UI.
+```
+
+Task 13 adds the matching line to README's known limitations.
+
 - [ ] **Step 6: Update Bazel deps**
 
 In `agentflow/workflow/BUILD.bazel`, replace `"//agentflow/inference"` in the
@@ -5230,7 +5297,9 @@ GLM, MiniMax, OpenRouter, and local Ollama / vLLM / LiteLLM gateways.
 
 Known limitations: one connection per request (no pooling); no HTTP/2; a remote
 backend cannot honour `constrained_tool_calls` and reports that through
-`last_warning()`.
+`last_warning()`. An agent running with `constrained_tool_calls` emits no token
+or trace events even when `stream_tokens` is set — constrained decoding has no
+real increments, so there is nothing to stream.
 ````
 
 - [ ] **Step 6: Verify the example builds and the suite is green**
