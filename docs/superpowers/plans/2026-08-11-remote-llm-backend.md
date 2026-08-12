@@ -1644,15 +1644,18 @@ with:
 
 `--features=layering_check` rejects an include whose target is not in `deps`.
 
-In `agentflow/nodes/BUILD.bazel`, in the `nodes` target replace
-`"//agentflow/inference"` with:
+In `agentflow/nodes/BUILD.bazel`, in the `nodes` target **add** these
+alongside the existing deps:
 
 ```python
         "//agentflow/inference:canonical_message",
         "//agentflow/inference:chat_backend",
+        "@abseil-cpp//absl/status",
 ```
 
-and add `"@abseil-cpp//absl/status"`.
+**Keep `"//agentflow/inference"` for now.** `llm_node.cc` still includes the
+LiteRT headers and does not migrate until Task 6; removing the full target
+here breaks the build. Task 6 Step 6 is what finally drops it.
 
 In `tests/unit/nodes/BUILD.bazel`, for `agent_node_test`: **delete
 `tags = ["manual"]`**, change `size = "large"` to `size = "small"`, and add:
@@ -1988,6 +1991,13 @@ stays unread until then.
 In `agentflow/workflow/BUILD.bazel`, replace `"//agentflow/inference"` in the
 `workflow` target's `deps` with `"//agentflow/inference:chat_backend"`.
 `layering_check` will flag anything still reaching for LiteRT headers.
+
+In `agentflow/nodes/BUILD.bazel`, **now** drop `"//agentflow/inference"` from
+the `nodes` target. Task 5 deliberately left it in place because `llm_node.cc`
+still included the LiteRT headers; Step 3 of this task removed those includes,
+so the full target is finally unnecessary. If the build then fails, something
+under `agentflow/nodes/` still reaches for a LiteRT header — fix that include
+rather than restoring the dep.
 
 In `tests/unit/nodes/BUILD.bazel`, add to `llm_node_test`'s deps:
 
