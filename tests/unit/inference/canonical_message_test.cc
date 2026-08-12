@@ -25,6 +25,18 @@ TEST(ExtractAssistantTextTest, IgnoresNonTextItemsAndMissingContent) {
   EXPECT_EQ(ExtractAssistantText("not json at all"), "");
 }
 
+TEST(ExtractAssistantTextTest, SkipsNonObjectContentItemsWithoutThrowing) {
+  // Untrusted model output may put scalars in the content array.
+  EXPECT_EQ(ExtractAssistantText(
+                R"({"role":"assistant","content":[42,{"type":"text","text":"ok"}]})"),
+            "ok");
+  EXPECT_EQ(ExtractAssistantText(
+                R"({"role":"assistant","content":[null,"bare",[1,2],)"
+                R"({"type":"text","text":"good"}]})"),
+            "good");
+  EXPECT_EQ(ExtractAssistantText(R"({"role":"assistant","content":[7]})"), "");
+}
+
 TEST(LiteRtStreamAssemblerTest, AccumulatesTextEnvelopesIntoCanonical) {
   LiteRtStreamAssembler a;
   a.Feed(R"({"role":"assistant","content":[{"type":"text","text":"He"}]})");
@@ -64,6 +76,15 @@ TEST(LiteRtStreamAssemblerTest, EmptyStreamYieldsEmptyAssistantMessage) {
   json got = json::parse(a.Canonical());
   EXPECT_EQ(got["role"], "assistant");
   EXPECT_EQ(ExtractAssistantText(a.Canonical()), "");
+}
+
+TEST(LiteRtStreamAssemblerTest, MalformedContentItemInAStreamChunkDoesNotThrow) {
+  // Feed() reaches ExtractAssistantText on the text-delta path, so the same
+  // hazard arrives over the wire.
+  LiteRtStreamAssembler a;
+  a.Feed(R"({"role":"assistant","content":[42]})");
+  a.Feed(R"({"role":"assistant","content":[{"type":"text","text":"hi"}]})");
+  EXPECT_EQ(ExtractAssistantText(a.Canonical()), "hi");
 }
 
 }  // namespace

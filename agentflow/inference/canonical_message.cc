@@ -15,6 +15,10 @@ std::string ExtractAssistantText(std::string_view canonical_json) {
   if (!content.is_array()) return {};
   std::string out;
   for (const auto& item : content) {
+    // json::value() THROWS type_error.306 on a non-object, and
+    // allow_exceptions=false above does not cover it. Model output is
+    // untrusted, so skip anything that is not an object.
+    if (!item.is_object()) continue;
     if (item.value("type", "") == "text" && item.contains("text") &&
         item["text"].is_string()) {
       out.append(item["text"].get<std::string>());
