@@ -34,6 +34,7 @@
 #include "agentflow/core/state.h"
 #include "agentflow/core/stub_node.h"
 #include "agentflow/core/token_channel.h"
+#include "agentflow/inference/litert_lm_chat_backend.h"
 #include "agentflow/inference/litert_lm_engine.h"
 #include "agentflow/nodes/agent_node.h"
 #include "agentflow/tools/tool_registry.h"
@@ -118,8 +119,9 @@ Java_agentflow_jni_NativeBridge_runAgent(
     }
 
     asio::io_context io;
+    auto backend = af::LiteRtLmChatBackend::Create(engine, io);
     af::AgentNodeConfig agent_cfg;
-    agent_cfg.engine = engine;
+    agent_cfg.backend = backend;
     agent_cfg.io_ctx = &io;
     agent_cfg.system_prompt = system_prompt;
     agent_cfg.input_field = "user_query";
@@ -185,6 +187,7 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflow(
     }
 
     asio::io_context io;
+    auto backend = af::LiteRtLmChatBackend::Create(engine, io);
     // ToolRegistry must be a shared_ptr for the workflow runner.
     auto host_tools = std::make_shared<af::ToolRegistry>(io);
 
@@ -200,13 +203,13 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflow(
     build_spec.workflow     = wf;
     build_spec.agent_name   = wf->spec().main();
     build_spec.host_tools   = host_tools;
-    build_spec.engine       = engine;
+    build_spec.backend      = backend;
     build_spec.io_ctx       = &io;
     build_spec.input_field  = "user_query";
     build_spec.output_field = "assistant_reply";
     build_spec.max_iter     = 5;
     auto built = af::workflow::BuildAgentNode(build_spec);
-    if (built.cfg.system_prompt.empty() && !built.cfg.engine) {
+    if (built.cfg.system_prompt.empty() && !built.cfg.backend) {
       ThrowJava(env, "main agent not in roster");
       return nullptr;
     }
@@ -299,6 +302,7 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     }
 
     asio::io_context io;
+    auto backend = af::LiteRtLmChatBackend::Create(engine, io);
     auto host_tools = std::make_shared<af::ToolRegistry>(io);
 
     auto wf_or =
@@ -318,14 +322,14 @@ Java_agentflow_jni_NativeBridge_runJsonWorkflowStreaming(
     build_spec.workflow      = wf;
     build_spec.agent_name    = wf->spec().main();
     build_spec.host_tools    = host_tools;
-    build_spec.engine        = engine;
+    build_spec.backend       = backend;
     build_spec.io_ctx        = &io;
     build_spec.input_field   = "user_query";
     build_spec.output_field  = "assistant_reply";
     build_spec.max_iter      = 5;
     build_spec.token_channel = &channel;
     auto built = af::workflow::BuildAgentNode(build_spec);
-    if (built.cfg.system_prompt.empty() && !built.cfg.engine) {
+    if (built.cfg.system_prompt.empty() && !built.cfg.backend) {
       ThrowJava(env, "main agent not in roster");
       return nullptr;
     }
