@@ -26,3 +26,15 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "canonical_message_test",
+    size = "small",
+    srcs = ["canonical_message_test.cc"],
+    deps = [
+        "//agentflow/inference:canonical_message",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
