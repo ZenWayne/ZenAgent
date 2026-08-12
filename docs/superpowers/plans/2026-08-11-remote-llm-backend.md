@@ -48,6 +48,12 @@
   on a full channel) and this plan settles it on the awaiting form everywhere.
   If a call site cannot `co_await`, that is a signal the signature is wrong —
   do not reach for `try_send` to work around it.
+  **Scope:** this governs the `TokenSink` / `SseHandler` delivery path only. Other
+  `try_send` uses in the tree are unrelated and legitimate — `team_node.cc`'s
+  capacity-1 completion signal, and the sites in `litert_lm_session.cc` /
+  `litert_lm_conversation.cc` / `mcp_client.cc`, which fire from `asio::post`
+  callbacks on non-coroutine background threads where `co_await` is structurally
+  impossible. Do not "fix" those.
 
 ### Shorthand used in every test step
 
