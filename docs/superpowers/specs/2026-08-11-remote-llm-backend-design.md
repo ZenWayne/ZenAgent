@@ -77,8 +77,13 @@ nor HTTP.
 ```cpp
 namespace agentflow {
 
-// One text delta. Same contract as SubAgentRuntime::TokenSink.
-using TokenSink = std::function<void(std::string_view delta)>;
+// One text delta. Returns an awaitable and is always co_awaited by its
+// caller, so a consumer that is not keeping up back-pressures the decode loop
+// instead of having its tokens dropped. (This settles a pre-existing
+// inconsistency: AgentNode awaited its channel send while SubAgentRuntime
+// used try_send and dropped on a full channel.)
+using TokenSink =
+    std::function<asio::awaitable<void>(std::string_view delta)>;
 
 struct ChatConversationOptions {
   // A bare content array, NOT a {role,content} object:
@@ -372,10 +377,15 @@ Silently dropping a correctness guarantee is worse than reporting it.
 
 ## 7. Testing
 
-**1. Regression protection (must pass unchanged).** Every fake-based case in
-`sub_agent_runtime_test.cc` must pass without modification. An unchanged
-`SendFn` contract is this design's central premise, and those tests are its
-verification.
+**1. Regression protection.** Every fake-based case in
+`sub_agent_runtime_test.cc` must keep passing with **no assertion changed**.
+An unchanged `SendFn` contract is this design's central premise, and those
+tests are its verification.
+
+The one permitted edit is mechanical: because `TokenSink` now returns
+`asio::awaitable<void>` (§3), the streaming fake's `on_token(...)` call becomes
+`co_await on_token(...)` and its enclosing lambda becomes a coroutine. Any
+change beyond that signals the contract really did drift.
 
 **2. Mapping and stream parsing (new, CI-runnable, no network).** With
 `FakeHttpClient` injected, covering the error-prone cases:

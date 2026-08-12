@@ -26,6 +26,15 @@
 - **Credentials never leave host code.** No API key, `base_url`, or provider model name may appear in a workflow spec, a checkpoint, a trace event, an error message, or a log line.
 - **The canonical message shape is LiteRT-LM's existing shape.** Do not invent a new one; the remote implementation adapts to it.
 - Protobuf is pinned to v31.1 via `git_override` in `MODULE.bazel`. Do not change it.
+- **Token delivery is back-pressured, never lossy.** `TokenSink` and
+  `net::SseHandler` both return `asio::awaitable<void>` and are always
+  `co_await`ed at their call sites. A consumer that is not keeping up slows the
+  decode loop down; it never silently loses a token. This deliberately replaces
+  the pre-existing `try_send` in `sub_agent_runtime.cc:236` — the codebase was
+  inconsistent (`AgentNode` awaited its channel send, `SubAgentRuntime` dropped
+  on a full channel) and this plan settles it on the awaiting form everywhere.
+  If a call site cannot `co_await`, that is a signal the signature is wrong —
+  do not reach for `try_send` to work around it.
 
 ### Shorthand used in every test step
 
@@ -299,7 +308,12 @@ TEST(ChatBackendTest, FakeBackendDeliversTextDeltasToTokenSink) {
   asio::co_spawn(io, [&]() -> asio::awaitable<void> {
     auto r = co_await conv->SendAsync(
         R"({"role":"user","content":[]})",
-        [&](std::string_view d) { seen.emplace_back(d); }, cancel);
+        // TokenSink returns an awaitable, so the sink is a coroutine lambda.
+        [&](std::string_view d) -> asio::awaitable<void> {
+          seen.emplace_back(d);
+          co_return;
+        },
+        cancel);
     ASSERT_TRUE(r.ok());
   }, asio::detached);
   io.run();
@@ -342,9 +356,14 @@ Create `agentflow/inference/chat_backend.h`:
 
 namespace agentflow {
 
-// One text delta from the model. Same contract as the TokenSink that
-// SubAgentRuntime already uses.
-using TokenSink = std::function<void(std::string_view delta)>;
+// One text delta from the model.
+//
+// Returns an awaitable and is ALWAYS co_awaited by its caller, so a consumer
+// that is not keeping up applies back-pressure to the decode loop instead of
+// having its tokens dropped. An empty (falsy) sink means "nobody wants
+// deltas" — check it before calling.
+using TokenSink =
+    std::function<asio::awaitable<void>(std::string_view delta)>;
 
 struct ChatConversationOptions {
   // A bare content ARRAY, not a {role,content} object:
@@ -516,7 +535,7 @@ class FakeConversation : public IConversation {
       co_return absl::CancelledError("cancelled");
     }
     if (on_token) {
-      for (const auto& d : deltas_) on_token(d);
+      for (const auto& d : deltas_) co_await on_token(d);
     }
     if (responses_.empty()) {
       co_return absl::UnavailableError("fake: no scripted response left");
@@ -1017,7 +1036,11 @@ TEST(LiteRtLmChatBackendTest, SendAsyncReturnsCanonicalAssistantJson) {
   asio::co_spawn(io, [&]() -> asio::awaitable<void> {
     auto r = co_await conv->SendAsync(
         R"({"role":"user","content":[{"type":"text","text":"Say hi."}]})",
-        [&](std::string_view d) { deltas.emplace_back(d); }, cancel);
+        [&](std::string_view d) -> asio::awaitable<void> {
+          deltas.emplace_back(d);
+          co_return;
+        },
+        cancel);
     ASSERT_TRUE(r.ok()) << r.status().message();
     got = *r;
   }, asio::detached);
@@ -1147,8 +1170,9 @@ class LiteRtLmChatConversation : public IConversation {
       const size_t before = assembler.text_deltas().size();
       assembler.Feed(chunk);
       // Forward only newly produced text deltas, never the raw envelope.
+      // co_await, so a slow consumer back-pressures the decode loop.
       for (size_t i = before; i < assembler.text_deltas().size(); ++i) {
-        on_token(assembler.text_deltas()[i]);
+        co_await on_token(assembler.text_deltas()[i]);
       }
     }
     co_return assembler.Canonical();
@@ -1524,16 +1548,21 @@ block (lines 117-197) with:
     // whether deltas are available and reports them through the sink.
     TokenSink sink;
     if (cfg_.stream_tokens) {
-      sink = [this, &emit](std::string_view delta) {
+      sink = [this, &emit](std::string_view delta)
+                 -> asio::awaitable<void> {
         emit.EmitToken(Id(), delta);
         if (cfg_.token_channel) {
-          // Non-blocking. The sink is a plain callback invoked from inside the
-          // backend, not a coroutine, so it cannot co_await a full channel.
-          // try_send drops the delta if the consumer is not keeping up, which
-          // is the right trade-off for a UI stream; a closed channel (consumer
-          // gone) is a no-op rather than a throw.
-          cfg_.token_channel->try_send(asio::error_code{}, std::string(delta));
+          // Back-pressured send: a consumer that is not keeping up slows the
+          // decode loop rather than losing tokens. as_tuple so a closed
+          // channel (consumer gone) yields an error instead of throwing — we
+          // simply stop forwarding in that case. This is the same behaviour
+          // the pre-refactor AgentNode had; it is preserved exactly.
+          auto [ec] = co_await cfg_.token_channel->async_send(
+              asio::error_code{}, std::string(delta),
+              asio::as_tuple(asio::use_awaitable));
+          (void)ec;
         }
+        co_return;
       };
     }
 
@@ -1783,7 +1812,10 @@ asio::awaitable<State> LlmNode::Run(State state, const CancelToken& cancel,
 
   TokenSink sink;
   if (cfg_.stream_tokens) {
-    sink = [this, &emit](std::string_view delta) { emit.EmitToken(Id(), delta); };
+    sink = [this, &emit](std::string_view delta) -> asio::awaitable<void> {
+      emit.EmitToken(Id(), delta);
+      co_return;
+    };
   }
 
   json user = {
@@ -1860,6 +1892,39 @@ add `#include "agentflow/inference/chat_backend.h"`.
 > `std::atomic_bool` cancel-registration guard and the envelope rebuild all now
 > live in `LiteRtLmChatBackend` (Task 4).
 
+**Also in `sub_agent_runtime.cc`, convert the token-channel sink at lines
+233-239 to the back-pressured form.** It currently drops deltas on a full
+channel, which the token-delivery Global Constraint forbids:
+
+```cpp
+  TokenSink on_token;
+  if (ctx.token_channel != nullptr) {
+    auto* ch = ctx.token_channel;
+    on_token = [ch](std::string_view delta) -> asio::awaitable<void> {
+      // Back-pressured: a slow consumer slows the sub-agent's decode loop
+      // rather than losing tokens. as_tuple so a closed channel yields an
+      // error instead of throwing.
+      auto [ec] = co_await ch->async_send(asio::error_code{},
+                                           std::string(delta),
+                                           asio::as_tuple(asio::use_awaitable));
+      (void)ec;
+      co_return;
+    };
+  }
+```
+
+Add `#include <asio/as_tuple.hpp>` and `#include <asio/use_awaitable.hpp>` to
+that file if they are not already present.
+
+**One test edit is required here**, and it is the only place in this plan
+where `sub_agent_runtime_test.cc` changes. Its streaming fake (around
+`sub_agent_runtime_test.cc:150-165`) calls `on_token(...)` synchronously;
+`TokenSink` now returns an awaitable, so that call becomes
+`co_await on_token(...)` and the enclosing lambda becomes a coroutine. This is
+a mechanical signature change — **the `SendFn` contract and `RunAsync`'s
+behaviour still do not change**, and every assertion in the file stays as it
+is. If you find yourself changing an assertion, stop: something else is wrong.
+
 - [ ] **Step 5: Migrate `AgentNodeBuildSpec`**
 
 In `agentflow/workflow/workflow_runner.h`, replace
@@ -1915,11 +1980,11 @@ In `tests/unit/nodes/BUILD.bazel`, add to `llm_node_test`'s deps:
 - [ ] **Step 7: Run the full suite**
 
 Run: `bazel test //tests/unit/... //tests/integration/...`
-Expected: all PASS, including `sub_agent_runtime_test` **unmodified**.
+Expected: all PASS, with `sub_agent_runtime_test` carrying **only** the
+`co_await on_token(...)` edit described in Step 4 — no assertion changes.
 
-If `sub_agent_runtime_test` fails to compile, the `ConversationFactory`
-signature drifted. Fix the alias in `sub_agent_runtime.h` — do **not** edit the
-test. Its staying unchanged is the whole point.
+If it fails for any other reason, the `ConversationFactory` signature drifted.
+Fix the alias in `sub_agent_runtime.h` rather than the test.
 
 - [ ] **Step 8: Verify LiteRT is fully behind the seam**
 
@@ -2240,7 +2305,7 @@ is written and tested here first. Task 9 then only has to move bytes.
 - Consumes: `CancelToken` (existing core).
 - Produces:
   - `agentflow::net::HttpRequest{url, body, headers}`
-  - `agentflow::net::SseHandler = std::function<void(std::string_view)>`
+  - `agentflow::net::SseHandler = std::function<asio::awaitable<void>(std::string_view)>`
   - `agentflow::net::IHttpClient` with `PostSse(HttpRequest, const SseHandler&, const CancelToken&) -> asio::awaitable<absl::Status>` and `Post(HttpRequest, const CancelToken&) -> asio::awaitable<absl::StatusOr<std::string>>`
   - `agentflow::net::ParseUrl(std::string_view) -> absl::StatusOr<ParsedUrl{host,port,target,tls}>`
   - `agentflow::net::ParseResponseHead(std::string_view) -> absl::StatusOr<ResponseHead{status_code,headers,head_bytes,chunked,content_length}>`
@@ -2422,7 +2487,11 @@ struct HttpRequest {
 
 // One SSE frame's data payload, with "data: " already stripped. The [DONE]
 // sentinel is never delivered — it terminates the stream instead.
-using SseHandler = std::function<void(std::string_view data)>;
+//
+// Returns an awaitable and is always co_awaited by the client's read loop, so
+// a slow consumer back-pressures the socket read rather than losing frames.
+using SseHandler =
+    std::function<asio::awaitable<void>(std::string_view data)>;
 
 class IHttpClient {
  public:
@@ -2982,9 +3051,10 @@ This is the mapping design spec §6 specifies; Task 12's retry policy reads
 exactly these codes.
 
 6. **Stream the body.** For `PostSse`: feed each read through `ChunkedDecoder`
-   when `head.chunked`, then through `SseFramer`, invoking `on_event` for every
-   payload; stop when `saw_done()` or the peer closes. For `Post`: accumulate
-   until `content_length` is satisfied or the peer closes, then return the body.
+   when `head.chunked`, then through `SseFramer`, and `co_await on_event(...)`
+   for every payload — awaiting is what gives the consumer back-pressure; stop
+   when `saw_done()` or the peer closes. For `Post`: accumulate until
+   `content_length` is satisfied or the peer closes, then return the body.
 7. **Close** the socket in all paths, including error paths.
 
 Map a socket error after cancellation to `absl::CancelledError`, and any other
@@ -3933,7 +4003,7 @@ class FakeHttpClient : public net::IHttpClient {
     turns_.pop_front();
     for (const auto& f : turn.frames) {
       if (cancel.IsCancelled()) co_return absl::CancelledError("cancelled");
-      if (on_event) on_event(f);
+      if (on_event) co_await on_event(f);
     }
     co_return turn.status;
   }
@@ -4032,7 +4102,11 @@ SendResult Send(IConversation& conv, const std::string& message_json,
       [&]() -> asio::awaitable<absl::StatusOr<std::string>> {
         co_return co_await conv.SendAsync(
             message_json,
-            [&](std::string_view d) { r.deltas.emplace_back(d); }, cancel);
+            [&](std::string_view d) -> asio::awaitable<void> {
+              r.deltas.emplace_back(d);
+              co_return;
+            },
+            cancel);
       },
       asio::use_future);
   io.run();
@@ -4371,11 +4445,13 @@ class OpenAiConversation : public IConversation {
       bool emitted = false;
       auto status = co_await http_.PostSse(
           req,
-          [&](std::string_view frame) {
+          [&](std::string_view frame) -> asio::awaitable<void> {
             std::string delta = acc.Feed(frame);
-            if (delta.empty()) return;
+            if (delta.empty()) co_return;
             emitted = true;
-            if (on_token) on_token(delta);
+            // co_await, so a slow consumer back-pressures the socket read.
+            if (on_token) co_await on_token(delta);
+            co_return;
           },
           cancel);
 
@@ -4687,11 +4763,10 @@ int main(int argc, char** argv) {
 }
 ```
 
-If `//proto:agentflow_proto`'s `test::TestState` is not appropriate for an
-example, define a two-field state message in
-`examples/remote-llm/demo_state.proto` and use that instead — the example must
-not depend on a test-only proto if the repository's other examples do not.
-Check `examples/agent-demo/` and follow whatever it does.
+Use `af::test::TestState` from `//proto:agentflow_proto`, exactly as
+`examples/agent-demo/main.cc:87` and `examples/streaming-demo/main.cc:90`
+already do (`af` is their alias for `agentflow`). Do not define a new state
+proto for this example — matching the existing examples is the convention here.
 
 - [ ] **Step 3: Declare the example target**
 
@@ -4778,7 +4853,11 @@ TEST(RemoteLlmE2ETest, RealEndpointStreamsAnAnswer) {
       [&]() -> asio::awaitable<absl::StatusOr<std::string>> {
         co_return co_await conv->SendAsync(
             R"({"role":"user","content":[{"type":"text","text":"Say hello."}]})",
-            [&](std::string_view d) { deltas.append(d); }, cancel.Token());
+            [&](std::string_view d) -> asio::awaitable<void> {
+              deltas.append(d);
+              co_return;
+            },
+            cancel.Token());
       },
       asio::use_future);
   io.run();
