@@ -3,6 +3,17 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# The engine-agnostic seam. Deliberately does NOT depend on LiteRT-LM.
+cc_library(
+    name = "chat_backend",
+    hdrs = ["chat_backend.h"],
+    deps = [
+        "//agentflow/core",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+    ],
+)
+
 cc_library(
     name = "inference",
     srcs = [
@@ -16,6 +27,7 @@ cc_library(
         "litert_lm_session.h",
     ],
     deps = [
+        ":chat_backend",
         "//third_party/litert_lm:c_engine",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",

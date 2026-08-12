@@ -12,3 +12,17 @@ cc_test(
     ],
     tags = ["manual"],  # requires MODEL_PATH env
 )
+
+cc_test(
+    name = "chat_backend_test",
+    size = "small",
+    srcs = ["chat_backend_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference:chat_backend",
+        "//tests/support:fake_chat_backend",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

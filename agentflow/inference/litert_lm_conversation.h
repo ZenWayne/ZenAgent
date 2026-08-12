@@ -12,29 +12,16 @@
 #include <asio/experimental/concurrent_channel.hpp>
 #include <asio/io_context.hpp>
 
+#include "agentflow/inference/chat_backend.h"
 #include "agentflow/inference/litert_lm_engine.h"
 #include "c/engine.h"
 
 namespace agentflow {
 
-struct LiteRtLmConversationOptions {
-  // JSON shape per LiteRT-LM C engine docs (engine.h §
-  // litert_lm_conversation_config_create). All three are passed verbatim;
-  // the engine handles templating.
-  std::string system_message_json;  // e.g. {"role":"system","content":"..."}
-  std::string tools_json = "[]";    // e.g. [{"type":"function",...}, ...]
-  std::string messages_json = "[]"; // initial history
-
-  // When true, the conversation is built via
-  // litert_lm_engine_create_constrained_conversation (P8 C bridge) which
-  // attaches an LLGuidance Lark grammar derived from `tools_json` to every
-  // send. The model's tool-call output is then constrained to match the
-  // tools' parameter schemas. Requires tools_json to be a non-empty array
-  // to take effect.
-  bool constrained_tool_calls = false;
-
-  int max_output_tokens = 1024;
-};
+// The LiteRT-specific name is retained as an alias so existing call sites
+// and tests compile unchanged. The fields are identical; see
+// agentflow/inference/chat_backend.h.
+using LiteRtLmConversationOptions = ChatConversationOptions;
 
 // Async streaming wrapper around a LiteRT-LM C conversation. The Conversation
 // API (vs Session) feeds system+tools+messages separately to the engine,
