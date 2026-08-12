@@ -26,6 +26,12 @@
 - **Credentials never leave host code.** No API key, `base_url`, or provider model name may appear in a workflow spec, a checkpoint, a trace event, an error message, or a log line.
 - **The canonical message shape is LiteRT-LM's existing shape.** Do not invent a new one; the remote implementation adapts to it.
 - Protobuf is pinned to v31.1 via `git_override` in `MODULE.bazel`. Do not change it.
+- **Never use gtest `ASSERT_*` inside a coroutine body.** `ASSERT_*` expands to a
+  bare `return;`, which is ill-formed inside a function containing `co_await` /
+  `co_return` — it is a hard compile error, not a test failure. Inside any
+  `asio::co_spawn` lambda use `EXPECT_*`; put the `ASSERT_*` that must halt the
+  test after `fut.get()`, in the ordinary function body. (Found the hard way in
+  Task 2.)
 - **Token delivery is back-pressured, never lossy.** `TokenSink` and
   `net::SseHandler` both return `asio::awaitable<void>` and are always
   `co_await`ed at their call sites. A consumer that is not keeping up slows the
@@ -285,8 +291,10 @@ TEST(ChatBackendTest, FakeBackendReturnsScriptedCanonicalResponse) {
   asio::co_spawn(io, [&]() -> asio::awaitable<void> {
     auto r = co_await conv->SendAsync(R"({"role":"user","content":[]})",
                                        TokenSink{}, cancel);
-    ASSERT_TRUE(r.ok());
-    got = *r;
+    // EXPECT_, not ASSERT_: ASSERT_* expands to a bare `return;`, which does
+    // not compile inside a coroutine.
+    EXPECT_TRUE(r.ok());
+    if (r.ok()) got = *r;
   }, asio::detached);
   io.run();
 
@@ -314,7 +322,7 @@ TEST(ChatBackendTest, FakeBackendDeliversTextDeltasToTokenSink) {
           co_return;
         },
         cancel);
-    ASSERT_TRUE(r.ok());
+    EXPECT_TRUE(r.ok());
   }, asio::detached);
   io.run();
 
@@ -1041,11 +1049,14 @@ TEST(LiteRtLmChatBackendTest, SendAsyncReturnsCanonicalAssistantJson) {
           co_return;
         },
         cancel);
-    ASSERT_TRUE(r.ok()) << r.status().message();
-    got = *r;
+    // EXPECT_, not ASSERT_: ASSERT_* expands to a bare `return;`, which does
+    // not compile inside a coroutine. The hard assertion is after io.run().
+    EXPECT_TRUE(r.ok()) << r.status().message();
+    if (r.ok()) got = *r;
   }, asio::detached);
   io.run();
 
+  ASSERT_FALSE(got.empty()) << "SendAsync produced no canonical response";
   EXPECT_NE(got.find("\"role\":\"assistant\""), std::string::npos);
   std::string joined;
   for (const auto& d : deltas) joined += d;
