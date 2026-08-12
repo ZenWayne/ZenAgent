@@ -4,6 +4,7 @@
 
 #include <asio/io_context.hpp>
 
+#include "agentflow/inference/litert_lm_chat_backend.h"
 #include "agentflow/inference/litert_lm_engine.h"
 #include "agentflow/workflow/delegate_tool.h"
 #include "agentflow/workflow/sub_agent_context.h"
@@ -15,7 +16,12 @@ namespace agentflow::workflow {
 BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   BuiltAgentNode out;
   AgentNodeConfig& cfg = out.cfg;
-  cfg.engine = spec.engine;
+  // TODO(Task 6): AgentNodeBuildSpec.engine is replaced by .backend /
+  // .backends there; this wraps the still-concrete engine in the seam just
+  // enough to keep AgentNodeConfig.backend populated in the interim.
+  if (spec.engine && spec.io_ctx) {
+    cfg.backend = LiteRtLmChatBackend::Create(spec.engine, *spec.io_ctx);
+  }
   cfg.io_ctx = spec.io_ctx;
   cfg.tool_registry = spec.host_tools;
   cfg.input_field = spec.input_field;
