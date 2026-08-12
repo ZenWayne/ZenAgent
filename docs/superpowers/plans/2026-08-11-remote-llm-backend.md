@@ -26,6 +26,13 @@
 - **Credentials never leave host code.** No API key, `base_url`, or provider model name may appear in a workflow spec, a checkpoint, a trace event, an error message, or a log line.
 - **The canonical message shape is LiteRT-LM's existing shape.** Do not invent a new one; the remote implementation adapts to it.
 - Protobuf is pinned to v31.1 via `git_override` in `MODULE.bazel`. Do not change it.
+- **`nlohmann::json::value()` throws on a non-object.** `parse(..., allow_exceptions=false)`
+  suppresses *parse* errors only; a later `.value("k", default)` on a number, string,
+  null or array still throws `type_error.306`. Every one of these helpers parses
+  untrusted model output, so **guard with `item.is_object()` before calling
+  `.value()`** (or use `contains()` + `operator==`, both of which are safe on any
+  type). A `content` array holding a bare `42` must return `""`, not crash.
+  (Found by Task 3's reviewer with a compiled repro.)
 - **Never use gtest `ASSERT_*` inside a coroutine body.** `ASSERT_*` expands to a
   bare `return;`, which is ill-formed inside a function containing `co_await` /
   `co_return` — it is a hard compile error, not a test failure. Inside any
@@ -869,6 +876,10 @@ std::string ExtractAssistantText(std::string_view canonical_json) {
   if (!content.is_array()) return {};
   std::string out;
   for (const auto& item : content) {
+    // json::value() THROWS type_error.306 on a non-object, and
+    // allow_exceptions=false above does not cover it. Model output is
+    // untrusted, so skip anything that is not an object.
+    if (!item.is_object()) continue;
     if (item.value("type", "") == "text" && item.contains("text") &&
         item["text"].is_string()) {
       out.append(item["text"].get<std::string>());
@@ -3752,6 +3763,10 @@ std::string FlattenContent(const json& content) {
   if (!content.is_array()) return {};
   std::string out;
   for (const auto& item : content) {
+    // json::value() THROWS type_error.306 on a non-object. Remote model
+    // output is untrusted — skip anything that is not an object rather than
+    // crashing on a stray scalar inside the content array.
+    if (!item.is_object()) continue;
     if (item.value("type", "") == "text" && item.contains("text") &&
         item["text"].is_string()) {
       out.append(item["text"].get<std::string>());
