@@ -2076,14 +2076,52 @@ In `tests/unit/nodes/BUILD.bazel`, add to `llm_node_test`'s deps:
         "@nlohmann_json//:json",
 ```
 
-- [ ] **Step 7: Run the full suite**
+- [ ] **Step 6b: Migrate the remaining `.engine` consumers**
 
-Run: `bazel test //tests/unit/... //tests/integration/...`
-Expected: all PASS, with `sub_agent_runtime_test` carrying **only** the
-`co_await on_token(...)` edit described in Step 4 — no assertion changes.
+`AgentNodeConfig.engine` and `AgentNodeBuildSpec.engine` are gone, and three
+files outside `agentflow/` still use them. They are not optional extras: `jni/`
+is the Android integration this framework exists to serve.
 
-If it fails for any other reason, the `ConversationFactory` signature drifted.
-Fix the alias in `sub_agent_runtime.h` rather than the test.
+- `jni/agentflow_jni.cc` — five sites (`:122`, `:203`, `:209`, `:321`, `:328`)
+- `examples/agent-demo/main.cc` — includes `agentflow/inference/litert_lm_engine.h`
+- `examples/streaming-demo/main.cc` — same include
+
+In each, keep constructing the `LiteRtLmEngine` exactly as today, then wrap it
+once and assign the result instead of the raw engine:
+
+```cpp
+#include "agentflow/inference/litert_lm_chat_backend.h"
+...
+auto backend = LiteRtLmChatBackend::Create(engine, io);
+cfg.backend = backend;          // was: cfg.engine = engine;
+spec.backend = backend;         // was: spec.engine = engine;
+```
+
+Add `"//agentflow/inference"` to the `deps` of `//jni:libagentflow_jni.so`,
+`//examples/agent-demo:agent_demo` and `//examples/streaming-demo:streaming_demo`
+if it is not already there — they need the full target for
+`litert_lm_chat_backend.h` and `litert_lm_engine.h`.
+
+These files construct the concrete on-device engine, so they legitimately keep
+referring to `LiteRtLmEngine`. Step 8's grep is scoped to `agentflow/` and does
+not cover them.
+
+- [ ] **Step 7: Run the full suite AND the full build**
+
+```bash
+bazel test //tests/unit/... //tests/integration/...
+bazel build -k //...
+```
+
+Both must succeed. `sub_agent_runtime_test` must carry **only** the
+`co_await on_token(...)` edit from Step 4 plus the mechanical
+`LiteRtLmConversationOptions` → `ChatConversationOptions` rename — no assertion
+changes.
+
+**`bazel build -k //...` is not optional.** Testing only `//tests/...` hides
+breakage in `jni/` and `examples/`, which is exactly how those three files were
+left broken for a whole task. If the `ConversationFactory` signature drifted,
+fix the alias in `sub_agent_runtime.h` rather than the test.
 
 - [ ] **Step 8: Verify LiteRT is fully behind the seam**
 
