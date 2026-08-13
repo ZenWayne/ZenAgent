@@ -24,3 +24,20 @@ cc_library(
         "@abseil-cpp//absl/strings",
     ],
 )
+
+cc_library(
+    name = "https_client",
+    srcs = ["https_client.cc"],
+    hdrs = ["https_client.h"],
+    deps = [
+        ":http_client",
+        ":http_parse",
+        "//agentflow/core",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@asio",
+        "@boringssl//:crypto",
+        "@boringssl//:ssl",
+    ],
+)
