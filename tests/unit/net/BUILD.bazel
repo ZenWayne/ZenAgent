@@ -27,7 +27,9 @@ cc_test(
 
 cc_test(
     name = "https_client_integration_test",
-    size = "small",
+    # "medium" (not "small") because the live tests hit a real chat model
+    # (e.g. Ollama gemma4:e2b) which can have a slow cold start.
+    size = "medium",
     srcs = ["https_client_integration_test.cc"],
     deps = [
         "//agentflow/core",
@@ -36,5 +38,6 @@ cc_test(
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
     ],
 )
