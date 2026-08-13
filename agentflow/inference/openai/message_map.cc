@@ -54,6 +54,9 @@ absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
       return absl::InvalidArgumentError("tool message has no content array");
     }
     for (const auto& entry : m["content"]) {
+      // json::value() THROWS type_error.306 on a non-object. Same guard as
+      // FlattenContent — this loop must not be the one place that omits it.
+      if (!entry.is_object()) continue;
       const std::string id = entry.value("id", "");
       if (id.empty()) {
         return absl::InvalidArgumentError(absl::StrCat(

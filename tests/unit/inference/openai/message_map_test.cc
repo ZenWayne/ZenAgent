@@ -77,6 +77,16 @@ TEST(ToOpenAiMessagesTest, ToolResultWithoutAnIdIsRejected) {
   EXPECT_FALSE(r.ok());
 }
 
+TEST(ToOpenAiMessagesTest, SkipsNonObjectToolResultEntriesWithoutThrowing) {
+  auto r = ToOpenAiMessages(
+      R"({"role":"tool","content":[42,)"
+      R"({"id":"call_1","name":"search","response":{"value":"A"}}]})");
+  ASSERT_TRUE(r.ok());
+  ASSERT_EQ(r->size(), 1u);
+  EXPECT_EQ((*r)[0]["tool_call_id"], "call_1");
+  EXPECT_EQ((*r)[0]["content"], "A");
+}
+
 TEST(BuildRequestBodyTest, CarriesModelStreamToolsAndMessages) {
   ChatConversationOptions opts;
   opts.tools_json =
