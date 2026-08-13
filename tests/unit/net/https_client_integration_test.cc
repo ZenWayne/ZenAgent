@@ -24,6 +24,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -167,6 +168,64 @@ TEST(HttpsClientIntegrationTest, PostSseDeliversFrames) {
     // model emits reasoning deltas with empty content, so a non-empty-text
     // assertion would flake.
   }
+}
+
+TEST(HttpsClientIntegrationTest, RejectsAServerCertItDoesNotTrust) {
+  // Same live TLS endpoint as the accept-path tests above, but with the
+  // system CA bundle as the trust anchor instead of the proxy's self-signed
+  // cert. The handshake MUST fail. This is the property that actually
+  // distinguishes "verification is configured" from "verification rejects":
+  // a client that silently accepted any certificate chain would pass the
+  // accept-path tests identically and only get caught here.
+  auto ep = GetLiveEndpoint();
+  if (!ep) {
+    GTEST_SKIP() << "AGENTFLOW_TEST_HTTP_URL / AGENTFLOW_TEST_HTTP_MODEL not "
+                    "set";
+  }
+  if (ep->url.rfind("https://", 0) != 0) {
+    // Running this against the plaintext endpoint would prove nothing (no
+    // TLS handshake happens at all) and would fail for the wrong reason.
+    GTEST_SKIP() << "AGENTFLOW_TEST_HTTP_URL is not https://; this test only "
+                    "exercises the TLS reject path";
+  }
+
+  constexpr const char* kSystemCaBundle =
+      "/etc/ssl/certs/ca-certificates.crt";
+  if (!std::filesystem::exists(kSystemCaBundle)) {
+    GTEST_SKIP() << kSystemCaBundle << " is not present on this host";
+  }
+
+  asio::io_context io;
+  HttpsClientOptions opts;
+  // Deliberately the WRONG trust anchor: the system bundle does not contain
+  // the test proxy's self-signed cert (unlike AGENTFLOW_TEST_CA_PATH, used
+  // by the accept-path tests above), so verification must fail.
+  opts.ca_path = kSystemCaBundle;
+  opts.read_timeout = std::chrono::milliseconds(120'000);
+  HttpsClient client(io, opts);
+
+  HttpRequest req = BuildChatRequest(*ep, /*stream=*/false);
+
+  CancelSource cancel;
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<absl::StatusOr<std::string>> {
+        co_return co_await client.Post(req, cancel.Token());
+      },
+      asio::use_future);
+  io.run();
+
+  auto result = fut.get();
+  // Not asserting a specific status code or message: TLS failures surface
+  // differently across OpenSSL/BoringSSL versions, which would make a
+  // tighter assertion brittle. The property that matters is that the call
+  // does NOT succeed. That the endpoint itself is reachable is established
+  // by the accept-path tests running in the same suite/run, so a failure
+  // here can only be attributed to certificate verification rejecting the
+  // chain, not to the endpoint being unreachable.
+  EXPECT_FALSE(result.ok())
+      << "handshake succeeded against a certificate chain that should NOT "
+         "be trusted — certificate verification is not actually being "
+         "enforced";
 }
 
 TEST(HttpsClientIntegrationTest, RejectsUnsupportedScheme) {

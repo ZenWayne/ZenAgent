@@ -92,7 +92,13 @@ class Connection : public std::enable_shared_from_this<Connection> {
             "ca_path is required for https:// URLs; verification is mandatory");
       }
       asio::error_code ec;
-      ssl_ctx_.set_verify_mode(asio::ssl::verify_peer, ec);
+      // Set the mode on the STREAM, not the context. stream_ was built in
+      // the member-init list, so its SSL* already copied the context's
+      // verify mode (SSL_VERIFY_NONE) at construction; a context-level call
+      // never reaches it, and set_verify_callback() below re-applies the SSL
+      // object's current mode, cementing NONE. Setting it here is what
+      // actually enforces validation.
+      stream_.set_verify_mode(asio::ssl::verify_peer, ec);
       if (ec) {
         co_return absl::InternalError(
             absl::StrCat("set_verify_mode failed: ", ec.message()));
