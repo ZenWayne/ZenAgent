@@ -2543,13 +2543,15 @@ TEST(ChunkedDecoderTest, DecodesChunksSplitAcrossFeeds) {
 }
 
 TEST(ChunkedDecoderTest, HandlesAChunkSizeLineSplitMidNumber) {
+  // Chunk sizes are HEX (RFC 9112 §7.1), so the "10" assembled across these
+  // two feeds means SIXTEEN bytes, not ten. The payload below is 16 bytes.
   ChunkedDecoder d;
   auto a = d.Feed("1");
   ASSERT_TRUE(a.ok());
   EXPECT_EQ(*a, "");
-  auto b = d.Feed("0\r\n0123456789\r\n0\r\n\r\n");
+  auto b = d.Feed("0\r\n0123456789abcdef\r\n0\r\n\r\n");
   ASSERT_TRUE(b.ok());
-  EXPECT_EQ(*b, "0123456789");
+  EXPECT_EQ(*b, "0123456789abcdef");
   EXPECT_TRUE(d.complete());
 }
 
@@ -3000,7 +3002,7 @@ cc_test(
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `bazel test //tests/unit/net:http_parse_test --test_output=all`
-Expected: PASS — 13 tests.
+Expected: PASS — 14 tests.
 
 - [ ] **Step 8: Commit**
 
