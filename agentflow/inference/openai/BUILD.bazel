@@ -1,0 +1,17 @@
+# agentflow/inference/openai/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "message_map",
+    srcs = ["message_map.cc"],
+    hdrs = ["message_map.h"],
+    deps = [
+        "//agentflow/inference:chat_backend",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
