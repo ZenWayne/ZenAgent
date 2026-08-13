@@ -238,7 +238,18 @@ class HttpsClient::Impl {
     auto conn = std::make_shared<Connection>(io_, opts_);
     // A cancel closes the socket, so the in-flight co_await returns an error
     // which the checks below convert to Cancelled.
-    cancel.OnCancel([conn]() { conn->Close(); });
+    //
+    // Captured as weak_ptr, not shared_ptr: CancelToken has no way to
+    // unregister a callback, so a shared_ptr capture would keep this
+    // Connection (and its socket) alive for as long as the CancelSource
+    // lives, not just for the duration of Run() — a real leak when one
+    // CancelToken is threaded across a whole multi-turn loop with many
+    // requests. `conn` is kept alive by the local shared_ptr for the whole
+    // of Run(), so the weak_ptr is always lockable while a cancel can still
+    // matter, and this closure retains nothing once Run() returns.
+    cancel.OnCancel([w = std::weak_ptr<Connection>(conn)]() {
+      if (auto c = w.lock()) c->Close();
+    });
 
     if (auto s = co_await conn->Connect(*url); !s.ok()) {
       co_return cancel.IsCancelled() ? absl::CancelledError("cancelled") : s;
@@ -279,7 +290,14 @@ class HttpsClient::Impl {
       constexpr size_t kMaxErrorBody = 8192;
       while (body_bytes.size() < kMaxErrorBody) {
         auto chunk = co_await conn->ReadSome();
-        if (!chunk.ok() || chunk->empty()) break;
+        if (!chunk.ok() || chunk->empty()) {
+          // A read failure here can be a cancellation (the cancel callback
+          // closed the socket): report that distinctly rather than letting
+          // it fall through to the ordinary HTTP-status error below, which
+          // is what the other read loops in this function already do.
+          if (cancel.IsCancelled()) co_return absl::CancelledError("cancelled");
+          break;
+        }
         body_bytes.append(*chunk);
       }
       co_return absl::Status(

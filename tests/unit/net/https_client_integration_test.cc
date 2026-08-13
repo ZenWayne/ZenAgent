@@ -1,15 +1,24 @@
 // tests/unit/net/https_client_integration_test.cc
 //
-// Opt-in. Controlled by three env vars:
+// Opt-in. Controlled by four env vars:
 //   AGENTFLOW_TEST_HTTP_URL   - an OpenAI-compatible /v1/chat/completions
 //                               endpoint, e.g. http://127.0.0.1:11434/v1/chat/
-//                               completions for a local Ollama, or a cloud
-//                               provider's https:// URL.
+//                               completions for a local Ollama, or a
+//                               https:// URL to exercise the TLS path.
 //   AGENTFLOW_TEST_HTTP_MODEL - the model name to put in the request body,
 //                               e.g. "gemma4:e2b" for Ollama.
 //   AGENTFLOW_TEST_HTTP_KEY   - optional. If set, sent as
 //                               "Authorization: Bearer <key>" (a local Ollama
 //                               needs no key; a cloud provider does).
+//   AGENTFLOW_TEST_CA_PATH    - optional. CA bundle file or hashed CA
+//                               directory used to verify an https:// URL.
+//                               Falls back to the desktop bundle
+//                               (/etc/ssl/certs/ca-certificates.crt) when
+//                               unset, so a test proxy with a self-signed
+//                               cert (e.g. a local TLS-terminating proxy)
+//                               can be verified without hardcoding its path
+//                               here — it's a temporary local artifact, not
+//                               something this file should know about.
 // Both tests below skip unless URL and MODEL are set. Skipped by default.
 #include "agentflow/net/https_client.h"
 
@@ -51,6 +60,15 @@ std::optional<LiveEndpoint> GetLiveEndpoint() {
   return ep;
 }
 
+// CA bundle/directory used to verify an https:// live endpoint. Overridable
+// via AGENTFLOW_TEST_CA_PATH so a temporary local test proxy's self-signed
+// cert can be verified without this file hardcoding its path; falls back to
+// the desktop bundle otherwise.
+std::string GetCaPath() {
+  if (const char* ca = std::getenv("AGENTFLOW_TEST_CA_PATH")) return ca;
+  return "/etc/ssl/certs/ca-certificates.crt";
+}
+
 HttpRequest BuildChatRequest(const LiveEndpoint& ep, bool stream) {
   json body = {
       {"model", ep.model},
@@ -79,7 +97,7 @@ TEST(HttpsClientIntegrationTest, PostReturnsABody) {
 
   asio::io_context io;
   HttpsClientOptions opts;
-  opts.ca_path = "/etc/ssl/certs/ca-certificates.crt";
+  opts.ca_path = GetCaPath();
   opts.read_timeout = std::chrono::milliseconds(120'000);
   HttpsClient client(io, opts);
 
@@ -115,7 +133,7 @@ TEST(HttpsClientIntegrationTest, PostSseDeliversFrames) {
 
   asio::io_context io;
   HttpsClientOptions opts;
-  opts.ca_path = "/etc/ssl/certs/ca-certificates.crt";
+  opts.ca_path = GetCaPath();
   opts.read_timeout = std::chrono::milliseconds(120'000);
   HttpsClient client(io, opts);
 
