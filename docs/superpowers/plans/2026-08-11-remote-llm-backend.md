@@ -3205,7 +3205,17 @@ class Connection : public std::enable_shared_from_this<Connection> {
             "ca_path is required for https:// URLs; verification is mandatory");
       }
       asio::error_code ec;
-      ssl_ctx_.set_verify_mode(asio::ssl::verify_peer, ec);
+      // Set the mode on the STREAM, not the context. `stream_` was built in
+      // the member-init list, so its SSL* already copied the context's verify
+      // mode (SSL_VERIFY_NONE) at construction; a later
+      // ssl_ctx_.set_verify_mode() would never reach it. Worse,
+      // set_verify_callback() below calls
+      // SSL_set_verify(ssl_, SSL_get_verify_mode(ssl_), cb), which reads the
+      // SSL object's CURRENT mode and writes it straight back — so a
+      // context-level setting is silently discarded and the handshake accepts
+      // ANY chain. This exact bug shipped once and was caught only by a test
+      // that pointed at a deliberately wrong trust anchor.
+      stream_.set_verify_mode(asio::ssl::verify_peer, ec);
       if (ec) {
         co_return absl::InternalError(
             absl::StrCat("set_verify_mode failed: ", ec.message()));

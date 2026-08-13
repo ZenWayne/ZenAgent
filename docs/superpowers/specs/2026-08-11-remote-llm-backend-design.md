@@ -266,6 +266,15 @@ A `ca_path` option accepting either a bundle file (desktop:
 `/etc/ssl/certs/ca-certificates.crt`) or a hashed directory (Android:
 `/system/etc/security/cacerts/`). There is no option to skip verification.
 
+**A positive TLS test proves nothing about verification.** A client that
+accepts every certificate passes the happy path identically, so the suite must
+also point at a deliberately wrong trust anchor and assert the handshake
+FAILS. That negative test is the only thing separating "verification is
+configured" from "verification is enforced", and it earned its place: it
+caught a real defect in which the verify mode was set on the `SSL_CTX` after
+the `SSL*` had already copied it, leaving validation silently off while every
+positive test passed.
+
 ### 4.3 Message mapping
 
 | canonical (LiteRT shape) | OpenAI |
