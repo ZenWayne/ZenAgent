@@ -57,12 +57,25 @@ absl::StatusOr<ParsedUrl> ParseUrl(std::string_view url) {
     return absl::InvalidArgumentError(absl::StrCat("URL has no host: ", url));
   }
 
-  const auto colon = authority.rfind(':');
-  if (colon != std::string_view::npos) {
-    out.host = std::string(authority.substr(0, colon));
-    out.port = std::string(authority.substr(colon + 1));
+  if (authority.front() == '[') {
+    // Bracketed IPv6 literal, e.g. "[::1]" or "[::1]:8443".
+    const auto close = authority.find(']');
+    if (close == std::string_view::npos) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("unclosed IPv6 literal in URL: ", url));
+    }
+    out.host = std::string(authority.substr(1, close - 1));
+    if (close + 1 < authority.size() && authority[close + 1] == ':') {
+      out.port = std::string(authority.substr(close + 2));
+    }
   } else {
-    out.host = std::string(authority);
+    const auto colon = authority.rfind(':');
+    if (colon != std::string_view::npos) {
+      out.host = std::string(authority.substr(0, colon));
+      out.port = std::string(authority.substr(colon + 1));
+    } else {
+      out.host = std::string(authority);
+    }
   }
   if (out.host.empty()) {
     return absl::InvalidArgumentError(absl::StrCat("URL has no host: ", url));

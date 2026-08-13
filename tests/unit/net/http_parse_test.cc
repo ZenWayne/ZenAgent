@@ -38,6 +38,22 @@ TEST(ParseUrlTest, RejectsUnsupportedScheme) {
   EXPECT_FALSE(ParseUrl("example.com/x").ok());
 }
 
+TEST(ParseUrlTest, HandlesIpv6LiteralHosts) {
+  auto with_port = ParseUrl("https://[::1]:8443/v1");
+  ASSERT_TRUE(with_port.ok());
+  EXPECT_EQ(with_port->host, "::1");     // brackets stripped for the resolver
+  EXPECT_EQ(with_port->port, "8443");
+  EXPECT_EQ(with_port->target, "/v1");
+
+  auto no_port = ParseUrl("https://[::1]/v1");
+  ASSERT_TRUE(no_port.ok());
+  EXPECT_EQ(no_port->host, "::1");
+  EXPECT_EQ(no_port->port, "443");       // scheme default, NOT a garbage split
+  EXPECT_EQ(no_port->target, "/v1");
+
+  EXPECT_FALSE(ParseUrl("https://[::1/v1").ok());   // unclosed bracket
+}
+
 TEST(ParseResponseHeadTest, ParsesStatusAndHeadersCaseInsensitively) {
   const std::string raw =
       "HTTP/1.1 200 OK\r\n"
@@ -50,6 +66,18 @@ TEST(ParseResponseHeadTest, ParsesStatusAndHeadersCaseInsensitively) {
   EXPECT_EQ(h->status_code, 200);
   EXPECT_TRUE(h->chunked);
   EXPECT_EQ(raw.substr(h->head_bytes), "body-starts-here");
+  EXPECT_EQ(h->content_length, -1);
+  ASSERT_EQ(h->headers.size(), 2u);
+  EXPECT_EQ(h->headers[0].first, "content-type");
+  EXPECT_EQ(h->headers[0].second, "text/event-stream");
+  EXPECT_EQ(h->headers[1].first, "transfer-encoding");
+  EXPECT_EQ(h->headers[1].second, "chunked");
+}
+
+TEST(ParseResponseHeadTest, RejectsAMalformedStatusLine) {
+  EXPECT_FALSE(ParseResponseHead("NOTHTTP/1.1 200 OK\r\n\r\n").ok());
+  EXPECT_FALSE(ParseResponseHead("HTTP/1.1 abc OK\r\n\r\n").ok());
+  EXPECT_FALSE(ParseResponseHead("HTTP/1.1 999 Nope\r\n\r\n").ok());
 }
 
 TEST(ParseResponseHeadTest, ReportsContentLengthWhenNotChunked) {
@@ -92,6 +120,15 @@ TEST(ChunkedDecoderTest, HandlesAChunkSizeLineSplitMidNumber) {
   EXPECT_TRUE(d.complete());
 }
 
+TEST(ChunkedDecoderTest, IgnoresChunkExtensions) {
+  // "5;name=value" is a chunk size with an extension — RFC 9112 §7.1.1.
+  ChunkedDecoder d;
+  auto a = d.Feed("5;foo=bar\r\nhello\r\n0\r\n\r\n");
+  ASSERT_TRUE(a.ok());
+  EXPECT_EQ(*a, "hello");
+  EXPECT_TRUE(d.complete());
+}
+
 TEST(SseFramerTest, SplitsFramesOnBlankLine) {
   SseFramer f;
   auto got = f.Feed("data: {\"a\":1}\n\ndata: {\"b\":2}\n\n");
@@ -123,6 +160,13 @@ TEST(SseFramerTest, ToleratesCrLfLineEndings) {
   SseFramer f;
   auto got = f.Feed("data: {\"a\":1}\r\n\r\n");
   EXPECT_EQ(got, (std::vector<std::string>{R"({"a":1})"}));
+}
+
+TEST(SseFramerTest, JoinsMultipleDataLinesInOneFrame) {
+  // Per the SSE spec, multiple data: lines in one frame join with \n.
+  SseFramer f;
+  auto got = f.Feed("data: line one\ndata: line two\n\n");
+  EXPECT_EQ(got, (std::vector<std::string>{"line one\nline two"}));
 }
 
 }  // namespace
