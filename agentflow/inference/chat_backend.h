@@ -34,7 +34,11 @@ struct ChatConversationOptions {
   // emits: [{"type":"function","function":{name,description,parameters}}].
   std::string tools_json = "[]";
 
-  // Initial history, canonical shape.
+  // LiteRT-only: initial history, canonical shape, fed to the on-device
+  // engine's KV cache at conversation start. OpenAiConversation never reads
+  // this field — a remote backend's IConversation OWNS its own `messages_`
+  // array from scratch (see the class comment below) and starts empty; it
+  // has no equivalent notion of pre-seeding history at construction time.
   std::string messages_json = "[]";
 
   int max_output_tokens = 1024;
@@ -64,6 +68,17 @@ class IConversation {
       const CancelToken& cancel) = 0;
 
   // Breaks the in-flight request. Safe to call from any thread.
+  //
+  // This method itself is NOT the only legal way to satisfy that contract:
+  // an implementation MAY make it a deliberate no-op if it instead wires
+  // cancellation through the same CancelToken that SendAsync/PostSse
+  // already receive per call (register a hook via CancelToken::OnCancel on
+  // the transport object, e.g. the live socket/connection). OpenAiConversation
+  // does exactly that — see its Cancel() override and HttpsClient, which is
+  // what actually breaks the in-flight request via the OnCancel hook it
+  // registers on that same token. Whichever path an implementation picks,
+  // SOME code must register on the token the caller passes to SendAsync, or
+  // cancellation silently does nothing.
   virtual void Cancel() = 0;
 };
 

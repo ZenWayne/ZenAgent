@@ -114,8 +114,16 @@ class OpenAiConversation : public IConversation {
   }
 
   void Cancel() override {
-    // The in-flight HTTP request is broken by the CancelToken hook the client
-    // registered; nothing extra is owned here.
+    // Deliberate no-op, NOT an unimplemented stub: this class owns no
+    // transport handle to close. Every SendAsync call threads its
+    // CancelToken straight through to http_.PostSse(), and HttpsClient
+    // registers its own OnCancel hook on that same token (see
+    // HttpsClient::Impl::PostSse in https_client.cc) that actually tears
+    // down the live connection. Cancellation for a remote conversation is
+    // real — it just lives in the HTTP client, not here. Do not remove the
+    // HttpsClient registration believing this method is what owns
+    // cancellation; if it is ever swapped out for a client that doesn't
+    // hook the token, cancellation for this backend goes silently dead.
   }
 
  private:

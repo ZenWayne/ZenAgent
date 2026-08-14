@@ -53,8 +53,12 @@ Most agent frameworks assume a cloud LLM and a server runtime. AgentFlow targets
 
 ### Remote inference backends
 
-An agent runs on whichever backend the host registers under the logical name
-in its `model.backend`. On-device and cloud agents coexist in one workflow:
+An agent — top-level or a delegated sub-agent — runs on whichever backend the
+host registers under the logical name in its own `model.backend`. A
+sub-agent's backend is resolved independently of its parent's: a child that
+names its own backend gets that backend, never the parent's, even when the
+parent is itself running on a named one. On-device and cloud agents coexist
+in one workflow:
 
 ```json
 {"agents": {
@@ -75,8 +79,10 @@ spec.backends["cloud"] = openai::OpenAiChatBackend::Create(opts, http);
 model id live only in host code — an environment variable on desktop,
 `EncryptedSharedPreferences` on Android. A workflow JSON carries a logical name
 and nothing else, so it stays safe to serialize, checkpoint, log and hot-push.
-A name the host did not register is rejected when the host builds the agent,
-not silently resolved to the default backend.
+A name the host did not register is rejected rather than silently resolved to
+the default backend — for a top-level agent, when the host builds it; for a
+delegated sub-agent, when the delegation runs (both paths share one
+resolution rule).
 
 Any OpenAI-compatible endpoint works: OpenAI, DeepSeek, Volcengine ARK, Kimi,
 GLM, MiniMax, OpenRouter, and local Ollama / vLLM / LiteLLM gateways.

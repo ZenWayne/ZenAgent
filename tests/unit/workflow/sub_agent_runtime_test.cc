@@ -14,9 +14,11 @@
 #include <asio/use_future.hpp>
 #include <nlohmann/json.hpp>
 
+#include "agentflow/core/errors.h"
 #include "agentflow/core/event.h"
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/workflow_loader.h"
+#include "tests/support/fake_chat_backend.h"
 
 namespace agentflow::workflow {
 namespace {
@@ -43,7 +45,8 @@ nlohmann::ordered_json RunAsyncBlocking(SubAgentRuntime& rt,
 // Factory whose conversation must never be created — the gating checks
 // (depth/roster) return before RunSync reaches the LLM path.
 SubAgentRuntime::ConversationFactory NoLlmFactory() {
-  return [](ChatConversationOptions) -> SubAgentRuntime::SendFn {
+  return [](std::string_view, std::string_view,
+            ChatConversationOptions) -> SubAgentRuntime::SendFn {
     ADD_FAILURE() << "conversation factory should not be invoked";
     return {};
   };
@@ -100,7 +103,8 @@ TEST(SubAgentRuntimeTest, InjectedConversationDrivesRun) {
   NullEventEmitter emit;
 
   SubAgentRuntime::ConversationFactory fake =
-      [](ChatConversationOptions) -> SubAgentRuntime::SendFn {
+      [](std::string_view, std::string_view,
+         ChatConversationOptions) -> SubAgentRuntime::SendFn {
     return [](const std::string&, const SubAgentRuntime::TokenSink&,
               const CancelToken&)
                -> asio::awaitable<absl::StatusOr<std::string>> {
@@ -126,7 +130,8 @@ TEST(SubAgentRuntimeTest, ConversationCreationFailureIsEngineError) {
   NullEventEmitter emit;
 
   SubAgentRuntime::ConversationFactory broken =
-      [](ChatConversationOptions) -> SubAgentRuntime::SendFn {
+      [](std::string_view, std::string_view,
+         ChatConversationOptions) -> SubAgentRuntime::SendFn {
     return {};
   };
 
@@ -148,7 +153,8 @@ TEST(SubAgentRuntimeTest, StreamsDeltasToChannel) {
   NullEventEmitter emit;
 
   SubAgentRuntime::ConversationFactory streaming_fake =
-      [](ChatConversationOptions) -> SubAgentRuntime::SendFn {
+      [](std::string_view, std::string_view,
+         ChatConversationOptions) -> SubAgentRuntime::SendFn {
     return [](const std::string&, const SubAgentRuntime::TokenSink& on_token,
               const CancelToken&)
                -> asio::awaitable<absl::StatusOr<std::string>> {
@@ -211,6 +217,138 @@ TEST(SubAgentRuntimeTest, ParentWithoutDelegatesRejected) {
   SubAgentContext ctx;
   auto result = RunAsyncBlocking(rt, io, "solo", "anything", "x", ctx);
   EXPECT_EQ(result.value("error", ""), "unknown_agent");
+}
+
+// THE DECISIVE TEST (final-review fix wave): nothing anywhere previously
+// exercised a sub-agent running on a remote backend, which is how three
+// defects survived 13 per-task reviews — SubAgentRuntime built a
+// {role,content} system message object instead of AgentNode's bare content
+// array (silently drops the system prompt on any remote backend, since
+// openai::FlattenContent returns {} for an object), had no guard at all on
+// the tool_calls loop, and never consulted the child's own model.backend.
+// This test drives SubAgentRuntime through its PRODUCTION factory
+// (DefaultConversationFactory), the same one workflow_runner.cc wires up,
+// with FakeChatBackend standing in for "some backend, on-device or remote" —
+// exactly the seam IChatBackend abstracts over.
+constexpr char kRemoteBackendRosterJson[] = R"({
+  "schema_version":1,"name":"t","version":"v1",
+  "state":{"kind":"dynamic_json","fields":{}},
+  "agents":{
+    "parent":{"system_prompt":"","model":{},"tools":[],
+              "delegates":{"agents":["child"],"max_depth":2}},
+    "child":{"system_prompt":"You are a careful child agent.",
+             "model":{},"tools":[]}
+  },
+  "main":"parent"
+})";
+
+TEST(SubAgentRuntimeTest,
+     RemoteBackendGetsBareArraySystemPromptAndSurvivesMalformedToolCalls) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kRemoteBackendRosterJson, host_tools);
+  NullEventEmitter emit;
+
+  // First turn: a tool_calls array containing a bare scalar — the exact
+  // shape that used to throw an uncaught type_error.306 and abort the
+  // process. Second turn: plain text, so the loop terminates.
+  auto backend = std::make_shared<agentflow::testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant",)"
+          R"("content":[{"type":"text","text":"thinking"}],)"
+          R"("tool_calls":[42]})",
+          R"({"role":"assistant",)"
+          R"("content":[{"type":"text","text":"done"}]})"});
+
+  SubAgentRuntime rt(wf, host_tools, emit,
+                      SubAgentRuntime::DefaultConversationFactory(backend));
+  SubAgentContext ctx;
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "ping", ctx);
+
+  // Catches FIX 2: a malformed tool_calls entry must not abort the run.
+  ASSERT_TRUE(result.is_string());
+  EXPECT_EQ(result.get<std::string>(), "done");
+
+  // Catches FIX 1: the system prompt must reach the backend as a BARE
+  // content array, not a {role,content} object — the shape
+  // openai::SystemMessage()/FlattenContent actually understands.
+  nlohmann::json sys = nlohmann::json::parse(
+      backend->last_options().system_message_json, nullptr, false);
+  ASSERT_FALSE(sys.is_discarded());
+  ASSERT_TRUE(sys.is_array());
+  ASSERT_EQ(sys.size(), 1u);
+  EXPECT_EQ(sys[0]["type"], "text");
+  EXPECT_EQ(sys[0]["text"], "You are a careful child agent.");
+}
+
+TEST(SubAgentRuntimeTest, ChildWithOwnModelBackendUsesThatBackendNotTheParents) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  constexpr char kWf[] = R"({
+    "schema_version":1,"name":"t","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "agents":{
+      "parent":{"system_prompt":"","model":{},"tools":[],
+                "delegates":{"agents":["child"],"max_depth":2}},
+      "child":{"system_prompt":"","model":{"backend":"cloud-child"},"tools":[]}
+    },
+    "main":"parent"
+  })";
+  auto wf = *WorkflowLoader::Load(kWf, host_tools);
+  NullEventEmitter emit;
+
+  auto parent_backend = std::make_shared<agentflow::testing::FakeChatBackend>(
+      std::vector<std::string>{});
+  auto child_backend = std::make_shared<agentflow::testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","content":[{"type":"text","text":"ok"}]})"});
+
+  std::map<std::string, std::shared_ptr<::agentflow::IChatBackend>> backends =
+      {{"cloud-child", child_backend}};
+
+  // parent_backend plays the role of the PARENT's resolved backend (what
+  // workflow_runner.cc used to hand to every child regardless of the
+  // child's own model.backend); it must never be touched by this run.
+  SubAgentRuntime rt(wf, host_tools, emit,
+                      SubAgentRuntime::DefaultConversationFactory(
+                          parent_backend, backends));
+  SubAgentContext ctx;
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "ping", ctx);
+
+  ASSERT_TRUE(result.is_string());
+  EXPECT_EQ(result.get<std::string>(), "ok");
+  // Catches FIX 4: the child's OWN named backend was used...
+  EXPECT_NE(child_backend->last_conversation(), nullptr);
+  // ...and the parent's resolved backend was never touched.
+  EXPECT_EQ(parent_backend->last_conversation(), nullptr);
+}
+
+TEST(SubAgentRuntimeTest, ChildWithUnregisteredBackendThrowsRatherThanFallingBack) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  constexpr char kWf[] = R"({
+    "schema_version":1,"name":"t","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "agents":{
+      "parent":{"system_prompt":"","model":{},"tools":[],
+                "delegates":{"agents":["child"],"max_depth":2}},
+      "child":{"system_prompt":"","model":{"backend":"ghost"},"tools":[]}
+    },
+    "main":"parent"
+  })";
+  auto wf = *WorkflowLoader::Load(kWf, host_tools);
+  NullEventEmitter emit;
+
+  // A default IS available — the point is it must NOT be used silently.
+  auto default_backend = std::make_shared<agentflow::testing::FakeChatBackend>(
+      std::vector<std::string>{});
+  SubAgentRuntime rt(wf, host_tools, emit,
+                      SubAgentRuntime::DefaultConversationFactory(
+                          default_backend, {}));
+  SubAgentContext ctx;
+  EXPECT_THROW(
+      RunAsyncBlocking(rt, io, "parent", "child", "ping", ctx),
+      AgentflowError);
 }
 
 }  // namespace

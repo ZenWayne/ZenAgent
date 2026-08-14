@@ -31,6 +31,31 @@ TEST(SystemMessageTest, EmptyOrUnparseableYieldsNothing) {
   EXPECT_FALSE(SystemMessage("not json").has_value());
 }
 
+// FlattenContent (the shared helper behind SystemMessage and
+// ToOpenAiMessages' user/assistant content) was never directly tested.
+// json::value() throws type_error.306 on a non-object item and
+// type_error.302 when a present "type" key has the wrong type — untrusted
+// model/provider JSON must degrade to a skipped item, never an uncaught
+// exception.
+TEST(SystemMessageTest, SkipsNonObjectContentItemsWithoutThrowing) {
+  auto m = SystemMessage(R"([42, null, "bare", [1,2],)"
+                          R"({"type":"text","text":"ok"}])");
+  ASSERT_TRUE(m.has_value());
+  EXPECT_EQ((*m)["content"], "ok");
+}
+
+TEST(SystemMessageTest, SkipsWrongTypedTypeFieldWithoutThrowing) {
+  auto m = SystemMessage(R"([{"type":42,"text":"nope"},)"
+                          R"({"type":null,"text":"also nope"},)"
+                          R"({"type":"text","text":"ok"}])");
+  ASSERT_TRUE(m.has_value());
+  EXPECT_EQ((*m)["content"], "ok");
+}
+
+TEST(SystemMessageTest, AllMalformedItemsYieldsNothing) {
+  EXPECT_FALSE(SystemMessage(R"([42,{"type":7,"text":"nope"}])").has_value());
+}
+
 TEST(ToOpenAiMessagesTest, UserContentArrayFlattensToAString) {
   auto r = ToOpenAiMessages(
       R"({"role":"user","content":[{"type":"text","text":"hi"}]})");

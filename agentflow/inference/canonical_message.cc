@@ -15,12 +15,18 @@ std::string ExtractAssistantText(std::string_view canonical_json) {
   if (!content.is_array()) return {};
   std::string out;
   for (const auto& item : content) {
-    // json::value() THROWS type_error.306 on a non-object, and
-    // allow_exceptions=false above does not cover it. Model output is
-    // untrusted, so skip anything that is not an object.
+    // json::value() THROWS type_error.306 on a non-object and
+    // type_error.302 when a present key has the wrong type (e.g.
+    // {"type":42}), and allow_exceptions=false above does not cover either.
+    // Model output is untrusted — never read a field without proving BOTH
+    // that its container is an object AND that the field has the type we
+    // are about to read it as.
     if (!item.is_object()) continue;
-    if (item.value("type", "") == "text" && item.contains("text") &&
-        item["text"].is_string()) {
+    if (!item.contains("type") || !item["type"].is_string() ||
+        item["type"].get<std::string>() != "text") {
+      continue;
+    }
+    if (item.contains("text") && item["text"].is_string()) {
       out.append(item["text"].get<std::string>());
     }
   }

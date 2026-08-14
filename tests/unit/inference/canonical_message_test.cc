@@ -37,6 +37,19 @@ TEST(ExtractAssistantTextTest, SkipsNonObjectContentItemsWithoutThrowing) {
   EXPECT_EQ(ExtractAssistantText(R"({"role":"assistant","content":[7]})"), "");
 }
 
+TEST(ExtractAssistantTextTest, SkipsWrongTypedTypeFieldWithoutThrowing) {
+  // is_object() alone is not enough: item.value("type","") still throws
+  // type_error.302 when "type" is present with the wrong type (e.g. a
+  // number). A malformed item must be skipped, not crash the process.
+  EXPECT_EQ(ExtractAssistantText(
+                R"({"role":"assistant","content":[{"type":42,"text":"nope"},)"
+                R"({"type":"text","text":"ok"}]})"),
+            "ok");
+  EXPECT_EQ(ExtractAssistantText(
+                R"({"role":"assistant","content":[{"type":null,"text":"nope"}]})"),
+            "");
+}
+
 TEST(LiteRtStreamAssemblerTest, AccumulatesTextEnvelopesIntoCanonical) {
   LiteRtStreamAssembler a;
   a.Feed(R"({"role":"assistant","content":[{"type":"text","text":"He"}]})");

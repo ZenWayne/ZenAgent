@@ -16,12 +16,18 @@ std::string FlattenContent(const json& content) {
   if (!content.is_array()) return {};
   std::string out;
   for (const auto& item : content) {
-    // json::value() THROWS type_error.306 on a non-object. Remote model
-    // output is untrusted — skip anything that is not an object rather than
-    // crashing on a stray scalar inside the content array.
+    // json::value() THROWS type_error.306 on a non-object and
+    // type_error.302 when a present key has the wrong type (e.g.
+    // {"type":42}). Remote model output is untrusted — never read a field
+    // without proving BOTH that its container is an object AND that the
+    // field has the type we are about to read it as. Same shape as
+    // StreamAccumulator::Feed.
     if (!item.is_object()) continue;
-    if (item.value("type", "") == "text" && item.contains("text") &&
-        item["text"].is_string()) {
+    if (!item.contains("type") || !item["type"].is_string() ||
+        item["type"].get<std::string>() != "text") {
+      continue;
+    }
+    if (item.contains("text") && item["text"].is_string()) {
       out.append(item["text"].get<std::string>());
     }
   }
@@ -46,7 +52,10 @@ absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
   if (m.is_discarded() || !m.is_object()) {
     return absl::InvalidArgumentError("canonical message is not a JSON object");
   }
-  const std::string role = m.value("role", "");
+  std::string role;
+  if (m.contains("role") && m["role"].is_string()) {
+    role = m["role"].get<std::string>();
+  }
   std::vector<json> out;
 
   if (role == "tool") {
@@ -54,13 +63,21 @@ absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
       return absl::InvalidArgumentError("tool message has no content array");
     }
     for (const auto& entry : m["content"]) {
-      // json::value() THROWS type_error.306 on a non-object. Same guard as
+      // json::value() THROWS type_error.306 on a non-object and
+      // type_error.302 on a present-but-wrong-typed key. Same guard as
       // FlattenContent — this loop must not be the one place that omits it.
       if (!entry.is_object()) continue;
-      const std::string id = entry.value("id", "");
+      std::string id;
+      if (entry.contains("id") && entry["id"].is_string()) {
+        id = entry["id"].get<std::string>();
+      }
       if (id.empty()) {
+        std::string name = "?";
+        if (entry.contains("name") && entry["name"].is_string()) {
+          name = entry["name"].get<std::string>();
+        }
         return absl::InvalidArgumentError(absl::StrCat(
-            "tool result for '", entry.value("name", "?"),
+            "tool result for '", name,
             "' has no id; OpenAI requires tool_call_id on every tool message"));
       }
       std::string value;

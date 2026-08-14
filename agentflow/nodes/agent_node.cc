@@ -150,18 +150,36 @@ asio::awaitable<State> AgentNode::Run(
       // message back with each result.
       json tool_content = json::array();
       for (const auto& tc : resp["tool_calls"]) {
-        // json::value() THROWS type_error.306 on a non-object, and the
+        // json::value() THROWS type_error.306 on a non-object and
+        // type_error.302 when a present key has the wrong type, and the
         // try/catch above covers only the outer parse. Model output is
-        // untrusted — skip anything that is not an object.
+        // untrusted — never read a field without proving BOTH that its
+        // container is an object AND that the field has the type we are
+        // about to read it as. Same shape as StreamAccumulator::Feed.
+        // json::value() THROWS type_error.306 on a non-object and
+        // type_error.302 when a present key has the wrong type, and the
+        // try/catch above covers only the outer parse. Model output is
+        // untrusted — never read a field without proving BOTH that its
+        // container is an object AND that the field has the type we are
+        // about to read it as. Same shape as StreamAccumulator::Feed.
         if (!tc.is_object()) continue;
-        std::string name = tc.value("name", tc.value("function",
-                                                      json::object())
-                                                .value("name", ""));
+        std::string name;
+        if (tc.contains("name") && tc["name"].is_string()) {
+          name = tc["name"].get<std::string>();
+        } else if (tc.contains("function") && tc["function"].is_object()) {
+          const json& fn = tc["function"];
+          if (fn.contains("name") && fn["name"].is_string()) {
+            name = fn["name"].get<std::string>();
+          }
+        }
         // The originating call's id. LiteRT-LM does not need it (the Gemma
         // template reads only name/response), but OpenAI-compatible backends
         // must echo it back as tool_call_id, so it is threaded through the
         // canonical shape. Design spec §3.2.
-        std::string call_id = tc.value("id", "");
+        std::string call_id;
+        if (tc.contains("id") && tc["id"].is_string()) {
+          call_id = tc["id"].get<std::string>();
+        }
         std::string args;
         if (tc.contains("arguments")) {
           args = tc["arguments"].is_string()

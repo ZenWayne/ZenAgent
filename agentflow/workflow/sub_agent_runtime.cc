@@ -12,6 +12,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include "agentflow/core/cancel.h"
+#include "agentflow/core/errors.h"
 #include "agentflow/inference/chat_backend.h"
 #include "agentflow/workflow/json_path.h"
 #include "agentflow/workflow/template_engine.h"
@@ -37,6 +38,21 @@ const proto::WorkflowSpec::AgentDef* FindAgent(const Workflow& wf,
 
 }  // namespace
 
+std::shared_ptr<::agentflow::IChatBackend> ResolveNamedBackend(
+    std::string_view backend_name, std::string_view requesting_agent,
+    const std::shared_ptr<::agentflow::IChatBackend>& default_backend,
+    const std::map<std::string, std::shared_ptr<::agentflow::IChatBackend>>&
+        backends) {
+  if (backend_name.empty()) return default_backend;
+  auto it = backends.find(std::string(backend_name));
+  if (it == backends.end()) {
+    throw AgentflowError("agent '" + std::string(requesting_agent) +
+                          "' requests backend '" + std::string(backend_name) +
+                          "' which the host did not register");
+  }
+  return it->second;
+}
+
 SubAgentRuntime::SubAgentRuntime(
     std::shared_ptr<Workflow> wf, const ToolRegistry& host_tools,
     EventEmitter& emit, ConversationFactory conv_factory)
@@ -47,9 +63,15 @@ SubAgentRuntime::SubAgentRuntime(
 
 SubAgentRuntime::ConversationFactory
 SubAgentRuntime::DefaultConversationFactory(
-    std::shared_ptr<::agentflow::IChatBackend> backend) {
-  return [backend = std::move(backend)](
+    std::shared_ptr<::agentflow::IChatBackend> default_backend,
+    std::map<std::string, std::shared_ptr<::agentflow::IChatBackend>>
+        backends) {
+  return [default_backend = std::move(default_backend),
+          backends = std::move(backends)](
+             std::string_view backend_name, std::string_view requesting_agent,
              ::agentflow::ChatConversationOptions opts) -> SendFn {
+    auto backend = ResolveNamedBackend(backend_name, requesting_agent,
+                                        default_backend, backends);
     auto conv = backend->CreateConversation(std::move(opts));
     if (!conv) return SendFn{};
     return [conv](const std::string& message_json, const TokenSink& on_token,
@@ -126,13 +148,19 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
       std::span<const std::string>(child_tools));
   if (tools_json.empty()) tools_json = "[]";
 
-  // Build the conversation options. system_message_json must be the full
-  // {"role":"system","content":"..."} JSON object — that's what the engine
-  // feeds the chat template.
+  // Build the conversation options. system_message_json must be the BARE
+  // content array documented on ChatConversationOptions
+  // ([{"type":"text","text":"..."}]), NOT a {role,content} object — this
+  // mirrors AgentNode::BuildSystemMessageJson exactly. LiteRT-LM wraps it
+  // into {role:system, content:<this>} itself; a remote OpenAI-compatible
+  // backend's openai::SystemMessage() only recognises this bare-array shape
+  // too (FlattenContent returns {} for a {role,content} object, so a
+  // {role,content} object here silently drops the system prompt on any
+  // remote backend).
   ::agentflow::ChatConversationOptions opts;
   if (!system_text.empty()) {
-    nlohmann::ordered_json sys_msg = {{"role", "system"},
-                                        {"content", system_text}};
+    nlohmann::ordered_json sys_msg = nlohmann::ordered_json::array(
+        {{{"type", "text"}, {"text", system_text}}});
     opts.system_message_json = sys_msg.dump();
   }
   opts.tools_json = tools_json;
@@ -143,7 +171,16 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
     opts.max_output_tokens = 512;
   }
 
-  SendFn send = conv_factory_ ? conv_factory_(std::move(opts)) : SendFn{};
+  // Resolve the child's OWN backend (Task fix: sub-agents used to silently
+  // run on the parent's resolved backend even when they declared their own
+  // model.backend). An empty name falls back to the host default inside
+  // ResolveNamedBackend; an unregistered name throws — same rule as
+  // top-level agent backend selection (workflow_runner.cc), enforced by
+  // DefaultConversationFactory when conv_factory_ is the production one.
+  SendFn send = conv_factory_
+                    ? conv_factory_(child.model().backend(), child_agent,
+                                     std::move(opts))
+                    : SendFn{};
   if (!send) {
     emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
     co_return nlohmann::ordered_json{{"error", "engine_error"}};
@@ -206,15 +243,29 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
       nlohmann::ordered_json tool_content =
           nlohmann::ordered_json::array();
       for (const auto& tc : resp_json["tool_calls"]) {
-        std::string name = tc.value(
-            "name", tc.value("function", nlohmann::ordered_json::object())
-                         .value("name", ""));
+        // json::value() THROWS type_error.306 on a non-object and
+        // type_error.302 when a present key has the wrong type. Model
+        // output is untrusted — never read a field without proving BOTH
+        // that its container is an object AND that the field has the type
+        // we are about to read it as. A malformed entry degrades to a
+        // SKIPPED entry, never an uncaught exception. Same shape as
+        // StreamAccumulator::Feed / AgentNode::Run's twin guard.
+        if (!tc.is_object()) continue;
+        std::string name;
+        if (tc.contains("name") && tc["name"].is_string()) {
+          name = tc["name"].get<std::string>();
+        } else if (tc.contains("function") && tc["function"].is_object()) {
+          const auto& fn = tc["function"];
+          if (fn.contains("name") && fn["name"].is_string()) {
+            name = fn["name"].get<std::string>();
+          }
+        }
         std::string args;
         if (tc.contains("arguments")) {
           args = tc["arguments"].is_string()
                      ? tc["arguments"].get<std::string>()
                      : tc["arguments"].dump();
-        } else if (tc.contains("function") &&
+        } else if (tc.contains("function") && tc["function"].is_object() &&
                    tc["function"].contains("arguments")) {
           args = tc["function"]["arguments"].is_string()
                      ? tc["function"]["arguments"].get<std::string>()

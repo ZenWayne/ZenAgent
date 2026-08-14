@@ -214,5 +214,48 @@ TEST(AgentNodeTest, NonObjectToolCallEntryIsSkippedWithoutThrowing) {
   EXPECT_EQ(out.As<test::TestState>().assistant_reply(), "done");
 }
 
+// is_object() alone is not enough: json::value() still throws type_error.302
+// on a PRESENT key with the wrong type, and type_error.306 when it is called
+// on a non-object (e.g. tc["function"] being a bare string/number rather
+// than an object). Every one of these entries used to abort the process;
+// each must instead degrade to a skipped tool call.
+TEST(AgentNodeTest, WrongTypedToolCallFieldsAreSkippedWithoutThrowing) {
+  asio::io_context io;
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","tool_calls":[)"
+          R"({"name":42},)"
+          R"({"name":null},)"
+          R"({"function":"search"},)"
+          R"({"function":7},)"
+          R"({"id":12345},)"
+          R"({"id":null},)"
+          R"({"id":"call_1","function":{"name":"search","arguments":"{}"}}]})",
+          R"({"role":"assistant","content":[{"type":"text","text":"done"}]})"});
+
+  auto cfg = BaseConfig(backend, io);
+  cfg.tool_registry = RegistryWith("search", "OK");
+  EventCapture cap;
+  State out = RunNode(std::move(cfg), "go", io, cap);
+
+  // No malformed entry aborts the run; the one well-formed call still
+  // dispatches and the run reaches its final answer.
+  EXPECT_EQ(out.As<test::TestState>().assistant_reply(), "done");
+
+  auto conv = backend->last_conversation();
+  ASSERT_NE(conv, nullptr);
+  ASSERT_EQ(conv->sent().size(), 2u);
+  json tool_msg = json::parse(conv->sent()[1]);
+  EXPECT_EQ(tool_msg["role"], "tool");
+  // 6 malformed entries dispatch with an empty name (skipped fields), plus
+  // the one well-formed "call_1" entry — every entry still produces a
+  // tool-result slot (a malformed entry degrades to an empty-name dispatch,
+  // it never vanishes or crashes).
+  ASSERT_EQ(tool_msg["content"].size(), 7u);
+  EXPECT_EQ(tool_msg["content"][6]["name"], "search");
+  EXPECT_EQ(tool_msg["content"][6]["id"], "call_1");
+  EXPECT_EQ(tool_msg["content"][6]["response"]["value"], "OK");
+}
+
 }  // namespace
 }  // namespace agentflow

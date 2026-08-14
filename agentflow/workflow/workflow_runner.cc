@@ -17,20 +17,14 @@ namespace {
 // Resolves an agent's inference backend. An empty ModelSpec.backend selects
 // the build spec's default; a name must be present in the backends map.
 //
-// An unknown name throws rather than falling back to the default: silently
-// demoting an agent from its intended cloud model to a local one would change
-// answer quality invisibly. Design spec §5.
+// Thin wrapper over ResolveNamedBackend (agentflow/workflow/sub_agent_runtime.h)
+// so top-level agents and delegated sub-agents (SubAgentRuntime::RunAsync)
+// share one copy of the "unknown name throws rather than silently falling
+// back" rule (design spec §5) instead of two.
 std::shared_ptr<::agentflow::IChatBackend> ResolveBackend(
     const AgentNodeBuildSpec& spec, const proto::WorkflowSpec::AgentDef& agent_def) {
-  const std::string& name = agent_def.model().backend();
-  if (name.empty()) return spec.backend;
-  auto it = spec.backends.find(name);
-  if (it == spec.backends.end()) {
-    throw AgentflowError("agent '" + spec.agent_name +
-                          "' requests backend '" + name +
-                          "' which the host did not register");
-  }
-  return it->second;
+  return ResolveNamedBackend(agent_def.model().backend(), spec.agent_name,
+                              spec.backend, spec.backends);
 }
 
 }  // namespace
@@ -77,9 +71,17 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
     static NullEventEmitter kNullEmit;
     if (!emit) emit = &kNullEmit;
 
+    // spec.backend (the host's default) + spec.backends (named backends), NOT
+    // cfg.backend (this agent's OWN resolved backend): a child with an empty
+    // model.backend must fall back to the host default, not silently inherit
+    // whatever backend the parent happened to resolve to, and a child that
+    // names its own backend must be able to select ANY registered backend —
+    // resolved per-child inside SubAgentRuntime::RunAsync via
+    // ResolveNamedBackend, not fixed once here.
     auto runtime = std::make_shared<SubAgentRuntime>(
         spec.workflow, *spec.host_tools, *emit,
-        SubAgentRuntime::DefaultConversationFactory(cfg.backend));
+        SubAgentRuntime::DefaultConversationFactory(spec.backend,
+                                                       spec.backends));
 
     std::vector<std::string> allowed;
     allowed.reserve(agent_def.delegates().agents_size());

@@ -50,9 +50,11 @@ cc_test(
     srcs = ["sub_agent_runtime_test.cc"],
     deps = [
         "//agentflow/core",
+        "//agentflow/inference:chat_backend",
         "//agentflow/tools",
         "//agentflow/workflow:sub_agent_runtime",
         "//agentflow/workflow:workflow_loader",
+        "//tests/support:fake_chat_backend",
         "@abseil-cpp//absl/status:statusor",
         "@asio",
         "@googletest//:gtest",
