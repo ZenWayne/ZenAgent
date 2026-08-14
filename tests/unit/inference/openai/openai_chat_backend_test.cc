@@ -205,6 +205,54 @@ TEST(OpenAiChatBackendTest, GivesUpAfterMaxRetries) {
   EXPECT_EQ(http.attempts(), 3);
 }
 
+TEST(OpenAiChatBackendTest, CancelDuringStreamingReturnsCancelledAndDoesNotRetry) {
+  asio::io_context io;
+  // Two frames scripted; the sink cancels on the first, so the second
+  // must never be delivered.
+  testing::FakeHttpClient http({{.frames = {TextFrame("a"), TextFrame("b")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  std::vector<std::string> deltas;
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<absl::StatusOr<std::string>> {
+        co_return co_await conv->SendAsync(
+            R"({"role":"user","content":[{"type":"text","text":"x"}]})",
+            [&](std::string_view d) -> asio::awaitable<void> {
+              deltas.emplace_back(d);
+              cancel.Cancel();
+              co_return;
+            },
+            cancel.Token());
+      },
+      asio::use_future);
+  io.run();
+  io.restart();
+
+  auto resp = fut.get();
+  EXPECT_FALSE(resp.ok());
+  EXPECT_EQ(resp.status().code(), absl::StatusCode::kCancelled);
+  EXPECT_EQ(deltas.size(), 1u);      // second frame never delivered
+  EXPECT_EQ(http.attempts(), 1);     // and no retry after cancellation
+}
+
+TEST(OpenAiChatBackendTest, AlreadyCancelledTokenIssuesNoRequestAtAll) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("never")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  cancel.Cancel();
+  auto r = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"x"}]})",
+                 io, cancel.Token());
+
+  EXPECT_FALSE(r.response.ok());
+  EXPECT_EQ(r.response.status().code(), absl::StatusCode::kCancelled);
+  EXPECT_EQ(http.attempts(), 0);     // never hit the network at all
+}
+
 TEST(OpenAiChatBackendTest, ToolResultMessageBecomesOneOpenAiMessagePerResult) {
   asio::io_context io;
   testing::FakeHttpClient http({{.frames = {TextFrame("done")}}});
