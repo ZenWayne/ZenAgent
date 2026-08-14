@@ -26,13 +26,18 @@
 - **Credentials never leave host code.** No API key, `base_url`, or provider model name may appear in a workflow spec, a checkpoint, a trace event, an error message, or a log line.
 - **The canonical message shape is LiteRT-LM's existing shape.** Do not invent a new one; the remote implementation adapts to it.
 - Protobuf is pinned to v31.1 via `git_override` in `MODULE.bazel`. Do not change it.
-- **`nlohmann::json::value()` throws on a non-object.** `parse(..., allow_exceptions=false)`
-  suppresses *parse* errors only; a later `.value("k", default)` on a number, string,
-  null or array still throws `type_error.306`. Every one of these helpers parses
-  untrusted model output, so **guard with `item.is_object()` before calling
-  `.value()`** (or use `contains()` + `operator==`, both of which are safe on any
-  type). A `content` array holding a bare `42` must return `""`, not crash.
-  (Found by Task 3's reviewer with a compiled repro.)
+- **nlohmann_json throws on type-mismatched access, and `allow_exceptions=false` does
+  NOT cover it** — that flag suppresses *parse* errors only. Two distinct traps, both
+  reachable from untrusted model output:
+  - `.value("k", default)` on a non-object throws `type_error.306`.
+  - `obj["key"]` (string subscript) on a non-object throws `type_error.305`.
+
+  So **check `is_object()` before either**, on every element of any array that came
+  from a model or a provider — including `choices[i]`, not just `content[i]`. Prefer
+  `contains()` + `operator==`, which are safe on any type. A `content` array holding a
+  bare `42` must yield `""`, and a body like `{"choices":[42]}` must return a Status,
+  not throw. Both variants have already shipped once in this project: 306 in Task 3,
+  305 in Task 10, each caught only because a reviewer compiled a repro.
 - **Never use gtest `ASSERT_*` inside a coroutine body.** `ASSERT_*` expands to a
   bare `return;`, which is ill-formed inside a function containing `co_await` /
   `co_return` — it is a hard compile error, not a test failure. Inside any
@@ -3999,7 +4004,17 @@ absl::StatusOr<std::string> ResponseToCanonical(std::string_view body) {
       resp["choices"].empty()) {
     return absl::InternalError("OpenAI response has no choices");
   }
-  const json& msg = resp["choices"][0]["message"];
+  // A provider can return anything. Indexing a non-object with a string key
+  // throws type_error.305, so every hop is type-checked before it is taken.
+  // A choice without a message object is an error, not an empty answer —
+  // fabricating "" here would hand the agent a silent blank turn.
+  const json& choice = resp["choices"][0];
+  if (!choice.is_object() || !choice.contains("message") ||
+      !choice["message"].is_object()) {
+    return absl::InternalError(
+        "OpenAI response choice has no message object");
+  }
+  const json& msg = choice["message"];
 
   json out = {{"role", "assistant"}};
   std::string text;
