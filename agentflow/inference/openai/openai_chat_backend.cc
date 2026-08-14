@@ -48,8 +48,15 @@ class OpenAiConversation : public IConversation {
 
     net::HttpRequest req;
     req.url = absl::StrCat(opts_.base_url, "/chat/completions");
-    req.headers = {{"Content-Type", "application/json"},
-                   {"Authorization", absl::StrCat("Bearer ", opts_.api_key)}};
+    req.headers = {{"Content-Type", "application/json"}};
+    // api_key is optional: some OpenAI-compatible endpoints (e.g. a local
+    // Ollama) require no credential at all. Sending "Authorization: Bearer "
+    // with nothing after it is not the same as sending no header, so omit it
+    // entirely rather than encode an empty credential.
+    if (!opts_.api_key.empty()) {
+      req.headers.push_back(
+          {"Authorization", absl::StrCat("Bearer ", opts_.api_key)});
+    }
     req.body = BuildRequestBody(opts_.model, conv_opts_, messages_,
                                  /*stream=*/true);
 

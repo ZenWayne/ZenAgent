@@ -17,7 +17,10 @@ struct OpenAiOptions {
   // e.g. "https://api.deepseek.com/v1", "http://127.0.0.1:11434/v1".
   std::string base_url;
   // Sent as "Authorization: Bearer <key>". NEVER placed in the request body,
-  // in Describe(), or in any error message.
+  // in Describe(), or in any error message. Optional: some OpenAI-compatible
+  // endpoints (e.g. a local Ollama) require no credential; when empty, the
+  // Authorization header is omitted entirely rather than sent with an empty
+  // credential.
   std::string api_key;
   std::string model;
 

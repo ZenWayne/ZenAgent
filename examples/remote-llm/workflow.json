@@ -1,0 +1,18 @@
+{
+  "name": "remote-llm-demo",
+  "version": "1",
+  "state": {
+    "kind": "dynamic_json",
+    "fields": {
+      "user_query": {"type": "string"},
+      "assistant_reply": {"type": "string"}
+    }
+  },
+  "agents": {
+    "assistant": {
+      "system_prompt": "You are a concise assistant.",
+      "model": {"backend": "cloud", "max_output_tokens": 512}
+    }
+  },
+  "main": "assistant"
+}

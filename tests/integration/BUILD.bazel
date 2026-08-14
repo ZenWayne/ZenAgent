@@ -1,0 +1,17 @@
+# tests/integration/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "remote_llm_e2e_test",
+    size = "small",
+    srcs = ["remote_llm_e2e_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference:canonical_message",
+        "//agentflow/inference/openai:openai_chat_backend",
+        "//agentflow/net:https_client",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

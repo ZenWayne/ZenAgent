@@ -51,6 +51,45 @@ Most agent frameworks assume a cloud LLM and a server runtime. AgentFlow targets
 3. **Everything crossing a boundary is protobuf** — `State`, tool schema, trace events, graph spec, errors share `.proto` definitions (see [`proto/`](proto/)) for zero-copy JNI and version evolution.
 4. Submodules (LiteRT-LM, MCP) are pinned and never modified; all adaptation lives in `inference/` and `tools/`.
 
+### Remote inference backends
+
+An agent runs on whichever backend the host registers under the logical name
+in its `model.backend`. On-device and cloud agents coexist in one workflow:
+
+```json
+{"agents": {
+  "triage":   {"system_prompt": "...", "model": {"backend": ""}},
+  "research": {"system_prompt": "...", "model": {"backend": "cloud"}}
+}}
+```
+
+`triage` uses the default (on-device) backend; `research` uses the named one.
+The host supplies both:
+
+```cpp
+spec.backend           = LiteRtLmChatBackend::Create(engine, io);   // default
+spec.backends["cloud"] = openai::OpenAiChatBackend::Create(opts, http);
+```
+
+**Credentials never go in a workflow.** `base_url`, `api_key` and the provider
+model id live only in host code — an environment variable on desktop,
+`EncryptedSharedPreferences` on Android. A workflow JSON carries a logical name
+and nothing else, so it stays safe to serialize, checkpoint, log and hot-push.
+A name the host did not register is an error at build time, never a silent
+fallback to the default backend.
+
+Any OpenAI-compatible endpoint works: OpenAI, DeepSeek, Volcengine ARK, Kimi,
+GLM, MiniMax, OpenRouter, and local Ollama / vLLM / LiteLLM gateways.
+
+Known limitations: one connection per request (no pooling); no HTTP/2; a remote
+backend cannot honour `constrained_tool_calls` and reports that through
+`last_warning()`. An agent running with `constrained_tool_calls` emits no token
+or trace events even when `stream_tokens` is set — constrained decoding has no
+real increments, so there is nothing to stream.
+
+See [`examples/remote-llm`](examples/remote-llm) for a runnable host wiring
+an agent to a remote endpoint end to end.
+
 ## Repository layout
 
 | Path | Contents |
@@ -99,6 +138,7 @@ Sanitizer configs are available: `bazel test --config=asan //tests/...` (also `-
 | [`examples/streaming-demo`](examples/streaming-demo) | Token-level streaming + cooperative cancellation |
 | [`examples/checkpoint-demo`](examples/checkpoint-demo) | Checkpoint hook (explicit resume) |
 | [`examples/core-stub-graph`](examples/core-stub-graph) | Bare graph/runner with stub nodes (no model) |
+| [`examples/remote-llm`](examples/remote-llm) | Workflow-driven agent against a remote OpenAI-compatible endpoint |
 
 ### C++ sketch
 
