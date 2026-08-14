@@ -104,5 +104,35 @@ TEST(StreamAccumulatorTest, SkipsNonObjectToolCallEntriesWithoutThrowing) {
   EXPECT_EQ(got["tool_calls"][0]["function"]["name"], "n");
 }
 
+TEST(StreamAccumulatorTest, SkipsToolCallEntriesWithAWrongTypedIndex) {
+  // A well-formed object can still carry a bad "index" — value() throws
+  // type_error.302 on that, a different trigger from a non-object element
+  // (is_object() alone would not catch this).
+  //
+  // A wrong-typed index falls back to index 0 rather than being dropped, so
+  // this entry is NOT independent of the genuine index-0 entry that follows
+  // it in the same frame: both land in the same map slot and merge. That is
+  // the actual, verified behavior — not a simplification of it. The second
+  // entry processed wins id/name (per the "first frame sets id/name" rule,
+  // since from the accumulator's point of view each entry it sees for a
+  // given index that carries id/name is treated as authoritative), and
+  // arguments concatenate across both entries rather than being replaced.
+  StreamAccumulator a;
+  a.Feed(R"({"choices":[{"delta":{"tool_calls":[)"
+         R"({"index":null,"id":"junk","function":{"name":"n","arguments":"{}"}},)"
+         R"({"index":0,"id":"c1","function":{"name":"real","arguments":"{}"}}]}}]})");
+
+  json got = json::parse(a.Canonical());
+  ASSERT_TRUE(got.contains("tool_calls"));
+  // Exactly one tool call — the null-index entry did not survive as its own
+  // entry; it merged into index 0.
+  ASSERT_EQ(got["tool_calls"].size(), 1u);
+  EXPECT_EQ(got["tool_calls"][0]["id"], "c1");
+  EXPECT_EQ(got["tool_calls"][0]["function"]["name"], "real");
+  // Both entries' "arguments" fragments get appended (never replaced), so
+  // the merged result is the concatenation of both, in processing order.
+  EXPECT_EQ(got["tool_calls"][0]["function"]["arguments"], "{}{}");
+}
+
 }  // namespace
 }  // namespace agentflow::openai

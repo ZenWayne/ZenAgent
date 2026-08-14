@@ -31,7 +31,11 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
       // number/string/null from a malformed frame) would make
       // tc.value() throw type_error.306 — skip it instead of crashing.
       if (!tc.is_object()) continue;
-      const int index = tc.value("index", 0);
+      // is_object() alone is NOT enough: value() also throws type_error.302
+      // when the key exists with the wrong type, e.g. {"index": null}.
+      const int index = (tc.contains("index") && tc["index"].is_number_integer())
+                            ? tc["index"].get<int>()
+                            : 0;
       PartialCall& call = calls_[index];
       // id and name appear only in this index's FIRST frame; never overwrite
       // them with a later frame's absent value.
