@@ -4301,6 +4301,9 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
 
   if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
     for (const auto& tc : delta["tool_calls"]) {
+      // A malformed frame can put a scalar or null here, and value() throws
+      // type_error.306 on a non-object. Skip the junk, keep the real calls.
+      if (!tc.is_object()) continue;
       const int index = tc.value("index", 0);
       PartialCall& call = calls_[index];
       // id and name appear only in this index's FIRST frame; never overwrite
