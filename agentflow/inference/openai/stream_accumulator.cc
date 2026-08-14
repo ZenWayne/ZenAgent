@@ -33,9 +33,16 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
       if (!tc.is_object()) continue;
       // is_object() alone is NOT enough: value() also throws type_error.302
       // when the key exists with the wrong type, e.g. {"index": null}.
-      const int index = (tc.contains("index") && tc["index"].is_number_integer())
-                            ? tc["index"].get<int>()
-                            : 0;
+      //
+      // Absent index -> 0. OpenAI always sends one, but defaulting keeps a
+      // single-tool-call stream working if a provider omits it.
+      //
+      // PRESENT but wrong-typed -> DROP the entry. Do NOT fall back to 0:
+      // that collides the junk with a genuine index-0 call, overwriting its
+      // id and name and concatenating its arguments into invalid JSON. A
+      // malformed frame must never corrupt a valid tool call.
+      if (tc.contains("index") && !tc["index"].is_number_integer()) continue;
+      const int index = tc.contains("index") ? tc["index"].get<int>() : 0;
       PartialCall& call = calls_[index];
       // id and name appear only in this index's FIRST frame; never overwrite
       // them with a later frame's absent value.

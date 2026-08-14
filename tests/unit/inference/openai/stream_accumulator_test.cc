@@ -109,14 +109,11 @@ TEST(StreamAccumulatorTest, SkipsToolCallEntriesWithAWrongTypedIndex) {
   // type_error.302 on that, a different trigger from a non-object element
   // (is_object() alone would not catch this).
   //
-  // A wrong-typed index falls back to index 0 rather than being dropped, so
-  // this entry is NOT independent of the genuine index-0 entry that follows
-  // it in the same frame: both land in the same map slot and merge. That is
-  // the actual, verified behavior — not a simplification of it. The second
-  // entry processed wins id/name (per the "first frame sets id/name" rule,
-  // since from the accumulator's point of view each entry it sees for a
-  // given index that carries id/name is treated as authoritative), and
-  // arguments concatenate across both entries rather than being replaced.
+  // A PRESENT but wrong-typed index must be DROPPED entirely, not defaulted
+  // to 0: falling back to 0 would collide the junk entry with the genuine
+  // index-0 entry that follows it in the same frame, overwriting its id and
+  // name and concatenating its arguments into invalid JSON ("{}{}"). A
+  // malformed frame must never corrupt a valid tool call.
   StreamAccumulator a;
   a.Feed(R"({"choices":[{"delta":{"tool_calls":[)"
          R"({"index":null,"id":"junk","function":{"name":"n","arguments":"{}"}},)"
@@ -124,14 +121,16 @@ TEST(StreamAccumulatorTest, SkipsToolCallEntriesWithAWrongTypedIndex) {
 
   json got = json::parse(a.Canonical());
   ASSERT_TRUE(got.contains("tool_calls"));
-  // Exactly one tool call — the null-index entry did not survive as its own
-  // entry; it merged into index 0.
+  // Exactly one tool call — the null-index junk entry is dropped, not
+  // merged into index 0.
   ASSERT_EQ(got["tool_calls"].size(), 1u);
   EXPECT_EQ(got["tool_calls"][0]["id"], "c1");
   EXPECT_EQ(got["tool_calls"][0]["function"]["name"], "real");
-  // Both entries' "arguments" fragments get appended (never replaced), so
-  // the merged result is the concatenation of both, in processing order.
-  EXPECT_EQ(got["tool_calls"][0]["function"]["arguments"], "{}{}");
+  // The real entry's arguments are untouched by the dropped junk entry —
+  // exactly "{}", never "{}{}". This is the assertion that proves the
+  // corruption is impossible: it would fail under the old fall-back-to-0
+  // behavior, which concatenated the junk entry's arguments in first.
+  EXPECT_EQ(got["tool_calls"][0]["function"]["arguments"], "{}");
 }
 
 }  // namespace
