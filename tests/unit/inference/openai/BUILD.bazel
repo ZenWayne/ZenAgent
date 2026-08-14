@@ -12,3 +12,15 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "stream_accumulator_test",
+    size = "small",
+    srcs = ["stream_accumulator_test.cc"],
+    deps = [
+        "//agentflow/inference/openai:stream_accumulator",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
