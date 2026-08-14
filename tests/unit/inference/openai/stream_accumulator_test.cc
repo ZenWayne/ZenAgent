@@ -89,5 +89,20 @@ TEST(StreamAccumulatorTest, IgnoresMalformedFramesRatherThanThrowing) {
   EXPECT_EQ(json::parse(a.Canonical())["content"][0]["text"], "ok");
 }
 
+TEST(StreamAccumulatorTest, SkipsNonObjectToolCallEntriesWithoutThrowing) {
+  // A malformed frame can put a scalar or null inside tool_calls.
+  // tc.value("index", 0) would throw type_error.306 on those.
+  StreamAccumulator a;
+  a.Feed(R"({"choices":[{"delta":{"tool_calls":[null,42,)"
+         R"({"index":0,"id":"c1","function":{"name":"n","arguments":"{}"}}]}}]})");
+
+  json got = json::parse(a.Canonical());
+  ASSERT_TRUE(got.contains("tool_calls"));
+  // The junk entries are skipped; the real call survives intact.
+  ASSERT_EQ(got["tool_calls"].size(), 1u);
+  EXPECT_EQ(got["tool_calls"][0]["id"], "c1");
+  EXPECT_EQ(got["tool_calls"][0]["function"]["name"], "n");
+}
+
 }  // namespace
 }  // namespace agentflow::openai
