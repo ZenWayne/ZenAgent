@@ -26,18 +26,31 @@
 - **Credentials never leave host code.** No API key, `base_url`, or provider model name may appear in a workflow spec, a checkpoint, a trace event, an error message, or a log line.
 - **The canonical message shape is LiteRT-LM's existing shape.** Do not invent a new one; the remote implementation adapts to it.
 - Protobuf is pinned to v31.1 via `git_override` in `MODULE.bazel`. Do not change it.
-- **nlohmann_json throws on type-mismatched access, and `allow_exceptions=false` does
-  NOT cover it** — that flag suppresses *parse* errors only. Two distinct traps, both
-  reachable from untrusted model output:
-  - `.value("k", default)` on a non-object throws `type_error.306`.
-  - `obj["key"]` (string subscript) on a non-object throws `type_error.305`.
+- **THE RULE: never read a field out of model- or provider-supplied JSON without first
+  proving BOTH that the container is an object AND that the field has the type you are
+  about to read it as.** `parse(..., allow_exceptions=false)` does not help — it
+  suppresses *parse* errors only, and every accessor below still throws afterwards.
 
-  So **check `is_object()` before either**, on every element of any array that came
-  from a model or a provider — including `choices[i]`, not just `content[i]`. Prefer
-  `contains()` + `operator==`, which are safe on any type. A `content` array holding a
-  bare `42` must yield `""`, and a body like `{"choices":[42]}` must return a Status,
-  not throw. Both variants have already shipped once in this project: 306 in Task 3,
-  305 in Task 10, each caught only because a reviewer compiled a repro.
+  This has now bitten this project four times, each a different trigger, because the
+  rule kept being written around the last symptom instead of the general case:
+  - `.value("k", def)` on a **non-object** → `type_error.306`  (Task 3)
+  - `obj["key"]` on a **non-object** → `type_error.305`  (Task 10)
+  - `.value("k", def)` where the key **exists with the wrong type** → `type_error.302`
+    (Task 11 — `{"index": null}` throws even though the element IS a valid object)
+
+  So a bare `is_object()` guard is **not sufficient**. The safe shape is:
+
+  ```cpp
+  if (!e.is_object()) continue;                       // container proven
+  int i = (e.contains("index") && e["index"].is_number_integer())
+            ? e["index"].get<int>() : 0;              // field type proven
+  std::string s = (e.contains("id") && e["id"].is_string())
+            ? e["id"].get<std::string>() : "";
+  ```
+
+  Apply it to every element of every array that crossed the network — `choices[i]`,
+  `content[i]`, `tool_calls[i]` alike. A malformed frame must degrade to a skipped
+  entry, never to an uncaught exception that kills a half-finished stream.
 - **Never use gtest `ASSERT_*` inside a coroutine body.** `ASSERT_*` expands to a
   bare `return;`, which is ill-formed inside a function containing `co_await` /
   `co_return` — it is a hard compile error, not a test failure. Inside any
@@ -4304,7 +4317,11 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
       // A malformed frame can put a scalar or null here, and value() throws
       // type_error.306 on a non-object. Skip the junk, keep the real calls.
       if (!tc.is_object()) continue;
-      const int index = tc.value("index", 0);
+      // is_object() alone is NOT enough: value() also throws type_error.302
+      // when the key exists with the wrong type, e.g. {"index": null}.
+      const int index = (tc.contains("index") && tc["index"].is_number_integer())
+                            ? tc["index"].get<int>()
+                            : 0;
       PartialCall& call = calls_[index];
       // id and name appear only in this index's FIRST frame; never overwrite
       // them with a later frame's absent value.
