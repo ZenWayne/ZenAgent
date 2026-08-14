@@ -119,7 +119,17 @@ absl::StatusOr<std::string> ResponseToCanonical(std::string_view body) {
       resp["choices"].empty()) {
     return absl::InternalError("OpenAI response has no choices");
   }
-  const json& msg = resp["choices"][0]["message"];
+  // A provider can return anything. Indexing a non-object with a string key
+  // throws type_error.305, so every hop is type-checked before it is taken.
+  // A choice without a message object is an error, not an empty answer —
+  // fabricating "" here would hand the agent a silent blank turn.
+  const json& choice = resp["choices"][0];
+  if (!choice.is_object() || !choice.contains("message") ||
+      !choice["message"].is_object()) {
+    return absl::InternalError(
+        "OpenAI response choice has no message object");
+  }
+  const json& msg = choice["message"];
 
   json out = {{"role", "assistant"}};
   std::string text;

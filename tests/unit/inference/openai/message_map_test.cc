@@ -51,6 +51,10 @@ TEST(ToOpenAiMessagesTest, AssistantWithToolCallsIsPassedThrough) {
   ASSERT_EQ(m["tool_calls"].size(), 1u);
   EXPECT_EQ(m["tool_calls"][0]["id"], "call_1");
   EXPECT_EQ(m["tool_calls"][0]["type"], "function");
+  // arguments must stay a JSON-encoded STRING, not be parsed into an object —
+  // OpenAI sends it that way and AgentNode expects that.
+  ASSERT_TRUE(m["tool_calls"][0]["function"]["arguments"].is_string());
+  EXPECT_EQ(m["tool_calls"][0]["function"]["arguments"], "{}");
 }
 
 TEST(ToOpenAiMessagesTest, OneToolMessageExpandsToOnePerResult) {
@@ -133,11 +137,25 @@ TEST(ResponseToCanonicalTest, ToolCallsArePassedThroughVerbatim) {
   ASSERT_TRUE(got.contains("tool_calls"));
   EXPECT_EQ(got["tool_calls"][0]["id"], "call_9");
   EXPECT_EQ(got["tool_calls"][0]["function"]["name"], "s");
+  // arguments must stay a JSON-encoded STRING, not be parsed into an object.
+  ASSERT_TRUE(got["tool_calls"][0]["function"]["arguments"].is_string());
+  EXPECT_EQ(got["tool_calls"][0]["function"]["arguments"], "{\"q\":1}");
 }
 
 TEST(ResponseToCanonicalTest, MalformedOrEmptyChoicesIsAnError) {
   EXPECT_FALSE(ResponseToCanonical("not json").ok());
   EXPECT_FALSE(ResponseToCanonical(R"({"choices":[]})").ok());
+}
+
+TEST(ResponseToCanonicalTest, NonObjectChoiceIsAnErrorNotACrash) {
+  EXPECT_FALSE(ResponseToCanonical(R"({"choices":[42]})").ok());
+  EXPECT_FALSE(ResponseToCanonical(R"({"choices":["x"]})").ok());
+  EXPECT_FALSE(ResponseToCanonical(R"({"choices":[[1,2]]})").ok());
+}
+
+TEST(ResponseToCanonicalTest, ChoiceWithoutAMessageObjectIsAnError) {
+  EXPECT_FALSE(ResponseToCanonical(R"({"choices":[{}]})").ok());
+  EXPECT_FALSE(ResponseToCanonical(R"({"choices":[{"message":7}]})").ok());
 }
 
 }  // namespace
