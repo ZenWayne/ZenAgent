@@ -75,8 +75,8 @@ spec.backends["cloud"] = openai::OpenAiChatBackend::Create(opts, http);
 model id live only in host code — an environment variable on desktop,
 `EncryptedSharedPreferences` on Android. A workflow JSON carries a logical name
 and nothing else, so it stays safe to serialize, checkpoint, log and hot-push.
-A name the host did not register is an error at build time, never a silent
-fallback to the default backend.
+A name the host did not register is rejected when the host builds the agent,
+not silently resolved to the default backend.
 
 Any OpenAI-compatible endpoint works: OpenAI, DeepSeek, Volcengine ARK, Kimi,
 GLM, MiniMax, OpenRouter, and local Ollama / vLLM / LiteLLM gateways.

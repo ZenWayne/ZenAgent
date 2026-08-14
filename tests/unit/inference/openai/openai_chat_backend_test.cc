@@ -107,6 +107,25 @@ TEST(OpenAiChatBackendTest, ApiKeyTravelsInTheHeaderNeverTheBody) {
   EXPECT_TRUE(found);
 }
 
+TEST(OpenAiChatBackendTest, EmptyApiKeyOmitsTheAuthorizationHeaderEntirely) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("ok")}}});
+  auto opts = TestOptions();
+  opts.api_key = "";               // keyless endpoint, e.g. a local Ollama
+  auto backend = OpenAiChatBackend::Create(opts, http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  CancelSource cancel;
+  Send(*conv, R"({"role":"user","content":[{"type":"text","text":"hi"}]})", io,
+       cancel.Token());
+
+  ASSERT_EQ(http.requests().size(), 1u);
+  for (const auto& [k, v] : http.requests()[0].headers) {
+    EXPECT_NE(k, "Authorization")
+        << "an empty key must send NO Authorization header, not an empty one";
+  }
+}
+
 TEST(OpenAiChatBackendTest, HistoryIsOwnedSoTurnTwoCarriesTurnOne) {
   asio::io_context io;
   testing::FakeHttpClient http({{.frames = {TextFrame("first")}},
