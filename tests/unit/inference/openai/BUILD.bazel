@@ -24,3 +24,18 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "openai_chat_backend_test",
+    size = "small",
+    srcs = ["openai_chat_backend_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference/openai:openai_chat_backend",
+        "//tests/support:fake_http_client",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)

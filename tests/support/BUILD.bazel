@@ -15,3 +15,16 @@ cc_library(
         "@asio",
     ],
 )
+
+cc_library(
+    name = "fake_http_client",
+    testonly = True,
+    hdrs = ["fake_http_client.h"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/net:http_client",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+    ],
+)

@@ -22,3 +22,20 @@ cc_library(
     hdrs = ["stream_accumulator.h"],
     deps = ["@nlohmann_json//:json"],
 )
+
+cc_library(
+    name = "openai_chat_backend",
+    srcs = ["openai_chat_backend.cc"],
+    hdrs = ["openai_chat_backend.h"],
+    deps = [
+        ":message_map",
+        ":stream_accumulator",
+        "//agentflow/inference:chat_backend",
+        "//agentflow/net:http_client",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@asio",
+        "@nlohmann_json//:json",
+    ],
+)
