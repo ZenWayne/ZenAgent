@@ -177,10 +177,28 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
   // ResolveNamedBackend; an unregistered name throws — same rule as
   // top-level agent backend selection (workflow_runner.cc), enforced by
   // DefaultConversationFactory when conv_factory_ is the production one.
-  SendFn send = conv_factory_
-                    ? conv_factory_(child.model().backend(), child_agent,
-                                     std::move(opts))
-                    : SendFn{};
+  // ResolveNamedBackend (reached via conv_factory_ when conv_factory_ is
+  // DefaultConversationFactory) THROWS AgentflowError on an unregistered
+  // backend name rather than silently falling back to the default — see its
+  // doc comment. RunAsync's own contract is "NEVER throws", so that throw is
+  // caught here and converted into the same structured-error shape every
+  // other failure in this function uses: EmitSubAgentEnd terminates the
+  // trace span, and {"error":"unknown_backend",...} reaches the parent LLM
+  // as loudly as engine_error does — it must NOT be swallowed into a silent
+  // fallback to the parent's or host's default backend (design spec §5).
+  SendFn send;
+  try {
+    send = conv_factory_
+               ? conv_factory_(child.model().backend(), child_agent,
+                                std::move(opts))
+               : SendFn{};
+  } catch (const AgentflowError&) {
+    emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "unknown_backend",
+                           0);
+    co_return nlohmann::ordered_json{
+        {"error", "unknown_backend"},
+        {"backend", std::string(child.model().backend())}};
+  }
   if (!send) {
     emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
     co_return nlohmann::ordered_json{{"error", "engine_error"}};
@@ -260,6 +278,15 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
             name = fn["name"].get<std::string>();
           }
         }
+        // The originating call's id. LiteRT-LM does not need it (the Gemma
+        // template reads only name/response), but OpenAI-compatible backends
+        // must echo it back as tool_call_id — message_map.cc's
+        // ToOpenAiMessages rejects a tool-result entry with no id. Same
+        // extraction as AgentNode::Run's twin loop (design spec §3.2).
+        std::string call_id;
+        if (tc.contains("id") && tc["id"].is_string()) {
+          call_id = tc["id"].get<std::string>();
+        }
         std::string args;
         if (tc.contains("arguments")) {
           args = tc["arguments"].is_string()
@@ -290,8 +317,10 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
         } catch (const std::exception& e) {
           result = std::string("Tool error: ") + e.what();
         }
-        tool_content.push_back(
-            {{"name", name}, {"response", {{"value", result}}}});
+        nlohmann::ordered_json entry = {{"name", name},
+                                          {"response", {{"value", result}}}};
+        if (!call_id.empty()) entry["id"] = call_id;
+        tool_content.push_back(std::move(entry));
       }
       nlohmann::ordered_json tool_msg = {{"role", "tool"},
                                            {"content", tool_content}};

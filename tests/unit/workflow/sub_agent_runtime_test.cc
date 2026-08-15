@@ -16,6 +16,7 @@
 
 #include "agentflow/core/errors.h"
 #include "agentflow/core/event.h"
+#include "agentflow/tools/native_fn_tool.h"
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/workflow_loader.h"
 #include "tests/support/fake_chat_backend.h"
@@ -323,7 +324,13 @@ TEST(SubAgentRuntimeTest, ChildWithOwnModelBackendUsesThatBackendNotTheParents) 
   EXPECT_EQ(parent_backend->last_conversation(), nullptr);
 }
 
-TEST(SubAgentRuntimeTest, ChildWithUnregisteredBackendThrowsRatherThanFallingBack) {
+// RunAsync's contract is "NEVER throws" (sub_agent_runtime.h). An
+// unregistered child backend must still FAIL LOUDLY — never silently fall
+// back to the parent's or host's default backend — but it must do so as a
+// structured {"error":...} result (like every sibling failure in RunAsync),
+// not by letting ResolveNamedBackend's AgentflowError escape uncaught.
+TEST(SubAgentRuntimeTest,
+     ChildWithUnregisteredBackendReturnsStructuredErrorRatherThanFallingBack) {
   asio::io_context io;
   ToolRegistry host_tools(io);
   constexpr char kWf[] = R"({
@@ -346,9 +353,76 @@ TEST(SubAgentRuntimeTest, ChildWithUnregisteredBackendThrowsRatherThanFallingBac
                       SubAgentRuntime::DefaultConversationFactory(
                           default_backend, {}));
   SubAgentContext ctx;
-  EXPECT_THROW(
-      RunAsyncBlocking(rt, io, "parent", "child", "ping", ctx),
-      AgentflowError);
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "ping", ctx);
+
+  ASSERT_TRUE(result.is_object());
+  EXPECT_EQ(result.value("error", ""), "unknown_backend");
+  EXPECT_EQ(result.value("backend", ""), "ghost");
+  // The point of this test: the default backend must never have been used
+  // as a silent fallback for the unregistered "ghost" name.
+  EXPECT_EQ(default_backend->last_conversation(), nullptr);
+}
+
+// THE DECISIVE TEST for the tool_call_id defect the final re-review caught:
+// SubAgentRuntime's own tool-dispatch loop (sub_agent_runtime.cc) built each
+// tool result as {"name":..,"response":..} and never extracted the
+// originating call's "id" — unlike AgentNode::Run's twin loop. On a
+// REMOTE-shaped tool_calls entry (the OpenAI shape, carrying "id") this
+// silently drops the id, so message_map.cc's ToOpenAiMessages rejects the
+// resulting tool message ("...has no id...") on the sub-agent's second turn.
+// This drives a real tool through the host registry and asserts the SENT
+// second-turn message carries the originating id — not merely that the run
+// avoided an error (dropping tools entirely would also avoid the error).
+TEST(SubAgentRuntimeTest, ToolResultCarriesOriginatingCallId) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  host_tools.Register(std::make_shared<NativeFnTool>(
+      ToolSchema{.name = "search",
+                 .description = "test tool",
+                 .params_json_schema = R"({"type":"object","properties":{}})"},
+      [](std::string_view, const CancelToken&)
+          -> asio::awaitable<std::string> { co_return "SEARCH_RESULT"; }));
+
+  constexpr char kWf[] = R"({
+    "schema_version":1,"name":"t","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "agents":{
+      "parent":{"system_prompt":"","model":{},"tools":[],
+                "delegates":{"agents":["child"],"max_depth":2}},
+      "child":{"system_prompt":"","model":{},"tools":["search"]}
+    },
+    "main":"parent"
+  })";
+  auto wf = *WorkflowLoader::Load(kWf, host_tools);
+  NullEventEmitter emit;
+
+  // Turn 1: the model asks for a tool, REMOTE-shaped (carries "id", the
+  // OpenAI tool_calls shape). Turn 2: it answers, so the loop reaches a
+  // second turn and RunAsync must have echoed the id back on turn 1's
+  // tool-result message.
+  auto backend = std::make_shared<agentflow::testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","tool_calls":[{"id":"call_7",)"
+          R"("function":{"name":"search","arguments":"{\"q\":\"zen\"}"}}]})",
+          R"({"role":"assistant","content":[{"type":"text","text":"done"}]})"});
+
+  SubAgentRuntime rt(wf, host_tools, emit,
+                      SubAgentRuntime::DefaultConversationFactory(backend));
+  SubAgentContext ctx;
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "find zen", ctx);
+
+  ASSERT_TRUE(result.is_string());
+  EXPECT_EQ(result.get<std::string>(), "done");
+
+  auto conv = backend->last_conversation();
+  ASSERT_NE(conv, nullptr);
+  ASSERT_EQ(conv->sent().size(), 2u);
+  nlohmann::json tool_msg = nlohmann::json::parse(conv->sent()[1]);
+  EXPECT_EQ(tool_msg["role"], "tool");
+  ASSERT_EQ(tool_msg["content"].size(), 1u);
+  EXPECT_EQ(tool_msg["content"][0]["id"], "call_7");
+  EXPECT_EQ(tool_msg["content"][0]["name"], "search");
+  EXPECT_EQ(tool_msg["content"][0]["response"]["value"], "SEARCH_RESULT");
 }
 
 }  // namespace

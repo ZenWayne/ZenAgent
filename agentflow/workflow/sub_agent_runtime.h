@@ -31,6 +31,12 @@ namespace agentflow::workflow {
 // Shared by top-level agent backend selection (workflow_runner.cc) and
 // sub-agent backend selection (SubAgentRuntime::RunAsync) so both follow the
 // identical rule instead of maintaining two copies of it.
+// THROWS AgentflowError on an unregistered name — used directly by
+// workflow_runner.cc's top-level agent backend selection, where an uncaught
+// throw is the correct behavior. SubAgentRuntime::RunAsync (via
+// DefaultConversationFactory) instead catches this throw and converts it to
+// a structured {"error":"unknown_backend",...} result so its own "NEVER
+// throws" contract holds; see RunAsync's doc comment.
 std::shared_ptr<::agentflow::IChatBackend> ResolveNamedBackend(
     std::string_view backend_name, std::string_view requesting_agent,
     const std::shared_ptr<::agentflow::IChatBackend>& default_backend,
@@ -81,9 +87,11 @@ class SubAgentRuntime {
   // Builds the production factory from the host's default backend plus any
   // named backends it registered. A child whose ModelSpec.backend is empty
   // gets `default_backend`; a child that names a backend gets THAT backend
-  // (or the factory call throws — see ResolveNamedBackend) rather than
-  // silently inheriting the parent's backend (Task fix: sub-agents used to
-  // ignore their own model.backend entirely).
+  // (or the underlying call to ResolveNamedBackend throws AgentflowError,
+  // which RunAsync catches and converts to {"error":"unknown_backend",...} —
+  // see RunAsync's doc comment) rather than silently inheriting the parent's
+  // backend (Task fix: sub-agents used to ignore their own model.backend
+  // entirely).
   static ConversationFactory DefaultConversationFactory(
       std::shared_ptr<::agentflow::IChatBackend> default_backend,
       std::map<std::string, std::shared_ptr<::agentflow::IChatBackend>>
