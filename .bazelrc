@@ -21,3 +21,26 @@ build:android_arm64 --copt=-DANDROID --cxxopt=-std=c++20 --host_cxxopt=-std=c++2
 # (The repo-root name is the Bazel 7 bzlmod canonical form pinned via
 # .bazelversion; abseil-cpp is pinned in MODULE.bazel.)
 build:android_arm64 --copt=-Iexternal/abseil-cpp~
+
+# On-device test executables (adb push + run on a real arm64 device).
+#
+# Inherits android_arm64 and adds the C++ runtime explicitly. Bazel links with
+# the `clang` driver, not `clang++`, so nothing pulls in libc++ — a cc_binary
+# with linkshared=True (our JNI .so) is unaffected because its symbols resolve
+# at dlopen time, but every cc_test executable fails to link with undefined
+# operator new / std::__ndk1::basic_string::~basic_string / operator delete.
+#
+# Kept as a SEPARATE config rather than folded into android_arm64: adding
+# -lc++_static there would also statically link libc++ into libagentflow_jni.so,
+# changing how the shipping artifact is built. Testing must not silently alter
+# the deliverable.
+#
+#   bazel build --config=android_arm64_test //tests/unit/net:http_parse_test
+build:android_arm64_test --config=android_arm64
+build:android_arm64_test --linkopt=-lc++_static --linkopt=-lc++abi
+# Static-link the project's own libraries too. Bazel otherwise emits cc_library
+# as .so files that the test binary needs at runtime, and a bare `adb push` of
+# the executable then dies with:
+#   CANNOT LINK EXECUTABLE: library "libagentflow_Snet_Slibhttp_Uparse.so" not found
+# One self-contained binary is what `adb push && run` actually wants.
+build:android_arm64_test --dynamic_mode=off

@@ -189,18 +189,33 @@ TEST(HttpsClientIntegrationTest, RejectsAServerCertItDoesNotTrust) {
                     "exercises the TLS reject path";
   }
 
-  constexpr const char* kSystemCaBundle =
-      "/etc/ssl/certs/ca-certificates.crt";
-  if (!std::filesystem::exists(kSystemCaBundle)) {
-    GTEST_SKIP() << kSystemCaBundle << " is not present on this host";
+  // The wrong trust anchor is platform-specific: a bundle FILE on desktop, a
+  // hashed CA DIRECTORY on Android. Both are real system stores that do NOT
+  // contain the test proxy's self-signed cert, so either works as the "should
+  // be rejected" anchor — and covering Android matters most, because that is
+  // where the client is least otherwise exercised.
+  static constexpr const char* kCandidateSystemStores[] = {
+      "/etc/ssl/certs/ca-certificates.crt",     // desktop Linux bundle
+      "/system/etc/security/cacerts",           // Android hashed CA dir
+      "/apex/com.android.conscrypt/cacerts",    // Android 10+ Conscrypt store
+  };
+  std::string system_store;
+  for (const char* candidate : kCandidateSystemStores) {
+    if (std::filesystem::exists(candidate)) {
+      system_store = candidate;
+      break;
+    }
+  }
+  if (system_store.empty()) {
+    GTEST_SKIP() << "no system CA store found to use as a wrong trust anchor";
   }
 
   asio::io_context io;
   HttpsClientOptions opts;
-  // Deliberately the WRONG trust anchor: the system bundle does not contain
-  // the test proxy's self-signed cert (unlike AGENTFLOW_TEST_CA_PATH, used
-  // by the accept-path tests above), so verification must fail.
-  opts.ca_path = kSystemCaBundle;
+  // Deliberately the WRONG trust anchor: a real system store, which does not
+  // contain the test proxy's self-signed cert (unlike AGENTFLOW_TEST_CA_PATH,
+  // used by the accept-path tests above), so verification must fail.
+  opts.ca_path = system_store;
   opts.read_timeout = std::chrono::milliseconds(120'000);
   HttpsClient client(io, opts);
 
