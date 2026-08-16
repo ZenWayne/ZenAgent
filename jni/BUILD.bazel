@@ -46,3 +46,13 @@ cc_binary(
         "//conditions:default": [],
     }),
 )
+
+# Device smoke check: dlopens libagentflow_jni.so on a real arm64 device and
+# verifies every Kotlin-facing entry point resolves. A clean cross-compile
+# proves neither — Android's loader rejects text relocations, and unresolved
+# symbols only surface at dlopen. See device_load_check.cc for the run recipe.
+cc_binary(
+    name = "device_load_check",
+    srcs = ["device_load_check.cc"],
+    linkopts = ["-ldl"],
+)
