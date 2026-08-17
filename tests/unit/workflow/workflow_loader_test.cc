@@ -118,6 +118,53 @@ TEST(WorkflowLoaderTest, RejectMalformedJson) {
   EXPECT_FALSE(WorkflowLoader::Load("{not json", host_tools).ok());
 }
 
+TEST(WorkflowLoaderTest, RejectDelegatesParallelBecauseItIsNotImplemented) {
+  // `parallel` used to validate here and then be ignored by every consumer,
+  // so a workflow asking for parallel delegation silently ran sequentially.
+  // Rejecting is the point: an author who sets it must find out at load time.
+  std::string spec = R"({
+    "schema_version": 1,
+    "name":"x","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{"user_query":{"type":"string"}}},
+    "agents":{
+      "a":{"system_prompt":"","model":{},"tools":[],
+           "delegates":{"agents":["b"],"max_depth":2,"parallel":true}},
+      "b":{"system_prompt":"","model":{},"tools":[]}
+    },
+    "main":"a"
+  })";
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(spec, host_tools);
+  EXPECT_FALSE(wf_or.ok());
+  EXPECT_TRUE(absl::StrContains(wf_or.status().message(), "parallel"));
+  // Rejected for being unimplemented, not merely for being an unknown key —
+  // the message has to tell the author what is actually true.
+  EXPECT_TRUE(
+      absl::StrContains(wf_or.status().message(), "not implemented"));
+}
+
+TEST(WorkflowLoaderTest, RejectDelegatesParallelEvenWhenSetToFalse) {
+  // "parallel": false happens to match real behaviour, but accepting it would
+  // leave the key looking supported and invite someone to flip it to true.
+  std::string spec = R"({
+    "schema_version": 1,
+    "name":"x","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{"user_query":{"type":"string"}}},
+    "agents":{
+      "a":{"system_prompt":"","model":{},"tools":[],
+           "delegates":{"agents":["b"],"max_depth":2,"parallel":false}},
+      "b":{"system_prompt":"","model":{},"tools":[]}
+    },
+    "main":"a"
+  })";
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(spec, host_tools);
+  EXPECT_FALSE(wf_or.ok());
+  EXPECT_TRUE(absl::StrContains(wf_or.status().message(), "parallel"));
+}
+
 TEST(WorkflowLoaderTest, RejectTemplateReferencingUnknownStateField) {
   std::string bad = R"({
     "schema_version": 1,
