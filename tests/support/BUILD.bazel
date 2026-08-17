@@ -1,0 +1,30 @@
+# tests/support/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "fake_chat_backend",
+    testonly = True,
+    hdrs = ["fake_chat_backend.h"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference:chat_backend",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+    ],
+)
+
+cc_library(
+    name = "fake_http_client",
+    testonly = True,
+    hdrs = ["fake_http_client.h"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/net:http_client",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+    ],
+)

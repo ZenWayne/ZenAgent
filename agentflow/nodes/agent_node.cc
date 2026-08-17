@@ -3,32 +3,18 @@
 
 #include <nlohmann/json.hpp>
 
+#include <absl/status/status.h>
 #include <asio/as_tuple.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include "agentflow/core/errors.h"
+#include "agentflow/inference/canonical_message.h"
 
 namespace agentflow {
 
 namespace {
 
 using json = nlohmann::json;
-
-// Pulls the assistant's text content out of the LiteRT-LM response shape:
-//   {"role":"assistant","content":[{"type":"text","text":"..."}, ...]}
-std::string ExtractAssistantText(const json& resp) {
-  if (!resp.contains("content")) return {};
-  const auto& content = resp["content"];
-  if (!content.is_array()) return {};
-  std::string out;
-  for (const auto& item : content) {
-    if (item.value("type", "") == "text" && item.contains("text") &&
-        item["text"].is_string()) {
-      out.append(item["text"].get<std::string>());
-    }
-  }
-  return out;
-}
 
 }  // namespace
 
@@ -82,29 +68,28 @@ void AgentNode::WriteOutput(State& state, const std::string& text) const {
 
 asio::awaitable<State> AgentNode::Run(
     State state, const CancelToken& cancel, EventEmitter& emit) {
-  if (!cfg_.engine || !cfg_.io_ctx) {
-    throw AgentflowError("AgentNode: engine and io_ctx must be configured");
+  if (!cfg_.backend || !cfg_.io_ctx) {
+    throw AgentflowError("AgentNode: backend and io_ctx must be configured");
   }
   if (cancel.IsCancelled()) co_return std::move(state);
 
-  // One Conversation per Run. The engine owns history across turns within
-  // the ReAct loop; we don't need to thread message state ourselves.
-  LiteRtLmConversationOptions opts;
+  // One conversation per Run. The backend owns history across turns.
+  ChatConversationOptions opts;
   opts.system_message_json = BuildSystemMessageJson();
   opts.tools_json = BuildToolsJson();
   opts.max_output_tokens = cfg_.max_output_tokens;
   opts.constrained_tool_calls = cfg_.constrained_tool_calls;
 
-  auto conv = LiteRtLmConversation::Create(cfg_.engine, std::move(opts),
-                                            *cfg_.io_ctx);
+  auto conv = cfg_.backend->CreateConversation(std::move(opts));
   if (!conv) {
-    throw AgentflowError("AgentNode: failed to create Conversation");
+    throw AgentflowError(
+        "AgentNode: failed to create conversation on backend " +
+        std::string(cfg_.backend->Describe()));
   }
 
-  // Cooperative cancellation: when the run is cancelled (e.g. a Flow collector
-  // at the top of the stack cancelled), break the in-flight engine request so
-  // a streaming turn stops mid-decode instead of only at the next turn
-  // boundary. conv->Cancel() is safe to call from any thread.
+  // Cooperative cancellation: break the in-flight request so a streaming turn
+  // stops mid-decode, not only at the next turn boundary. Safe from any
+  // thread.
   cancel.OnCancel([conv]() { conv->Cancel(); });
 
   std::string message_json = BuildUserMessageJson(state);
@@ -113,91 +98,41 @@ asio::awaitable<State> AgentNode::Run(
   for (int iter = 0; iter < cfg_.max_iter; ++iter) {
     if (cancel.IsCancelled()) break;
 
-    std::string resp_str;
-    if (cfg_.stream_tokens && !cfg_.constrained_tool_calls) {
-      // Real token streaming. Drives the engine's async stream and forwards
-      // each chunk as it arrives. AgentNode::Run is a coroutine on the io
-      // context, so co_await NextTokenAsync() naturally pumps the worker
-      // thread's posted chunks. NOTE: the constrained C bridge has no
-      // streaming variant (litert_lm_conversation_send_message_stream ignores
-      // the grammar), so streaming is gated to the unconstrained path.
-      // Each streamed chunk is a FULL message-JSON envelope wrapping one
-      // incremental piece, e.g.
-      //   {"role":"assistant","content":[{"type":"text","text":"The"}]}
-      // for text deltas, or a complete
-      //   {"role":"assistant","tool_calls":[...]}
-      // for a tool call. We extract the text delta from each chunk, emit it as
-      // a clean token, and accumulate; tool-call chunks are captured whole.
-      // Then we rebuild a single canonical response JSON for the dispatch logic
-      // below (raw concatenation of the envelopes would be invalid JSON).
-      conv->SendMessage(message_json);
-      bool stream_failed = false;
-      std::string acc_text;
-      json tool_call_msg;
-      bool saw_tool_calls = false;
-      for (;;) {
-        std::string chunk;
-        try {
-          chunk = co_await conv->NextTokenAsync();
-        } catch (const std::exception&) {
-          stream_failed = true;
-          break;
+    // One path for both streaming and non-streaming: the backend decides
+    // whether deltas are available and reports them through the sink.
+    //
+    // NOTE: a constrained conversation produces no deltas — the backend never
+    // invokes this sink while constrained_tool_calls is set, so no token or
+    // trace events are emitted for that combination. Deliberate: constrained
+    // decoding has no real increments, and emitting the whole response as one
+    // "delta" would misrepresent it to a streaming UI.
+    TokenSink sink;
+    if (cfg_.stream_tokens) {
+      sink = [this, &emit](std::string_view delta)
+                 -> asio::awaitable<void> {
+        emit.EmitToken(Id(), delta);
+        if (cfg_.token_channel) {
+          // Back-pressured send: a consumer that is not keeping up slows the
+          // decode loop rather than losing tokens. as_tuple so a closed
+          // channel (consumer gone) yields an error instead of throwing — we
+          // simply stop forwarding in that case. This is the same behaviour
+          // the pre-refactor AgentNode had; it is preserved exactly.
+          auto [ec] = co_await cfg_.token_channel->async_send(
+              asio::error_code{}, std::string(delta),
+              asio::as_tuple(asio::use_awaitable));
+          (void)ec;
         }
-        if (chunk.empty()) break;  // end of this turn
-        json cj = json::parse(chunk, nullptr, /*allow_exceptions=*/false);
-        if (cj.is_discarded()) {
-          // Raw (non-JSON) chunk — treat as a plain text delta.
-          emit.EmitToken(Id(), chunk);
-          acc_text += chunk;
-          continue;
-        }
-        if (cj.contains("tool_calls") && cj["tool_calls"].is_array() &&
-            !cj["tool_calls"].empty()) {
-          saw_tool_calls = true;
-          tool_call_msg = std::move(cj);
-          continue;
-        }
-        std::string delta = ExtractAssistantText(cj);
-        if (!delta.empty()) {
-          emit.EmitToken(Id(), delta);  // clean text delta, not the envelope
-          if (cfg_.token_channel) {
-            // Direct streaming path to the top of the stack. as_tuple so a
-            // closed channel (consumer gone) yields an error instead of
-            // throwing — we just stop forwarding in that case.
-            auto [ec] = co_await cfg_.token_channel->async_send(
-                asio::error_code{}, delta,
-                asio::as_tuple(asio::use_awaitable));
-            (void)ec;
-          }
-          acc_text += delta;
-        }
-      }
-      if (stream_failed) {
-        throw AgentflowError("AgentNode: streaming SendMessage failed");
-      }
-      // Rebuild one canonical response JSON for the dispatch/extract logic.
-      if (saw_tool_calls) {
-        resp_str = tool_call_msg.dump();
-      } else {
-        json msg = {{"role", "assistant"},
-                    {"content", json::array({{{"type", "text"},
-                                              {"text", acc_text}}})}};
-        resp_str = msg.dump();
-      }
-    } else {
-      auto resp_or = conv->SendMessageSync(message_json);
-      if (!resp_or.ok()) {
-        throw AgentflowError(
-            "AgentNode: Conversation::SendMessageSync failed: " +
-            std::string(resp_or.status().message()));
-      }
-      resp_str = *resp_or;
-      if (cfg_.stream_tokens && !resp_str.empty()) {
-        // Constrained path has no real streaming; emit the whole response as a
-        // single chunk for trace observability.
-        emit.EmitToken(Id(), resp_str);
-      }
+        co_return;
+      };
     }
+
+    auto resp_or = co_await conv->SendAsync(message_json, sink, cancel);
+    if (!resp_or.ok()) {
+      if (absl::IsCancelled(resp_or.status())) break;
+      throw AgentflowError("AgentNode: backend send failed: " +
+                            std::string(resp_or.status().message()));
+    }
+    std::string resp_str = *resp_or;
 
     json resp;
     try {
@@ -215,9 +150,36 @@ asio::awaitable<State> AgentNode::Run(
       // message back with each result.
       json tool_content = json::array();
       for (const auto& tc : resp["tool_calls"]) {
-        std::string name = tc.value("name", tc.value("function",
-                                                      json::object())
-                                                .value("name", ""));
+        // json::value() THROWS type_error.306 on a non-object and
+        // type_error.302 when a present key has the wrong type, and the
+        // try/catch above covers only the outer parse. Model output is
+        // untrusted — never read a field without proving BOTH that its
+        // container is an object AND that the field has the type we are
+        // about to read it as. Same shape as StreamAccumulator::Feed.
+        // json::value() THROWS type_error.306 on a non-object and
+        // type_error.302 when a present key has the wrong type, and the
+        // try/catch above covers only the outer parse. Model output is
+        // untrusted — never read a field without proving BOTH that its
+        // container is an object AND that the field has the type we are
+        // about to read it as. Same shape as StreamAccumulator::Feed.
+        if (!tc.is_object()) continue;
+        std::string name;
+        if (tc.contains("name") && tc["name"].is_string()) {
+          name = tc["name"].get<std::string>();
+        } else if (tc.contains("function") && tc["function"].is_object()) {
+          const json& fn = tc["function"];
+          if (fn.contains("name") && fn["name"].is_string()) {
+            name = fn["name"].get<std::string>();
+          }
+        }
+        // The originating call's id. LiteRT-LM does not need it (the Gemma
+        // template reads only name/response), but OpenAI-compatible backends
+        // must echo it back as tool_call_id, so it is threaded through the
+        // canonical shape. Design spec §3.2.
+        std::string call_id;
+        if (tc.contains("id") && tc["id"].is_string()) {
+          call_id = tc["id"].get<std::string>();
+        }
         std::string args;
         if (tc.contains("arguments")) {
           args = tc["arguments"].is_string()
@@ -230,12 +192,14 @@ asio::awaitable<State> AgentNode::Run(
                      : tc["function"]["arguments"].dump();
         }
         std::string result = co_await DispatchTool(name, args, cancel, emit);
-        // Per Gemma4 jinja template: each content item has `name` + `response`
-        // fields directly; engine renders <|tool_response>response:NAME{...}<tool_response|>.
-        tool_content.push_back({
+        // Per the Gemma jinja template each content item carries `name` +
+        // `response` directly; `id` is additive and ignored on that path.
+        json entry = {
           {"name", name},
           {"response", {{"value", result}}},
-        });
+        };
+        if (!call_id.empty()) entry["id"] = call_id;
+        tool_content.push_back(std::move(entry));
       }
       json tool_message = {{"role", "tool"}, {"content", tool_content}};
       message_json = tool_message.dump();
@@ -243,7 +207,7 @@ asio::awaitable<State> AgentNode::Run(
     }
 
     // No tool calls — extract the assistant text and we're done.
-    final_answer = ExtractAssistantText(resp);
+    final_answer = ExtractAssistantText(resp_str);
     if (final_answer.empty()) final_answer = resp_str;
     break;
   }

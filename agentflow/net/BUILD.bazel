@@ -1,0 +1,43 @@
+# agentflow/net/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "http_client",
+    hdrs = ["http_client.h"],
+    deps = [
+        "//agentflow/core",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+    ],
+)
+
+cc_library(
+    name = "http_parse",
+    srcs = ["http_parse.cc"],
+    hdrs = ["http_parse.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "https_client",
+    srcs = ["https_client.cc"],
+    hdrs = ["https_client.h"],
+    deps = [
+        ":http_client",
+        ":http_parse",
+        "//agentflow/core",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@asio",
+        "@boringssl//:crypto",
+        "@boringssl//:ssl",
+    ],
+)

@@ -2,6 +2,7 @@
 #define AGENTFLOW_WORKFLOW_SUB_AGENT_RUNTIME_H_
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -12,24 +13,44 @@
 
 #include "agentflow/core/event.h"
 #include "agentflow/core/token_channel.h"
-#include "agentflow/inference/litert_lm_conversation.h"
+#include "agentflow/inference/chat_backend.h"
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/sub_agent_context.h"
 #include "agentflow/workflow/workflow.h"
 
-namespace agentflow {
-class LiteRtLmEngine;
-}
-
-namespace asio { class io_context; }
-
 namespace agentflow::workflow {
+
+// Resolves a logical backend name against a default backend and a map of
+// named backends the host registered. An empty `backend_name` selects
+// `default_backend`; a non-empty name that is not in `backends` THROWS
+// AgentflowError rather than silently falling back to the default —
+// silently demoting an agent from its intended cloud model to a local one
+// would change answer quality invisibly (design spec §5). `requesting_agent`
+// is only used to make the error message actionable.
+//
+// Shared by top-level agent backend selection (workflow_runner.cc) and
+// sub-agent backend selection (SubAgentRuntime::RunAsync) so both follow the
+// identical rule instead of maintaining two copies of it.
+// THROWS AgentflowError on an unregistered name — used directly by
+// workflow_runner.cc's top-level agent backend selection, where an uncaught
+// throw is the correct behavior. SubAgentRuntime::RunAsync (via
+// DefaultConversationFactory) instead catches this throw and converts it to
+// a structured {"error":"unknown_backend",...} result so its own "NEVER
+// throws" contract holds; see RunAsync's doc comment.
+std::shared_ptr<::agentflow::IChatBackend> ResolveNamedBackend(
+    std::string_view backend_name, std::string_view requesting_agent,
+    const std::shared_ptr<::agentflow::IChatBackend>& default_backend,
+    const std::map<std::string, std::shared_ptr<::agentflow::IChatBackend>>&
+        backends);
 
 class SubAgentRuntime {
  public:
   // Called once per streamed text delta during a turn (only on the streaming,
   // i.e. unconstrained, path). Empty/unset means "don't stream".
-  using TokenSink = std::function<void(std::string_view delta)>;
+  //
+  // One definition lives in agentflow/inference/chat_backend.h. The signature
+  // is unchanged, so every existing caller compiles as before.
+  using TokenSink = ::agentflow::TokenSink;
 
   // One conversation turn: send a message JSON, await the model's full response
   // JSON. Async so RunAsync co_awaits it under the caller's io_context without
@@ -44,24 +65,37 @@ class SubAgentRuntime {
       const ::agentflow::CancelToken& cancel)>;
 
   // Builds a conversation for a child agent from the prepared options and
-  // returns its bound SendFn. An empty (falsy) SendFn means the conversation
-  // could not be created and is treated as engine_error by RunAsync.
+  // returns its bound SendFn. `backend_name` is the child's own
+  // ModelSpec.backend (empty means "use the host default"); `requesting_agent`
+  // is the child agent's name, used only for error messages. An empty
+  // (falsy) SendFn means the conversation could not be created and is
+  // treated as engine_error by RunAsync.
   //
-  // Production passes DefaultConversationFactory (real LiteRT-LM engine).
+  // Production passes DefaultConversationFactory (real chat backend(s)).
   // Tests inject a fake to drive RunAsync without a model — same dependency-
   // injection seam as ClientFactory in McpClientPool. There is no test-only
   // branch inside RunAsync.
-  using ConversationFactory = std::function<SendFn(LiteRtLmConversationOptions)>;
+  using ConversationFactory = std::function<SendFn(
+      std::string_view backend_name, std::string_view requesting_agent,
+      ::agentflow::ChatConversationOptions)>;
 
   SubAgentRuntime(std::shared_ptr<Workflow> wf,
                    const ToolRegistry& host_tools,
                    EventEmitter& emit,
                    ConversationFactory conv_factory);
 
-  // Builds the production factory backed by a real LiteRT-LM engine.
+  // Builds the production factory from the host's default backend plus any
+  // named backends it registered. A child whose ModelSpec.backend is empty
+  // gets `default_backend`; a child that names a backend gets THAT backend
+  // (or the underlying call to ResolveNamedBackend throws AgentflowError,
+  // which RunAsync catches and converts to {"error":"unknown_backend",...} —
+  // see RunAsync's doc comment) rather than silently inheriting the parent's
+  // backend (Task fix: sub-agents used to ignore their own model.backend
+  // entirely).
   static ConversationFactory DefaultConversationFactory(
-      std::shared_ptr<::agentflow::LiteRtLmEngine> engine,
-      ::asio::io_context& io);
+      std::shared_ptr<::agentflow::IChatBackend> default_backend,
+      std::map<std::string, std::shared_ptr<::agentflow::IChatBackend>>
+          backends = {});
 
   // Async sub-agent run. Returns a JSON value (typically a string, or an error
   // object {"error":"<kind>",...}). NEVER throws. Runs entirely under the

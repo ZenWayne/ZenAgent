@@ -1,14 +1,11 @@
 // tests/unit/nodes/agent_node_test.cc
 //
-// AgentNode integration tests. Require a real LiteRT-LM model — set
-// MODEL_PATH to a .litertlm file. Tests GTEST_SKIP when MODEL_PATH is unset
-// so CI without a model file still passes.
+// These cases used to require MODEL_PATH and were skipped in CI. AgentNode now
+// takes an IChatBackend, so a scripted fake exercises the ReAct loop, tool
+// dispatch and the iteration limit with no model file.
 
 #include "agentflow/nodes/agent_node.h"
 
-#include <atomic>
-#include <chrono>
-#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -21,17 +18,18 @@
 #include <nlohmann/json.hpp>
 
 #include "agentflow/core/cancel.h"
-#include "agentflow/core/event.h"
 #include "agentflow/core/state.h"
+#include "agentflow/inference/chat_backend.h"
 #include "agentflow/observability/callback_event_emitter.h"
 #include "agentflow/tools/native_fn_tool.h"
 #include "agentflow/tools/tool_registry.h"
 #include "test_messages.pb.h"
+#include "tests/support/fake_chat_backend.h"
 
 namespace agentflow {
 namespace {
 
-const char* MaybeModelPath() { return std::getenv("MODEL_PATH"); }
+using json = nlohmann::json;
 
 struct EventCapture {
   std::vector<proto::TraceEvent> events;
@@ -40,32 +38,46 @@ struct EventCapture {
     std::lock_guard<std::mutex> l(m);
     events.push_back(e);
   }};
+
+  std::vector<std::string> tokens() {
+    std::lock_guard<std::mutex> l(m);
+    std::vector<std::string> out;
+    for (const auto& e : events) {
+      if (e.has_token()) out.push_back(e.token().token());
+    }
+    return out;
+  }
 };
 
-TEST(AgentNodeIntegrationTest, RealModelReturnsNonEmptyReply) {
-  const char* model_path = MaybeModelPath();
-  if (!model_path) GTEST_SKIP() << "MODEL_PATH not set";
-
-  auto engine = LiteRtLmEngine::Create(
-      LiteRtLmEngineOptions{.model_path = model_path});
-  ASSERT_NE(engine, nullptr);
-
-  asio::io_context io;
+AgentNodeConfig BaseConfig(std::shared_ptr<IChatBackend> backend,
+                            asio::io_context& io) {
   AgentNodeConfig cfg;
-  cfg.engine = engine;
+  cfg.backend = std::move(backend);
   cfg.io_ctx = &io;
-  cfg.system_prompt = "You are a helpful assistant. Reply briefly.";
+  cfg.system_prompt = "You are a test agent.";
   cfg.input_field = "user_query";
   cfg.output_field = "assistant_reply";
-  cfg.max_iter = 2;
+  cfg.stream_tokens = true;
+  return cfg;
+}
 
+// Runs the node to completion on `io` and returns the resulting State.
+//
+// AgentNode::Run() keeps its Conversation alive by registering
+// cancel.OnCancel() on the CALLER's CancelSource (agent_node.cc's
+// "Cooperative cancellation" hook), but that is no longer the only reference:
+// FakeChatBackend holds its last conversation STRONGLY (see
+// tests/support/fake_chat_backend.h), so a test can inspect it via
+// FakeChatBackend::last_conversation() (see
+// ToolCallIsDispatchedAndItsIdEchoedBack below) even after RunNode's local
+// CancelSource is destroyed.
+State RunNode(AgentNodeConfig cfg, const std::string& query,
+               asio::io_context& io, EventCapture& cap) {
   auto node = std::make_unique<AgentNode>(std::move(cfg));
-
   test::TestState raw;
-  raw.set_user_query("Say hello in one short sentence.");
+  raw.set_user_query(query);
 
   CancelSource cancel;
-  EventCapture cap;
   auto fut = asio::co_spawn(io,
       [&]() -> asio::awaitable<State> {
         State state = State::From(std::move(raw));
@@ -74,151 +86,175 @@ TEST(AgentNodeIntegrationTest, RealModelReturnsNonEmptyReply) {
       },
       asio::use_future);
   io.run();
-  auto out = fut.get();
-
-  std::string reply = out.As<test::TestState>().assistant_reply();
-  EXPECT_FALSE(reply.empty()) << "expected non-empty assistant reply";
+  return fut.get();
 }
 
-TEST(AgentNodeIntegrationTest, UsesGetTimeTool) {
-  const char* model_path = MaybeModelPath();
-  if (!model_path) GTEST_SKIP() << "MODEL_PATH not set";
-
-  auto engine = LiteRtLmEngine::Create(
-      LiteRtLmEngineOptions{.model_path = model_path});
-  ASSERT_NE(engine, nullptr);
-
+std::shared_ptr<ToolRegistry> RegistryWith(
+    const std::string& name, std::string canned_result) {
   auto registry = std::make_shared<ToolRegistry>();
-  std::atomic<int> tool_invocations{0};
   registry->Register(std::make_shared<NativeFnTool>(
-      ToolSchema{
-          .name = "get_time",
-          .description = "Get the current time",
-          .params_json_schema = R"({"type":"object","properties":{},"required":[]})",
-      },
-      [&tool_invocations](std::string_view, const CancelToken&)
-          -> asio::awaitable<std::string> {
-        ++tool_invocations;
-        co_return std::string{"2026-06-04T00:08:36Z"};
-      }));
+      ToolSchema{.name = name,
+                 .description = "test tool",
+                 .params_json_schema = R"({"type":"object","properties":{}})"},
+      [canned = std::move(canned_result)](std::string_view,
+                                           const CancelToken&)
+          -> asio::awaitable<std::string> { co_return canned; }));
+  return registry;
+}
 
+TEST(AgentNodeTest, PlainAnswerIsWrittenToOutputField) {
   asio::io_context io;
-  AgentNodeConfig cfg;
-  cfg.engine = engine;
-  cfg.io_ctx = &io;
-  cfg.system_prompt =
-      "You are a helpful assistant. When the user asks about time, use the "
-      "get_time tool to look it up.";
-  cfg.tool_registry = registry;
-  cfg.input_field = "user_query";
-  cfg.output_field = "assistant_reply";
-  cfg.max_iter = 4;
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","content":[{"type":"text","text":"42"}]})"});
 
-  auto node = std::make_unique<AgentNode>(std::move(cfg));
-
-  test::TestState raw;
-  raw.set_user_query("What time is it right now?");
-
-  CancelSource cancel;
   EventCapture cap;
-  auto fut = asio::co_spawn(io,
-      [&]() -> asio::awaitable<State> {
-        State state = State::From(std::move(raw));
-        co_return co_await node->Run(std::move(state), cancel.Token(),
-                                      cap.emitter);
-      },
-      asio::use_future);
-  io.run();
-  auto out = fut.get();
-
-  EXPECT_GE(tool_invocations.load(), 1)
-      << "expected the model to call get_time at least once";
-
-  // The reply should reference the time we returned.
-  std::string reply = out.As<test::TestState>().assistant_reply();
-  EXPECT_FALSE(reply.empty());
-
-  // TOOL_CALL/TOOL_RETURN should appear in the trace.
-  std::lock_guard<std::mutex> l(cap.m);
-  bool saw_tool_call = false, saw_tool_return = false;
-  for (const auto& e : cap.events) {
-    if (e.kind() == proto::TraceEvent::TOOL_CALL &&
-        e.tool_call().tool_name() == "get_time") {
-      saw_tool_call = true;
-    }
-    if (e.kind() == proto::TraceEvent::TOOL_RETURN &&
-        e.tool_return().tool_name() == "get_time") {
-      saw_tool_return = true;
-    }
-  }
-  EXPECT_TRUE(saw_tool_call);
-  EXPECT_TRUE(saw_tool_return);
+  State out = RunNode(BaseConfig(backend, io), "what is 6*7?", io, cap);
+  EXPECT_EQ(out.As<test::TestState>().assistant_reply(), "42");
 }
 
-// P8 C-bridge: with constrained_tool_calls=true, the assistant's tool call
-// MUST contain every required key from the tool's parameter schema. We use a
-// weather tool with two required keys (location + units). Without the
-// constrained C bridge, small models frequently omit `units` on prompts that
-// don't explicitly mention it; with LLGuidance Lark grammar from the tool
-// schema, omission is impossible.
-TEST(AgentNodeIntegrationTest, ConstrainedToolCallsHasAllRequiredKeys) {
-  const char* model_path = MaybeModelPath();
-  if (!model_path) GTEST_SKIP() << "MODEL_PATH not set";
-
-  auto engine = LiteRtLmEngine::Create(
-      LiteRtLmEngineOptions{.model_path = model_path});
-  ASSERT_NE(engine, nullptr);
-
-  auto registry = std::make_shared<ToolRegistry>();
-  std::string captured_args;
-  registry->Register(std::make_shared<NativeFnTool>(
-      ToolSchema{
-          .name = "weather",
-          .description = "Get the weather for a location.",
-          .params_json_schema = R"({"type":"object","properties":{)"
-                                  R"("location":{"type":"string"},)"
-                                  R"("units":{"type":"string","enum":["celsius","fahrenheit"]})"
-                                  R"(},"required":["location","units"]})",
-      },
-      [&captured_args](std::string_view args,
-                        const CancelToken&) -> asio::awaitable<std::string> {
-        captured_args = std::string(args);
-        co_return std::string{R"({"temp":72,"units":"fahrenheit"})"};
-      }));
-
+TEST(AgentNodeTest, SystemPromptAndToolsReachTheBackend) {
   asio::io_context io;
-  AgentNodeConfig cfg;
-  cfg.engine = engine;
-  cfg.io_ctx = &io;
-  cfg.system_prompt =
-      "Use the weather tool. Always include both `location` and `units`.";
-  cfg.tool_registry = registry;
-  cfg.input_field = "user_query";
-  cfg.output_field = "assistant_reply";
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","content":[{"type":"text","text":"ok"}]})"});
+
+  auto cfg = BaseConfig(backend, io);
+  cfg.tool_registry = RegistryWith("search", "result");
+  EventCapture cap;
+  RunNode(std::move(cfg), "hi", io, cap);
+
+  // The system message is a BARE content array, not a {role,content} object.
+  EXPECT_EQ(json::parse(backend->last_options().system_message_json),
+            json::parse(R"([{"type":"text","text":"You are a test agent."}])"));
+
+  // BuildToolsJson already emits the OpenAI tools shape.
+  json tools = json::parse(backend->last_options().tools_json);
+  ASSERT_TRUE(tools.is_array());
+  ASSERT_EQ(tools.size(), 1u);
+  EXPECT_EQ(tools[0]["type"], "function");
+  EXPECT_EQ(tools[0]["function"]["name"], "search");
+}
+
+TEST(AgentNodeTest, ToolCallIsDispatchedAndItsIdEchoedBack) {
+  asio::io_context io;
+  // Turn 1: the model asks for a tool. Turn 2: it answers.
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","tool_calls":[{"id":"call_7",)"
+          R"("function":{"name":"search","arguments":"{\"q\":\"zen\"}"}}]})",
+          R"({"role":"assistant","content":[{"type":"text","text":"found it"}]})"});
+
+  auto cfg = BaseConfig(backend, io);
+  cfg.tool_registry = RegistryWith("search", "SEARCH_RESULT");
+  EventCapture cap;
+  State out = RunNode(std::move(cfg), "find zen", io, cap);
+
+  EXPECT_EQ(out.As<test::TestState>().assistant_reply(), "found it");
+
+  // The tool-result message must carry the originating call's id, so a remote
+  // backend can restore OpenAI's tool_call_id (design spec §3.2).
+  auto conv = backend->last_conversation();
+  ASSERT_NE(conv, nullptr);
+  ASSERT_EQ(conv->sent().size(), 2u);
+  json tool_msg = json::parse(conv->sent()[1]);
+  EXPECT_EQ(tool_msg["role"], "tool");
+  ASSERT_EQ(tool_msg["content"].size(), 1u);
+  EXPECT_EQ(tool_msg["content"][0]["id"], "call_7");
+  EXPECT_EQ(tool_msg["content"][0]["name"], "search");
+  EXPECT_EQ(tool_msg["content"][0]["response"]["value"], "SEARCH_RESULT");
+}
+
+TEST(AgentNodeTest, MaxIterReachedWritesTheFallbackMessage) {
+  asio::io_context io;
+  // Always asks for a tool, never answers.
+  std::vector<std::string> loop(
+      4,
+      R"({"role":"assistant","tool_calls":[{"id":"c",)"
+      R"("function":{"name":"noop","arguments":"{}"}}]})");
+  auto backend = std::make_shared<testing::FakeChatBackend>(loop);
+
+  auto cfg = BaseConfig(backend, io);
+  cfg.tool_registry = RegistryWith("noop", "");
   cfg.max_iter = 3;
-  cfg.constrained_tool_calls = true;  // <-- the thing under test
-
-  auto node = std::make_unique<AgentNode>(std::move(cfg));
-  test::TestState raw;
-  raw.set_user_query("What is the weather in Paris?");
-
-  CancelSource cancel;
   EventCapture cap;
-  auto fut = asio::co_spawn(io,
-      [&]() -> asio::awaitable<State> {
-        co_return co_await node->Run(State::From(std::move(raw)),
-                                      cancel.Token(), cap.emitter);
-      },
-      asio::use_future);
-  io.run();
-  (void)fut.get();
+  State out = RunNode(std::move(cfg), "spin", io, cap);
 
-  ASSERT_FALSE(captured_args.empty()) << "tool was not invoked";
-  nlohmann::json args = nlohmann::json::parse(captured_args);
-  EXPECT_TRUE(args.contains("location"))
-      << "constrained tool_call missing 'location'; got: " << captured_args;
-  EXPECT_TRUE(args.contains("units"))
-      << "constrained tool_call missing 'units'; got: " << captured_args;
+  EXPECT_EQ(out.As<test::TestState>().assistant_reply(),
+            "Agent reached maximum iterations without a final answer.");
+}
+
+TEST(AgentNodeTest, StreamedDeltasReachTheEventEmitter) {
+  asio::io_context io;
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","content":[{"type":"text","text":"ab"}]})"});
+  backend->set_deltas({"a", "b"});
+
+  EventCapture cap;
+  RunNode(BaseConfig(backend, io), "hi", io, cap);
+  EXPECT_EQ(cap.tokens(), (std::vector<std::string>{"a", "b"}));
+}
+
+TEST(AgentNodeTest, NonObjectToolCallEntryIsSkippedWithoutThrowing) {
+  asio::io_context io;
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","tool_calls":[42,{"id":"call_1",)"
+          R"("function":{"name":"search","arguments":"{}"}}]})",
+          R"({"role":"assistant","content":[{"type":"text","text":"done"}]})"});
+
+  auto cfg = BaseConfig(backend, io);
+  cfg.tool_registry = RegistryWith("search", "OK");
+  EventCapture cap;
+  State out = RunNode(std::move(cfg), "go", io, cap);
+
+  // The bare 42 is skipped; the real call still dispatches and the run
+  // completes instead of dying on an uncaught type_error.306.
+  EXPECT_EQ(out.As<test::TestState>().assistant_reply(), "done");
+}
+
+// is_object() alone is not enough: json::value() still throws type_error.302
+// on a PRESENT key with the wrong type, and type_error.306 when it is called
+// on a non-object (e.g. tc["function"] being a bare string/number rather
+// than an object). Every one of these entries used to abort the process;
+// each must instead degrade to a skipped tool call.
+TEST(AgentNodeTest, WrongTypedToolCallFieldsAreSkippedWithoutThrowing) {
+  asio::io_context io;
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","tool_calls":[)"
+          R"({"name":42},)"
+          R"({"name":null},)"
+          R"({"function":"search"},)"
+          R"({"function":7},)"
+          R"({"id":12345},)"
+          R"({"id":null},)"
+          R"({"id":"call_1","function":{"name":"search","arguments":"{}"}}]})",
+          R"({"role":"assistant","content":[{"type":"text","text":"done"}]})"});
+
+  auto cfg = BaseConfig(backend, io);
+  cfg.tool_registry = RegistryWith("search", "OK");
+  EventCapture cap;
+  State out = RunNode(std::move(cfg), "go", io, cap);
+
+  // No malformed entry aborts the run; the one well-formed call still
+  // dispatches and the run reaches its final answer.
+  EXPECT_EQ(out.As<test::TestState>().assistant_reply(), "done");
+
+  auto conv = backend->last_conversation();
+  ASSERT_NE(conv, nullptr);
+  ASSERT_EQ(conv->sent().size(), 2u);
+  json tool_msg = json::parse(conv->sent()[1]);
+  EXPECT_EQ(tool_msg["role"], "tool");
+  // 6 malformed entries dispatch with an empty name (skipped fields), plus
+  // the one well-formed "call_1" entry — every entry still produces a
+  // tool-result slot (a malformed entry degrades to an empty-name dispatch,
+  // it never vanishes or crashes).
+  ASSERT_EQ(tool_msg["content"].size(), 7u);
+  EXPECT_EQ(tool_msg["content"][6]["name"], "search");
+  EXPECT_EQ(tool_msg["content"][6]["id"], "call_1");
+  EXPECT_EQ(tool_msg["content"][6]["response"]["value"], "OK");
 }
 
 }  // namespace

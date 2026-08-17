@@ -1,10 +1,15 @@
 #include "agentflow/workflow/workflow_runner.h"
 
+#include <memory>
+#include <string>
+#include <vector>
+
 #include <gtest/gtest.h>
 #include <asio/io_context.hpp>
 
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/workflow/workflow_loader.h"
+#include "tests/support/fake_chat_backend.h"
 
 namespace agentflow::workflow {
 namespace {
@@ -32,12 +37,14 @@ TEST(WorkflowRunnerTest, BuildsParentWithDelegateExtra) {
   auto tools = std::make_shared<ToolRegistry>(io);
   auto wf = *WorkflowLoader::Load(kRosterJson, *tools);
 
-  AgentNodeBuildSpec spec{wf, "parent", tools, /*engine=*/nullptr,
-                           /*io_ctx=*/nullptr};
+  AgentNodeBuildSpec spec;
+  spec.workflow = wf;
+  spec.agent_name = "parent";
+  spec.host_tools = tools;
+  // No backend + no io_ctx: delegate tool is NOT attached (sub-agent runtime
+  // requires a live backend).
   auto built = BuildAgentNode(spec);
   EXPECT_EQ(built.cfg.system_prompt, "You delegate.");
-  // No engine + no io_ctx: delegate tool is NOT attached (sub-agent runtime
-  // requires a live engine).
   EXPECT_TRUE(built.cfg.extra_tools.empty());
 }
 
@@ -46,13 +53,15 @@ TEST(WorkflowRunnerTest, BuildsParentWithDelegateWhenEngineProvided) {
   auto tools = std::make_shared<ToolRegistry>(io);
   auto wf = *WorkflowLoader::Load(kRosterJson, *tools);
 
-  // Use a stub engine pointer (cast nullptr just for the auto-wire branch).
-  // The real engine is required for actual sub-agent calls but the wiring
-  // only checks pointer non-null; pass a sentinel via a fake shared_ptr.
-  auto engine = std::shared_ptr<::agentflow::LiteRtLmEngine>(
-      reinterpret_cast<::agentflow::LiteRtLmEngine*>(0x1), [](auto*){});
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{});
 
-  AgentNodeBuildSpec spec{wf, "parent", tools, engine, &io};
+  AgentNodeBuildSpec spec;
+  spec.workflow = wf;
+  spec.agent_name = "parent";
+  spec.host_tools = tools;
+  spec.backend = backend;
+  spec.io_ctx = &io;
   auto built = BuildAgentNode(spec);
   ASSERT_EQ(built.cfg.extra_tools.size(), 1u);
   EXPECT_EQ(built.cfg.extra_tools[0]->Schema().name, "delegate");
@@ -65,9 +74,14 @@ TEST(WorkflowRunnerTest, NoDelegateForSoloAgent) {
   auto tools = std::make_shared<ToolRegistry>(io);
   auto wf = *WorkflowLoader::Load(kSoloJson, *tools);
 
-  auto engine = std::shared_ptr<::agentflow::LiteRtLmEngine>(
-      reinterpret_cast<::agentflow::LiteRtLmEngine*>(0x1), [](auto*){});
-  AgentNodeBuildSpec spec{wf, "solo", tools, engine, &io};
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{});
+  AgentNodeBuildSpec spec;
+  spec.workflow = wf;
+  spec.agent_name = "solo";
+  spec.host_tools = tools;
+  spec.backend = backend;
+  spec.io_ctx = &io;
   auto built = BuildAgentNode(spec);
   EXPECT_TRUE(built.cfg.extra_tools.empty());
   EXPECT_TRUE(built.keepalive.empty());
@@ -79,7 +93,10 @@ TEST(WorkflowRunnerTest, UnknownAgentReturnsEmptyConfig) {
   auto tools = std::make_shared<ToolRegistry>(io);
   auto wf = *WorkflowLoader::Load(kSoloJson, *tools);
 
-  AgentNodeBuildSpec spec{wf, "ghost", tools, nullptr, nullptr};
+  AgentNodeBuildSpec spec;
+  spec.workflow = wf;
+  spec.agent_name = "ghost";
+  spec.host_tools = tools;
   auto built = BuildAgentNode(spec);
   EXPECT_TRUE(built.cfg.system_prompt.empty());
   EXPECT_TRUE(built.cfg.extra_tools.empty());

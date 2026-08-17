@@ -1,6 +1,5 @@
 #include "agentflow/workflow/sub_agent_runtime.h"
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <random>
@@ -9,13 +8,12 @@
 #include <utility>
 #include <vector>
 
-#include <asio/co_spawn.hpp>
-#include <asio/io_context.hpp>
-#include <asio/use_future.hpp>
+#include <asio/as_tuple.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include "agentflow/core/cancel.h"
-#include "agentflow/inference/litert_lm_conversation.h"
-#include "agentflow/inference/litert_lm_engine.h"
+#include "agentflow/core/errors.h"
+#include "agentflow/inference/chat_backend.h"
 #include "agentflow/workflow/json_path.h"
 #include "agentflow/workflow/template_engine.h"
 #include "workflow_spec.pb.h"
@@ -38,23 +36,22 @@ const proto::WorkflowSpec::AgentDef* FindAgent(const Workflow& wf,
   return &it->second;
 }
 
-// Pulls the text out of an assistant message-JSON envelope:
-//   {"role":"assistant","content":[{"type":"text","text":"..."}, ...]}
-std::string ExtractTextDelta(const nlohmann::ordered_json& msg) {
-  if (!msg.contains("content")) return {};
-  const auto& content = msg["content"];
-  if (!content.is_array()) return {};
-  std::string out;
-  for (const auto& item : content) {
-    if (item.value("type", "") == "text" && item.contains("text") &&
-        item["text"].is_string()) {
-      out += item["text"].get<std::string>();
-    }
-  }
-  return out;
-}
-
 }  // namespace
+
+std::shared_ptr<::agentflow::IChatBackend> ResolveNamedBackend(
+    std::string_view backend_name, std::string_view requesting_agent,
+    const std::shared_ptr<::agentflow::IChatBackend>& default_backend,
+    const std::map<std::string, std::shared_ptr<::agentflow::IChatBackend>>&
+        backends) {
+  if (backend_name.empty()) return default_backend;
+  auto it = backends.find(std::string(backend_name));
+  if (it == backends.end()) {
+    throw AgentflowError("agent '" + std::string(requesting_agent) +
+                          "' requests backend '" + std::string(backend_name) +
+                          "' which the host did not register");
+  }
+  return it->second;
+}
 
 SubAgentRuntime::SubAgentRuntime(
     std::shared_ptr<Workflow> wf, const ToolRegistry& host_tools,
@@ -66,73 +63,21 @@ SubAgentRuntime::SubAgentRuntime(
 
 SubAgentRuntime::ConversationFactory
 SubAgentRuntime::DefaultConversationFactory(
-    std::shared_ptr<::agentflow::LiteRtLmEngine> engine,
-    ::asio::io_context& io) {
-  return [engine = std::move(engine), &io](
-             LiteRtLmConversationOptions opts) -> SendFn {
-    const bool constrained = opts.constrained_tool_calls;
-    auto conv = LiteRtLmConversation::Create(engine, std::move(opts), io);
+    std::shared_ptr<::agentflow::IChatBackend> default_backend,
+    std::map<std::string, std::shared_ptr<::agentflow::IChatBackend>>
+        backends) {
+  return [default_backend = std::move(default_backend),
+          backends = std::move(backends)](
+             std::string_view backend_name, std::string_view requesting_agent,
+             ::agentflow::ChatConversationOptions opts) -> SendFn {
+    auto backend = ResolveNamedBackend(backend_name, requesting_agent,
+                                        default_backend, backends);
+    auto conv = backend->CreateConversation(std::move(opts));
     if (!conv) return SendFn{};
-    // The conversation owns history server-side; capture it so successive
-    // SendFn calls form a multi-turn exchange.
-    return [conv, constrained,
-            registered = std::make_shared<std::atomic_bool>(false)](
-               const std::string& message_json, const TokenSink& on_token,
-               const ::agentflow::CancelToken& cancel)
+    return [conv](const std::string& message_json, const TokenSink& on_token,
+                   const ::agentflow::CancelToken& cancel)
                -> asio::awaitable<absl::StatusOr<std::string>> {
-      // Register the in-flight cancel hook once: a cancel breaks the engine
-      // request (streaming or sync) mid-decode, not just at turn boundaries.
-      if (!registered->exchange(true)) {
-        cancel.OnCancel([conv]() { conv->Cancel(); });
-      }
-      // Non-streaming path: constrained conversations have no streaming C
-      // bridge, and a missing sink means nobody wants deltas. SendMessageSync
-      // blocks the io thread for the turn (same as the constrained AgentNode
-      // path).
-      if (constrained || !on_token) {
-        co_return conv->SendMessageSync(message_json);
-      }
-      // Streaming path: drive the async stream, forward each text delta, and
-      // rebuild ONE canonical response JSON (each chunk is a full message-JSON
-      // envelope; raw concatenation would be invalid). Mirrors AgentNode.
-      conv->SendMessage(message_json);
-      std::string acc_text;
-      nlohmann::ordered_json tool_call_msg;
-      bool saw_tool_calls = false;
-      for (;;) {
-        std::string chunk;
-        try {
-          chunk = co_await conv->NextTokenAsync();
-        } catch (const std::exception&) {
-          co_return absl::InternalError("sub-agent streaming send failed");
-        }
-        if (chunk.empty()) break;  // end of turn
-        auto cj = nlohmann::ordered_json::parse(chunk, nullptr, false);
-        if (cj.is_discarded()) {
-          on_token(chunk);
-          acc_text += chunk;
-          continue;
-        }
-        if (cj.contains("tool_calls") && cj["tool_calls"].is_array() &&
-            !cj["tool_calls"].empty()) {
-          saw_tool_calls = true;
-          tool_call_msg = std::move(cj);
-          continue;
-        }
-        std::string delta = ExtractTextDelta(cj);
-        if (!delta.empty()) {
-          on_token(delta);
-          acc_text += delta;
-        }
-      }
-      if (saw_tool_calls) {
-        co_return tool_call_msg.dump();
-      }
-      nlohmann::ordered_json msg = {
-          {"role", "assistant"},
-          {"content", nlohmann::ordered_json::array(
-                          {{{"type", "text"}, {"text", acc_text}}})}};
-      co_return msg.dump();
+      co_return co_await conv->SendAsync(message_json, on_token, cancel);
     };
   };
 }
@@ -203,13 +148,19 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
       std::span<const std::string>(child_tools));
   if (tools_json.empty()) tools_json = "[]";
 
-  // Build the LiteRtLmConversation. system_message_json must be the full
-  // {"role":"system","content":"..."} JSON object — that's what the engine
-  // feeds the chat template.
-  LiteRtLmConversationOptions opts;
+  // Build the conversation options. system_message_json must be the BARE
+  // content array documented on ChatConversationOptions
+  // ([{"type":"text","text":"..."}]), NOT a {role,content} object — this
+  // mirrors AgentNode::BuildSystemMessageJson exactly. LiteRT-LM wraps it
+  // into {role:system, content:<this>} itself; a remote OpenAI-compatible
+  // backend's openai::SystemMessage() only recognises this bare-array shape
+  // too (FlattenContent returns {} for a {role,content} object, so a
+  // {role,content} object here silently drops the system prompt on any
+  // remote backend).
+  ::agentflow::ChatConversationOptions opts;
   if (!system_text.empty()) {
-    nlohmann::ordered_json sys_msg = {{"role", "system"},
-                                        {"content", system_text}};
+    nlohmann::ordered_json sys_msg = nlohmann::ordered_json::array(
+        {{{"type", "text"}, {"text", system_text}}});
     opts.system_message_json = sys_msg.dump();
   }
   opts.tools_json = tools_json;
@@ -220,7 +171,34 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
     opts.max_output_tokens = 512;
   }
 
-  SendFn send = conv_factory_ ? conv_factory_(std::move(opts)) : SendFn{};
+  // Resolve the child's OWN backend (Task fix: sub-agents used to silently
+  // run on the parent's resolved backend even when they declared their own
+  // model.backend). An empty name falls back to the host default inside
+  // ResolveNamedBackend; an unregistered name throws — same rule as
+  // top-level agent backend selection (workflow_runner.cc), enforced by
+  // DefaultConversationFactory when conv_factory_ is the production one.
+  // ResolveNamedBackend (reached via conv_factory_ when conv_factory_ is
+  // DefaultConversationFactory) THROWS AgentflowError on an unregistered
+  // backend name rather than silently falling back to the default — see its
+  // doc comment. RunAsync's own contract is "NEVER throws", so that throw is
+  // caught here and converted into the same structured-error shape every
+  // other failure in this function uses: EmitSubAgentEnd terminates the
+  // trace span, and {"error":"unknown_backend",...} reaches the parent LLM
+  // as loudly as engine_error does — it must NOT be swallowed into a silent
+  // fallback to the parent's or host's default backend (design spec §5).
+  SendFn send;
+  try {
+    send = conv_factory_
+               ? conv_factory_(child.model().backend(), child_agent,
+                                std::move(opts))
+               : SendFn{};
+  } catch (const AgentflowError&) {
+    emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "unknown_backend",
+                           0);
+    co_return nlohmann::ordered_json{
+        {"error", "unknown_backend"},
+        {"backend", std::string(child.model().backend())}};
+  }
   if (!send) {
     emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
     co_return nlohmann::ordered_json{{"error", "engine_error"}};
@@ -233,8 +211,15 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
   TokenSink on_token;
   if (ctx.token_channel != nullptr) {
     auto* ch = ctx.token_channel;
-    on_token = [ch](std::string_view delta) {
-      ch->try_send(asio::error_code{}, std::string(delta));
+    on_token = [ch](std::string_view delta) -> asio::awaitable<void> {
+      // Back-pressured: a slow consumer slows the sub-agent's decode loop
+      // rather than losing tokens. as_tuple so a closed channel yields an
+      // error instead of throwing.
+      auto [ec] = co_await ch->async_send(asio::error_code{},
+                                           std::string(delta),
+                                           asio::as_tuple(asio::use_awaitable));
+      (void)ec;
+      co_return;
     };
   }
 
@@ -244,7 +229,7 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
                        {{{"type", "text"}, {"text", std::string(goal)}}})}};
 
   // Multi-turn tool dispatch. The sub-agent's tool slice is host_tools_ +
-  // child.tools[]. The LiteRtLmConversation carries history server-side.
+  // child.tools[]. The backend's Conversation carries history server-side.
   std::string message_json = user_msg.dump();
   std::string raw_response;
   constexpr int kSubAgentMaxIter = 8;
@@ -276,15 +261,38 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
       nlohmann::ordered_json tool_content =
           nlohmann::ordered_json::array();
       for (const auto& tc : resp_json["tool_calls"]) {
-        std::string name = tc.value(
-            "name", tc.value("function", nlohmann::ordered_json::object())
-                         .value("name", ""));
+        // json::value() THROWS type_error.306 on a non-object and
+        // type_error.302 when a present key has the wrong type. Model
+        // output is untrusted — never read a field without proving BOTH
+        // that its container is an object AND that the field has the type
+        // we are about to read it as. A malformed entry degrades to a
+        // SKIPPED entry, never an uncaught exception. Same shape as
+        // StreamAccumulator::Feed / AgentNode::Run's twin guard.
+        if (!tc.is_object()) continue;
+        std::string name;
+        if (tc.contains("name") && tc["name"].is_string()) {
+          name = tc["name"].get<std::string>();
+        } else if (tc.contains("function") && tc["function"].is_object()) {
+          const auto& fn = tc["function"];
+          if (fn.contains("name") && fn["name"].is_string()) {
+            name = fn["name"].get<std::string>();
+          }
+        }
+        // The originating call's id. LiteRT-LM does not need it (the Gemma
+        // template reads only name/response), but OpenAI-compatible backends
+        // must echo it back as tool_call_id — message_map.cc's
+        // ToOpenAiMessages rejects a tool-result entry with no id. Same
+        // extraction as AgentNode::Run's twin loop (design spec §3.2).
+        std::string call_id;
+        if (tc.contains("id") && tc["id"].is_string()) {
+          call_id = tc["id"].get<std::string>();
+        }
         std::string args;
         if (tc.contains("arguments")) {
           args = tc["arguments"].is_string()
                      ? tc["arguments"].get<std::string>()
                      : tc["arguments"].dump();
-        } else if (tc.contains("function") &&
+        } else if (tc.contains("function") && tc["function"].is_object() &&
                    tc["function"].contains("arguments")) {
           args = tc["function"]["arguments"].is_string()
                      ? tc["function"]["arguments"].get<std::string>()
@@ -309,8 +317,10 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
         } catch (const std::exception& e) {
           result = std::string("Tool error: ") + e.what();
         }
-        tool_content.push_back(
-            {{"name", name}, {"response", {{"value", result}}}});
+        nlohmann::ordered_json entry = {{"name", name},
+                                          {"response", {{"value", result}}}};
+        if (!call_id.empty()) entry["id"] = call_id;
+        tool_content.push_back(std::move(entry));
       }
       nlohmann::ordered_json tool_msg = {{"role", "tool"},
                                            {"content", tool_content}};

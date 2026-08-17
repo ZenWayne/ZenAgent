@@ -114,7 +114,6 @@ Authors write JSON like this:
       "delegates": {
         "agents": ["planner", "researcher"],
         "max_depth": 2,
-        "parallel": true,
         "input_template": {
           "user_query": "{{tool.goal}}",
           "_parent_query": "{{state.user_query}}"
@@ -261,9 +260,13 @@ string in, (b) result string out. Cross-contamination requires explicit
 
 If the LLM emits multiple `delegate` calls in one turn:
 
-- `parallel: true` → each call spawned in `asio::co_spawn`, all awaited,
-  results stitched back in original tool_calls order. Mirrors
-  `TeamNode::RunParallelGather`.
+- `parallel: true` → **NEVER IMPLEMENTED.** The field was parsed and then read
+  by nothing, so this design was never realised; `workflow_loader` now rejects
+  the key rather than accepting it silently, and the proto field number is
+  reserved. Delegation is always sequential. See the TODO on `DelegateSpec` in
+  `proto/workflow_spec.proto` for the two places that must change together —
+  `AgentNode`'s tool-dispatch loop awaits each tool call in turn, so multiple
+  delegate calls are serialised before `SubAgentRuntime` is even reached.
 - `parallel: false` → sequential in LLM order.
 
 Each call carries an `invocation_id` for trace grouping.

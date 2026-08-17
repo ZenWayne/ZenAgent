@@ -94,8 +94,17 @@ absl::Status ParseDelegateSpec(const ordered_json& j,
   if (auto it = j.find("max_depth"); it != j.end() && it->is_number_integer()) {
     out->set_max_depth(it->get<uint32_t>());
   }
-  if (auto it = j.find("parallel"); it != j.end() && it->is_boolean()) {
-    out->set_parallel(it->get<bool>());
+  // `parallel` used to be accepted here and then never read, so a workflow
+  // asking for parallel delegation silently got sequential delegation. Reject
+  // it instead of ignoring it: a spec author who set this deserves to learn at
+  // load time that it does nothing, rather than to wonder why nothing sped up.
+  // See the TODO on DelegateSpec in proto/workflow_spec.proto.
+  if (j.find("parallel") != j.end()) {
+    return absl::InvalidArgumentError(
+        "delegates.parallel is not implemented — delegation is always "
+        "sequential today, and this key previously validated while having no "
+        "effect. Remove it; see the TODO on DelegateSpec in "
+        "proto/workflow_spec.proto for what implementing it requires");
   }
   if (auto it = j.find("input_template"); it != j.end()) {
     if (!it->is_object()) {
@@ -146,6 +155,13 @@ absl::Status ParseAgentDef(const std::string& agent_name,
     if (auto t = it->find("constrained_tool_calls");
         t != it->end() && t->is_boolean()) {
       m->set_constrained_tool_calls(t->get<bool>());
+    }
+    if (auto t = it->find("backend"); t != it->end()) {
+      if (!t->is_string()) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "agent '", agent_name, "': model.backend must be a string"));
+      }
+      m->set_backend(t->get<std::string>());
     }
   }
   if (auto it = j.find("tools"); it != j.end()) {

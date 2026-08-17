@@ -1,0 +1,41 @@
+# tests/unit/inference/openai/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "message_map_test",
+    size = "small",
+    srcs = ["message_map_test.cc"],
+    deps = [
+        "//agentflow/inference/openai:message_map",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "stream_accumulator_test",
+    size = "small",
+    srcs = ["stream_accumulator_test.cc"],
+    deps = [
+        "//agentflow/inference/openai:stream_accumulator",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "openai_chat_backend_test",
+    size = "small",
+    srcs = ["openai_chat_backend_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference/openai:openai_chat_backend",
+        "//tests/support:fake_http_client",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)

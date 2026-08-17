@@ -21,8 +21,10 @@ cc_library(
     ],
     deps = [
         "//agentflow/core",
-        "//agentflow/inference",
+        "//agentflow/inference:canonical_message",
+        "//agentflow/inference:chat_backend",
         "//agentflow/tools",
+        "@abseil-cpp//absl/status",
         "@asio",
         "@nlohmann_json//:json",
     ],

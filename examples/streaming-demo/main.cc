@@ -23,6 +23,7 @@
 #include "agentflow/core/runner.h"
 #include "agentflow/core/state.h"
 #include "agentflow/core/stub_node.h"
+#include "agentflow/inference/litert_lm_chat_backend.h"
 #include "agentflow/inference/litert_lm_engine.h"
 #include "agentflow/nodes/agent_node.h"
 #include "agentflow/observability/callback_event_emitter.h"
@@ -65,8 +66,9 @@ int main(int argc, char** argv) {
 
   // ── Agent ───────────────────────────────────────────────
   asio::io_context io;
+  auto backend = af::LiteRtLmChatBackend::Create(engine, io);
   af::AgentNodeConfig agent_cfg;
-  agent_cfg.engine = engine;
+  agent_cfg.backend = backend;
   agent_cfg.io_ctx = &io;
   agent_cfg.system_prompt =
       "You are a helpful assistant. When asked about time, use the get_time tool.";

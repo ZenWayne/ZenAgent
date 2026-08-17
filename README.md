@@ -2,17 +2,19 @@
 
 **An on-device / embedded C++ agent framework — from inference to agents, full-stack.**
 
-AgentFlow is a C++20 framework for building LLM agents that run **entirely on-device**: Android phones and embedded Linux ARM64 boards (Raspberry Pi, Jetson, …). It wraps Google's [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) inference engine and an MCP tool layer behind a DAG-based workflow engine, and ships a declarative **Kotlin DSL** for Android on top of the same C++ core.
+AgentFlow is a C++20 framework for building LLM agents that run **on-device**: Android phones and embedded Linux ARM64 boards (Raspberry Pi, Jetson, …). It wraps Google's [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) inference engine and an MCP tool layer behind a DAG-based workflow engine, and ships a declarative **Kotlin DSL** for Android on top of the same C++ core.
 
-> Status: active development. The C++ core, agent/tool layer, MCP client, multi-agent nodes, tracing, checkpointing, constrained decoding, and a JNI + Kotlin DSL MVP are implemented. iOS / desktop / server are explicitly out of scope for v1.
+On-device is the default and the design centre — the framework is built for the constrained case. But inference sits behind an interface, so an agent can run against an **OpenAI-compatible cloud endpoint** instead, chosen per agent inside the same workflow: a small local model for triage, a large remote one where it earns its cost. Both satisfy the same contract, so nothing above the seam changes. See [Remote inference backends](#remote-inference-backends).
+
+> Status: active development. The C++ core, agent/tool layer, MCP client, multi-agent nodes, tracing, checkpointing, constrained decoding, a remote OpenAI-compatible backend, and a JNI + Kotlin DSL MVP are implemented. iOS / desktop / server are explicitly out of scope for v1.
 
 ---
 
 ## Why
 
-Most agent frameworks assume a cloud LLM and a server runtime. AgentFlow targets the opposite end: **local inference, no network required**, with token-level streaming and cooperative cancellation suitable for a chat UX on constrained hardware.
+Most agent frameworks assume a cloud LLM and a server runtime. AgentFlow targets the opposite end: **local inference that needs no network**, with token-level streaming and cooperative cancellation suitable for a chat UX on constrained hardware. A cloud model is something you opt into per agent, not the assumption the whole framework is built on.
 
-- **Inference backend** — LiteRT-LM (C ABI): prefill/decode, conversation management, abort hook.
+- **Inference backend** — an `IChatBackend` seam with two implementations: LiteRT-LM (C ABI) for on-device prefill/decode, conversation management and abort hook; and an OpenAI-compatible HTTPS client for remote models. `core/` and `nodes/` depend on neither.
 - **Tools** — MCP client (stdio/SSE/WS/TCP) for ecosystem tools, plus in-process native tools (register a C++ or Kotlin lambda directly).
 - **Workflow** — explicit DAG with `activation_group`s so cyclic edges don't deadlock (autogen #6711-style grouping).
 - **Multi-agent** — an agent is just a graph node by default; complex dynamic scheduling is encapsulated in a `TeamNode`.
@@ -32,24 +34,76 @@ Most agent frameworks assume a cloud LLM and a server runtime. AgentFlow targets
 │               Token/Stream/Cancellation                   │
 │  nodes/       LlmNode, AgentNode, TeamNode,               │
 │               RouterNode, AggregatorNode                  │
-│  inference/   LiteRtLmEngine wrapper (session, streaming  │
-│               decode, abort hook)                         │
+│  inference/   IChatBackend seam + LiteRtLmChatBackend     │
+│               (session, streaming decode, abort hook)     │
+│               openai/  OpenAiChatBackend (SSE streaming)  │
+│  net/         HTTPS client (asio+BoringSSL), SSE/chunked  │
 │  tools/       ToolRegistry, McpToolAdapter, NativeFnTool  │
 │  observability/  TraceEvent emitters (JSONL / callback)   │
 │  persist/     Checkpoint hook (explicit resume only)      │
-└────────────┬────────────────────────────┬────────────────┘
-             ▼                             ▼
-      ┌──────────────┐            ┌──────────────────┐
-      │  LiteRT-LM   │            │  MCP (gopher-mcp)│
-      └──────────────┘            └──────────────────┘
+└──────┬──────────────────┬──────────────────┬─────────────┘
+       ▼                  ▼                  ▼
+┌──────────────┐  ┌────────────────┐  ┌──────────────────┐
+│  LiteRT-LM   │  │ OpenAI-compat  │  │  MCP (gopher-mcp)│
+│  (on-device) │  │ endpoint (net) │  │                  │
+└──────────────┘  └────────────────┘  └──────────────────┘
 ```
+
+`AgentNode` talks only to `IChatBackend`. Which of the two it got — a model in
+the process or one across a TLS connection — is a host wiring decision, not
+something the node, the workflow or the Kotlin DSL can observe.
 
 ### Boundary rules
 
-1. `core/` knows nothing about LiteRT-LM or MCP — it depends only on the `Node` interface. Swapping the inference engine or MCP implementation does not break the core API.
+1. `core/` knows nothing about LiteRT-LM or MCP — it depends only on the `Node` interface. Swapping the inference engine or MCP implementation does not break the core API. This is no longer just an intent: `LiteRtLmEngine` is referenced only inside `agentflow/inference/`, and the remote backend was added as a second implementation of the same seam without touching the ReAct loop, tool dispatch, delegation, cancellation or streaming.
 2. **The C++ library is the source of truth.** Kotlin is a thin DSL over JNI; it holds no business logic.
 3. **Everything crossing a boundary is protobuf** — `State`, tool schema, trace events, graph spec, errors share `.proto` definitions (see [`proto/`](proto/)) for zero-copy JNI and version evolution.
 4. Submodules (LiteRT-LM, MCP) are pinned and never modified; all adaptation lives in `inference/` and `tools/`.
+
+### Remote inference backends
+
+An agent — top-level or a delegated sub-agent — runs on whichever backend the
+host registers under the logical name in its own `model.backend`. A
+sub-agent's backend is resolved independently of its parent's: a child that
+names its own backend gets that backend, never the parent's, even when the
+parent is itself running on a named one. On-device and cloud agents coexist
+in one workflow:
+
+```json
+{"agents": {
+  "triage":   {"system_prompt": "...", "model": {"backend": ""}},
+  "research": {"system_prompt": "...", "model": {"backend": "cloud"}}
+}}
+```
+
+`triage` uses the default (on-device) backend; `research` uses the named one.
+The host supplies both:
+
+```cpp
+spec.backend           = LiteRtLmChatBackend::Create(engine, io);   // default
+spec.backends["cloud"] = openai::OpenAiChatBackend::Create(opts, http);
+```
+
+**Credentials never go in a workflow.** `base_url`, `api_key` and the provider
+model id live only in host code — an environment variable on desktop,
+`EncryptedSharedPreferences` on Android. A workflow JSON carries a logical name
+and nothing else, so it stays safe to serialize, checkpoint, log and hot-push.
+A name the host did not register is rejected rather than silently resolved to
+the default backend — for a top-level agent, when the host builds it; for a
+delegated sub-agent, when the delegation runs (both paths share one
+resolution rule).
+
+Any OpenAI-compatible endpoint works: OpenAI, DeepSeek, Volcengine ARK, Kimi,
+GLM, MiniMax, OpenRouter, and local Ollama / vLLM / LiteLLM gateways.
+
+Known limitations: one connection per request (no pooling); no HTTP/2; a remote
+backend cannot honour `constrained_tool_calls` and reports that through
+`last_warning()`. An agent running with `constrained_tool_calls` emits no token
+or trace events even when `stream_tokens` is set — constrained decoding has no
+real increments, so there is nothing to stream.
+
+See [`examples/remote-llm`](examples/remote-llm) for a runnable host wiring
+an agent to a remote endpoint end to end.
 
 ## Repository layout
 
@@ -57,7 +111,9 @@ Most agent frameworks assume a cloud LLM and a server runtime. AgentFlow targets
 |---|---|
 | `agentflow/core/` | Graph, Node, Edge, Runner, State, cancellation, token channel |
 | `agentflow/nodes/` | Agent / LLM / Team / Router / Aggregator nodes |
-| `agentflow/inference/` | LiteRT-LM engine + session + conversation wrappers |
+| `agentflow/inference/` | `IChatBackend` seam, canonical message helpers, LiteRT-LM engine + session + conversation wrappers |
+| `agentflow/inference/openai/` | OpenAI-compatible backend: message mapping, SSE accumulation, retry |
+| `agentflow/net/` | HTTPS client (asio + BoringSSL) and pure HTTP/1.1 + SSE parsers |
 | `agentflow/tools/` | Tool registry, native-fn tools, MCP client + adapter |
 | `agentflow/observability/` | Trace-event emitters (JSONL, callback, multi) |
 | `proto/` | Shared protobuf schemas (state, workflow spec, MCP spec, trace, checkpoint) |
@@ -99,6 +155,7 @@ Sanitizer configs are available: `bazel test --config=asan //tests/...` (also `-
 | [`examples/streaming-demo`](examples/streaming-demo) | Token-level streaming + cooperative cancellation |
 | [`examples/checkpoint-demo`](examples/checkpoint-demo) | Checkpoint hook (explicit resume) |
 | [`examples/core-stub-graph`](examples/core-stub-graph) | Bare graph/runner with stub nodes (no model) |
+| [`examples/remote-llm`](examples/remote-llm) | Workflow-driven agent against a remote OpenAI-compatible endpoint |
 
 ### C++ sketch
 

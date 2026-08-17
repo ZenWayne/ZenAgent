@@ -15,15 +15,16 @@
 #include "agentflow/core/node.h"
 #include "agentflow/core/state.h"
 #include "agentflow/core/token_channel.h"
-#include "agentflow/inference/litert_lm_conversation.h"
-#include "agentflow/inference/litert_lm_engine.h"
+#include "agentflow/inference/chat_backend.h"
 #include "agentflow/tools/tool.h"
 #include "agentflow/tools/tool_registry.h"
 
 namespace agentflow {
 
 struct AgentNodeConfig {
-  std::shared_ptr<LiteRtLmEngine> engine;
+  // The inference backend. LiteRtLmChatBackend for on-device, or a remote
+  // backend such as OpenAiChatBackend — AgentNode cannot tell them apart.
+  std::shared_ptr<IChatBackend> backend;
   asio::io_context* io_ctx = nullptr;  // for LiteRtLmSession creation
   std::string system_prompt;
   std::shared_ptr<ToolRegistry> tool_registry;

@@ -4,7 +4,7 @@
 
 #include <asio/io_context.hpp>
 
-#include "agentflow/inference/litert_lm_engine.h"
+#include "agentflow/core/errors.h"
 #include "agentflow/workflow/delegate_tool.h"
 #include "agentflow/workflow/sub_agent_context.h"
 #include "agentflow/workflow/sub_agent_runtime.h"
@@ -12,10 +12,29 @@
 
 namespace agentflow::workflow {
 
+namespace {
+
+// Resolves an agent's inference backend. An empty ModelSpec.backend selects
+// the build spec's default; a name must be present in the backends map.
+//
+// Thin wrapper over ResolveNamedBackend (agentflow/workflow/sub_agent_runtime.h)
+// so top-level agents and delegated sub-agents (SubAgentRuntime::RunAsync)
+// share one copy of the "unknown name throws rather than silently falling
+// back" rule (design spec §5) instead of two.
+std::shared_ptr<::agentflow::IChatBackend> ResolveBackend(
+    const AgentNodeBuildSpec& spec, const proto::WorkflowSpec::AgentDef& agent_def) {
+  return ResolveNamedBackend(agent_def.model().backend(), spec.agent_name,
+                              spec.backend, spec.backends);
+}
+
+}  // namespace
+
 BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   BuiltAgentNode out;
   AgentNodeConfig& cfg = out.cfg;
-  cfg.engine = spec.engine;
+  // Default backend, used if the agent isn't found below (caller checks cfg
+  // validity in that case) or if the agent's ModelSpec.backend is empty.
+  cfg.backend = spec.backend;
   cfg.io_ctx = spec.io_ctx;
   cfg.tool_registry = spec.host_tools;
   cfg.input_field = spec.input_field;
@@ -30,6 +49,10 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   if (it == agents.end()) return out;  // caller checks cfg validity
   const auto& agent_def = it->second;
 
+  // Per-agent backend selection (Task 7): an unknown logical name throws
+  // rather than silently falling back to cfg.backend set above.
+  cfg.backend = ResolveBackend(spec, agent_def);
+
   cfg.system_prompt = agent_def.system_prompt();
   cfg.constrained_tool_calls = agent_def.model().constrained_tool_calls();
   if (agent_def.model().max_output_tokens() > 0) {
@@ -43,14 +66,22 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   for (const auto& t : agent_def.tools()) cfg.tool_names.push_back(t);
 
   // Auto-wire the delegate tool if this agent delegates.
-  if (agent_def.has_delegates() && spec.engine && spec.io_ctx) {
+  if (agent_def.has_delegates() && cfg.backend && spec.io_ctx) {
     EventEmitter* emit = spec.emit;
     static NullEventEmitter kNullEmit;
     if (!emit) emit = &kNullEmit;
 
+    // spec.backend (the host's default) + spec.backends (named backends), NOT
+    // cfg.backend (this agent's OWN resolved backend): a child with an empty
+    // model.backend must fall back to the host default, not silently inherit
+    // whatever backend the parent happened to resolve to, and a child that
+    // names its own backend must be able to select ANY registered backend —
+    // resolved per-child inside SubAgentRuntime::RunAsync via
+    // ResolveNamedBackend, not fixed once here.
     auto runtime = std::make_shared<SubAgentRuntime>(
         spec.workflow, *spec.host_tools, *emit,
-        SubAgentRuntime::DefaultConversationFactory(spec.engine, *spec.io_ctx));
+        SubAgentRuntime::DefaultConversationFactory(spec.backend,
+                                                       spec.backends));
 
     std::vector<std::string> allowed;
     allowed.reserve(agent_def.delegates().agents_size());

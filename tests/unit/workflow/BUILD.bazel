@@ -50,9 +50,11 @@ cc_test(
     srcs = ["sub_agent_runtime_test.cc"],
     deps = [
         "//agentflow/core",
+        "//agentflow/inference:chat_backend",
         "//agentflow/tools",
         "//agentflow/workflow:sub_agent_runtime",
         "//agentflow/workflow:workflow_loader",
+        "//tests/support:fake_chat_backend",
         "@abseil-cpp//absl/status:statusor",
         "@asio",
         "@googletest//:gtest",
@@ -79,10 +81,28 @@ cc_test(
     size = "small",
     srcs = ["workflow_runner_test.cc"],
     deps = [
-        "//agentflow/inference",
+        "//agentflow/inference:chat_backend",
         "//agentflow/tools",
         "//agentflow/workflow:workflow_loader",
         "//agentflow/workflow:workflow_runner",
+        "//tests/support:fake_chat_backend",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "backend_selection_test",
+    size = "small",
+    srcs = ["backend_selection_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference:chat_backend",
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow_loader",
+        "//agentflow/workflow:workflow_runner",
+        "//tests/support:fake_chat_backend",
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
