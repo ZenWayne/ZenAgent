@@ -1,0 +1,4 @@
+[submodule "LiteRT-LM"]
+	path = LiteRT-LM
+	url = https://github.com/ZenWayne/LiteRT-LM.git
+	branch = zenagent/constrained-decoding
