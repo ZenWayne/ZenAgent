@@ -8,6 +8,7 @@ cc_library(
     srcs = [
         "mcp_client.cc",
         "mcp_client_pool.cc",
+        "mcp_http_codec.cc",
         "mcp_tool_adapter.cc",
         "native_fn_tool.cc",
         "tool_registry.cc",
@@ -15,6 +16,7 @@ cc_library(
     hdrs = [
         "mcp_client.h",
         "mcp_client_pool.h",
+        "mcp_http_codec.h",
         "mcp_tool_adapter.h",
         "native_fn_tool.h",
         "tool.h",
@@ -22,9 +24,11 @@ cc_library(
     ],
     deps = [
         "//agentflow/core",
+        "//agentflow/net:http_parse",
         "//proto:agentflow_proto",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
         "@asio",
         "@nlohmann_json//:json",
     ],
