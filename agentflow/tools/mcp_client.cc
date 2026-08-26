@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -44,6 +45,16 @@ constexpr const char* kJsonRpc = "2.0";
 constexpr const char* kProtocolVersion = "2025-03-26";
 constexpr const char* kClientName = "agentflow";
 constexpr const char* kClientVersion = "0.1.0";
+// Desktop default CA bundle, used when neither an injected http client nor
+// MCP_CA_PATH supplies one. Same fallback as examples/remote-llm/main.cc.
+constexpr const char* kDefaultCaPath = "/etc/ssl/certs/ca-certificates.crt";
+
+std::string ToLowerAscii(std::string_view s) {
+  std::string out(s);
+  std::transform(out.begin(), out.end(), out.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return out;
+}
 
 ToolSchema ToolSchemaFromMcp(const json& tool) {
   ToolSchema s;
@@ -269,17 +280,24 @@ class McpClient::Impl
     }
     if (http_ == nullptr) {
       net::HttpsClientOptions opts;
-      // Plain http:// needs no CA bundle; https:// callers set MCP_CA_PATH.
-      if (const char* ca = std::getenv("MCP_CA_PATH")) opts.ca_path = ca;
+      // https:// requires a CA bundle (verification is mandatory, see
+      // https_client.cc); plain http:// ignores it. MCP_CA_PATH lets ops
+      // override; otherwise fall back to the desktop system bundle, same as
+      // examples/remote-llm/main.cc.
+      if (const char* ca = std::getenv("MCP_CA_PATH")) {
+        opts.ca_path = ca;
+      } else {
+        opts.ca_path = kDefaultCaPath;
+      }
       http_ = std::make_shared<net::HttpsClient>(io_, std::move(opts));
     }
     http_session_id_.clear();
 
     static const CancelToken kNoCancel;
     json init_params = {
-        {"protocolVersion", "2024-11-05"},
+        {"protocolVersion", kProtocolVersion},
         {"capabilities", json::object()},
-        {"clientInfo", {{"name", "agentflow"}, {"version", "1"}}},
+        {"clientInfo", {{"name", kClientName}, {"version", kClientVersion}}},
     };
     auto init = co_await PostRpc("initialize", std::move(init_params),
                                  /*is_notification=*/false, kNoCancel);
@@ -308,15 +326,25 @@ class McpClient::Impl
                                                 const CancelToken& cancel) {
     json msg = {{"jsonrpc", kJsonRpc}, {"method", std::move(method)}};
     if (!params.is_null()) msg["params"] = std::move(params);
-    if (!is_notification) msg["id"] = next_id_++;
+    int64_t request_id = 0;
+    if (!is_notification) {
+      request_id = next_id_++;
+      msg["id"] = request_id;
+    }
 
     net::HttpRequest req;
     req.url = spec_.command_or_url();
     req.body = msg.dump();
     req.headers = BuildMcpHttpHeaders(http_session_id_);
     for (const auto& [k, v] : spec_.headers()) {
-      auto it = std::find_if(req.headers.begin(), req.headers.end(),
-                             [&k](const auto& kv) { return kv.first == k; });
+      // Header names are compared case-insensitively everywhere else in this
+      // feature (mcp_http_codec.cc); doing a case-sensitive match here would
+      // let e.g. a spec-provided "content-type" append a duplicate header
+      // instead of overriding BuildMcpHttpHeaders's "Content-Type".
+      const std::string want = ToLowerAscii(k);
+      auto it = std::find_if(
+          req.headers.begin(), req.headers.end(),
+          [&want](const auto& kv) { return ToLowerAscii(kv.first) == want; });
       if (it != req.headers.end()) {
         it->second = v;
       } else {
@@ -337,13 +365,28 @@ class McpClient::Impl
     if (!decoded->has_value()) co_return json::object();  // notification ack
 
     const json& payload = **decoded;
+    // DecodeMcpHttpResponse picks the LAST SSE frame as a heuristic, not a
+    // correlated match — a server that trails the real response with a
+    // progress/notification frame must not have that frame silently accepted
+    // as this call's result.
+    if (!is_notification &&
+        (!payload.contains("id") || payload["id"] != request_id)) {
+      co_return absl::InternalError(
+          "MCP HTTP: response id " + payload.value("id", json()).dump() +
+          " does not match request id " + std::to_string(request_id));
+    }
     if (payload.contains("error")) {
       const auto& err = payload["error"];
       co_return absl::InternalError(
           "MCP error " + std::to_string(err.value("code", -1)) + ": " +
           err.value("message", std::string{}));
     }
-    co_return payload.value("result", json::object());
+    if (!payload.contains("result")) {
+      co_return absl::InternalError(
+          "MCP HTTP: response has neither result nor error: " +
+          payload.dump());
+    }
+    co_return payload["result"];
   }
 
   // ── JSON-RPC framing ──────────────────────────────────────────────────────

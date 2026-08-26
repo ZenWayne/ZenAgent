@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -228,6 +229,130 @@ TEST(McpHttpClient, StaticSpecHeadersAreSentOnEveryRequest) {
   for (const auto& req : fake->seen) {
     EXPECT_EQ(HeaderOf(req, "Authorization"), "Bearer tok123");
   }
+}
+
+std::string LowerAscii(std::string_view s) {
+  std::string out(s);
+  std::transform(out.begin(), out.end(), out.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return out;
+}
+
+TEST(McpHttpClient, SpecHeaderOverridesDefaultCaseInsensitively) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}, {"mcp-session-id", "S5"}},
+       SseFrame({{"jsonrpc", "2.0"}, {"id", 1}, {"result", json::object()}})});
+  fake->canned.push_back({202, {{"content-type", "application/json"}}, ""});
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}},
+       SseFrame({{"jsonrpc", "2.0"},
+                 {"id", 2},
+                 {"result", {{"tools", json::array()}}}})});
+
+  auto spec = HttpSpec();
+  // Differently-cased than BuildMcpHttpHeaders's "Content-Type" default --
+  // must override it in place, never append a second Content-Type header.
+  (*spec.mutable_headers())["content-type"] = "application/vnd.custom+json";
+  auto client = McpClient::Create(spec, io, fake);
+
+  asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<void> {
+        (void)co_await client->ListTools();
+        co_return;
+      },
+      asio::detached);
+  io.run();
+
+  ASSERT_EQ(fake->seen.size(), 3u);
+  for (const auto& req : fake->seen) {
+    int count = 0;
+    std::string value;
+    for (const auto& [k, v] : req.headers) {
+      if (LowerAscii(k) == "content-type") {
+        ++count;
+        value = v;
+      }
+    }
+    EXPECT_EQ(count, 1) << "expected exactly one Content-Type header";
+    EXPECT_EQ(value, "application/vnd.custom+json");
+  }
+}
+
+TEST(McpHttpClient, ResponseIdMismatchIsError) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}, {"mcp-session-id", "S6"}},
+       SseFrame({{"jsonrpc", "2.0"}, {"id", 1}, {"result", json::object()}})});
+  fake->canned.push_back({202, {{"content-type", "application/json"}}, ""});
+  // tools/call is request id=2, but the response claims id=99 -- e.g. a
+  // trailing progress/notification frame the codec's last-frame heuristic
+  // picked up instead of the real response. Must not be accepted as success.
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}},
+       SseFrame({{"jsonrpc", "2.0"},
+                 {"id", 99},
+                 {"result", {{"content", json::array()}, {"isError", false}}}})});
+
+  auto client = McpClient::Create(HttpSpec(), io, fake);
+
+  absl::Status status;
+  CancelToken no_cancel;
+  asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<void> {
+        auto got = co_await client->CallTool("get_shot", "{}", no_cancel);
+        status = got.status();
+        co_return;
+      },
+      asio::detached);
+  io.run();
+
+  ASSERT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("does not match request id"),
+            std::string::npos);
+}
+
+TEST(McpHttpClient, ResponseWithNeitherResultNorErrorIsError) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}, {"mcp-session-id", "S7"}},
+       SseFrame({{"jsonrpc", "2.0"}, {"id", 1}, {"result", json::object()}})});
+  fake->canned.push_back({202, {{"content-type", "application/json"}}, ""});
+  // Well-formed id, but the payload has neither "result" nor "error" -- a
+  // JSON-RPC protocol violation that must not be silently treated as an
+  // empty success.
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}},
+       SseFrame({{"jsonrpc", "2.0"}, {"id", 2}})});
+
+  auto client = McpClient::Create(HttpSpec(), io, fake);
+
+  absl::Status status;
+  CancelToken no_cancel;
+  asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<void> {
+        auto got = co_await client->CallTool("get_shot", "{}", no_cancel);
+        status = got.status();
+        co_return;
+      },
+      asio::detached);
+  io.run();
+
+  ASSERT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("neither result nor error"),
+            std::string::npos);
 }
 
 }  // namespace
