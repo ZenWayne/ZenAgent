@@ -6,7 +6,7 @@
 #include <variant>
 #include <vector>
 
-#include <absl/status/statusor.h>
+#include "absl/status/statusor.h"
 #include <nlohmann/json.hpp>
 
 #include "agentflow/workflow/eval_context.h"

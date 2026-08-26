@@ -2,7 +2,7 @@
 #ifndef AGENTFLOW_PERSIST_CHECKPOINT_WRITER_H_
 #define AGENTFLOW_PERSIST_CHECKPOINT_WRITER_H_
 
-#include <absl/status/status.h>
+#include "absl/status/status.h"
 
 #include "checkpoint.pb.h"
 

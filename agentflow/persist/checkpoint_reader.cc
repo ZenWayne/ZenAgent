@@ -6,7 +6,7 @@
 #include <fstream>
 #include <sstream>
 
-#include <absl/strings/str_cat.h>
+#include "absl/strings/str_cat.h"
 
 #include "agentflow/persist/checkpoint_writer.h"  // for kCurrentCheckpointSchemaVersion
 

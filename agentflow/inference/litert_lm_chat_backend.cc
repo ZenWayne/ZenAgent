@@ -5,7 +5,7 @@
 #include <exception>
 #include <string>
 
-#include <absl/status/status.h>
+#include "absl/status/status.h"
 
 #include "agentflow/inference/canonical_message.h"
 #include "agentflow/inference/litert_lm_conversation.h"

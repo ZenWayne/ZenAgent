@@ -1,8 +1,8 @@
 // agentflow/inference/openai/message_map.cc
 #include "agentflow/inference/openai/message_map.h"
 
-#include <absl/status/status.h>
-#include <absl/strings/str_cat.h>
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 
 namespace agentflow::openai {
 namespace {
