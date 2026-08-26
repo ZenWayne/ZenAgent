@@ -25,6 +25,12 @@ struct FakeHttpTurn {
   std::vector<std::string> frames;   // SSE data payloads
   absl::Status status = absl::OkStatus();
   std::string body;                  // for Post()
+
+  // What Post()'s out_head gets filled with — real HttpsClient fills the head
+  // regardless of 2xx/non-2xx, so the fake does too. Tests that don't care
+  // about the head can leave these at their defaults.
+  int status_code = 200;
+  std::vector<std::pair<std::string, std::string>> headers;
 };
 
 class FakeHttpClient : public net::IHttpClient {
@@ -47,11 +53,16 @@ class FakeHttpClient : public net::IHttpClient {
   }
 
   asio::awaitable<absl::StatusOr<std::string>> Post(
-      net::HttpRequest req, const CancelToken&) override {
+      net::HttpRequest req, const CancelToken&,
+      net::HttpResponseHead* out_head = nullptr) override {
     requests_.push_back(req);
     if (turns_.empty()) co_return absl::UnavailableError("fake: no turns left");
     FakeHttpTurn turn = std::move(turns_.front());
     turns_.pop_front();
+    if (out_head != nullptr) {
+      out_head->status_code = turn.status_code;
+      out_head->headers = turn.headers;
+    }
     if (!turn.status.ok()) co_return turn.status;
     co_return turn.body;
   }

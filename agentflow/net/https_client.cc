@@ -237,7 +237,8 @@ class HttpsClient::Impl {
   // is non-null.
   asio::awaitable<absl::Status> Run(HttpRequest req, const SseHandler* on_event,
                                      std::string* out_body,
-                                     const CancelToken& cancel) {
+                                     const CancelToken& cancel,
+                                     HttpResponseHead* out_head = nullptr) {
     auto url = ParseUrl(req.url);
     if (!url.ok()) co_return url.status();
 
@@ -289,6 +290,14 @@ class HttpsClient::Impl {
     }
 
     std::string body_bytes = raw.substr(head.head_bytes);
+
+    // Publish the head before the non-2xx bail-out below: MCP needs the
+    // response headers even on failure (an expired session shows up as a 404
+    // whose headers still identify the server).
+    if (out_head != nullptr) {
+      out_head->status_code = head.status_code;
+      out_head->headers = head.headers;
+    }
 
     // Reject non-2xx before streaming anything. The error body is bounded —
     // 8 KiB covers every provider's error JSON.
@@ -377,9 +386,10 @@ asio::awaitable<absl::Status> HttpsClient::PostSse(HttpRequest req,
 }
 
 asio::awaitable<absl::StatusOr<std::string>> HttpsClient::Post(
-    HttpRequest req, const CancelToken& cancel) {
+    HttpRequest req, const CancelToken& cancel, HttpResponseHead* out_head) {
   std::string body;
-  auto status = co_await impl_->Run(std::move(req), nullptr, &body, cancel);
+  auto status = co_await impl_->Run(std::move(req), nullptr, &body, cancel,
+                                    out_head);
   if (!status.ok()) co_return status;
   co_return body;
 }
