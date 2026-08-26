@@ -24,7 +24,9 @@ cc_library(
     ],
     deps = [
         "//agentflow/core",
+        "//agentflow/net:http_client",
         "//agentflow/net:http_parse",
+        "//agentflow/net:https_client",
         "//proto:agentflow_proto",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",

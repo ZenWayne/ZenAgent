@@ -27,4 +27,9 @@ message McpServerSpec {
   // If true, defer the actual transport handshake until the first
   // ToolRegistry::Invoke() of one of this server's tools.
   bool lazy_start = 7;
+
+  // Extra static headers sent on every request (HTTP transports only).
+  // This is where an Authorization bearer goes when the server sits behind
+  // an authenticating gateway.
+  map<string, string> headers = 8;
 }

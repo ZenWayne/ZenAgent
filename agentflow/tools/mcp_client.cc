@@ -6,7 +6,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -27,6 +29,10 @@
 #include <asio/use_awaitable.hpp>
 #include <asio/write.hpp>
 #include <nlohmann/json.hpp>
+
+#include "agentflow/net/http_client.h"
+#include "agentflow/net/https_client.h"
+#include "agentflow/tools/mcp_http_codec.h"
 
 namespace agentflow::mcp {
 
@@ -59,8 +65,9 @@ ToolSchema ToolSchemaFromMcp(const json& tool) {
 class McpClient::Impl
     : public std::enable_shared_from_this<McpClient::Impl> {
  public:
-  Impl(proto::McpServerSpec spec, asio::io_context& io)
-      : spec_(std::move(spec)), io_(io) {}
+  Impl(proto::McpServerSpec spec, asio::io_context& io,
+       std::shared_ptr<net::IHttpClient> http = nullptr)
+      : spec_(std::move(spec)), io_(io), http_(std::move(http)) {}
 
   ~Impl() { ShutdownInternal(); }
 
@@ -91,9 +98,12 @@ class McpClient::Impl
       case proto::McpServerSpec::STDIO:
         status = co_await ConnectStdio();
         break;
+      case proto::McpServerSpec::HTTP_SSE:
+        status = co_await ConnectHttp();
+        break;
       default:
         status = absl::UnimplementedError(
-            "MCP transport not implemented (only STDIO in P3)");
+            "MCP transport not implemented (only STDIO and HTTP_SSE)");
         break;
     }
     state_ = status.ok() ? State::kReady : State::kBroken;
@@ -246,12 +256,106 @@ class McpClient::Impl
     co_return absl::OkStatus();
   }
 
+  // ── HTTP transport + handshake ────────────────────────────────────────────
+
+  bool IsHttp() const {
+    return spec_.transport() == proto::McpServerSpec::HTTP_SSE;
+  }
+
+  asio::awaitable<absl::Status> ConnectHttp() {
+    if (spec_.command_or_url().empty()) {
+      co_return absl::InvalidArgumentError(
+          "HTTP McpServerSpec.command_or_url is empty");
+    }
+    if (http_ == nullptr) {
+      net::HttpsClientOptions opts;
+      // Plain http:// needs no CA bundle; https:// callers set MCP_CA_PATH.
+      if (const char* ca = std::getenv("MCP_CA_PATH")) opts.ca_path = ca;
+      http_ = std::make_shared<net::HttpsClient>(io_, std::move(opts));
+    }
+    http_session_id_.clear();
+
+    static const CancelToken kNoCancel;
+    json init_params = {
+        {"protocolVersion", "2024-11-05"},
+        {"capabilities", json::object()},
+        {"clientInfo", {{"name", "agentflow"}, {"version", "1"}}},
+    };
+    auto init = co_await PostRpc("initialize", std::move(init_params),
+                                 /*is_notification=*/false, kNoCancel);
+    if (!init.ok()) co_return init.status();
+
+    // The server assigns the session on initialize; every later POST must
+    // echo it back or the server answers 404.
+    if (http_session_id_.empty()) {
+      co_return absl::InternalError(
+          "MCP HTTP: server did not assign an Mcp-Session-Id on initialize");
+    }
+
+    auto ack = co_await PostRpc("notifications/initialized", json::object(),
+                                /*is_notification=*/true, kNoCancel);
+    if (!ack.ok()) co_return ack.status();
+
+    state_ = State::kReady;
+    NotifyConnectWaiters();
+    co_return absl::OkStatus();
+  }
+
+  // One JSON-RPC round trip over HTTP. Notifications carry no id and expect an
+  // empty 202 body. Captures a newly assigned session id as a side effect.
+  asio::awaitable<absl::StatusOr<json>> PostRpc(std::string method, json params,
+                                                bool is_notification,
+                                                const CancelToken& cancel) {
+    json msg = {{"jsonrpc", kJsonRpc}, {"method", std::move(method)}};
+    if (!params.is_null()) msg["params"] = std::move(params);
+    if (!is_notification) msg["id"] = next_id_++;
+
+    net::HttpRequest req;
+    req.url = spec_.command_or_url();
+    req.body = msg.dump();
+    req.headers = BuildMcpHttpHeaders(http_session_id_);
+    for (const auto& [k, v] : spec_.headers()) {
+      auto it = std::find_if(req.headers.begin(), req.headers.end(),
+                             [&k](const auto& kv) { return kv.first == k; });
+      if (it != req.headers.end()) {
+        it->second = v;
+      } else {
+        req.headers.emplace_back(k, v);
+      }
+    }
+
+    net::HttpResponseHead head;
+    auto body = co_await http_->Post(std::move(req), cancel, &head);
+    if (!body.ok()) co_return body.status();
+
+    if (auto sid = SessionIdFromHeaders(head.headers); !sid.empty()) {
+      http_session_id_ = sid;
+    }
+
+    auto decoded = DecodeMcpHttpResponse(head.status_code, head.headers, *body);
+    if (!decoded.ok()) co_return decoded.status();
+    if (!decoded->has_value()) co_return json::object();  // notification ack
+
+    const json& payload = **decoded;
+    if (payload.contains("error")) {
+      const auto& err = payload["error"];
+      co_return absl::InternalError(
+          "MCP error " + std::to_string(err.value("code", -1)) + ": " +
+          err.value("message", std::string{}));
+    }
+    co_return payload.value("result", json::object());
+  }
+
   // ── JSON-RPC framing ──────────────────────────────────────────────────────
 
   asio::awaitable<absl::StatusOr<json>> SendRequest(
       std::string method, json params, const CancelToken& cancel) {
     if (state_ != State::kReady) {
       co_return absl::FailedPreconditionError("MCP client not connected");
+    }
+    if (IsHttp()) {
+      co_return co_await PostRpc(std::move(method), std::move(params),
+                                 /*is_notification=*/false, cancel);
     }
     const int64_t id = next_id_++;
     auto ch = std::make_shared<RespChannel>(io_, 1);
@@ -395,6 +499,15 @@ class McpClient::Impl
 
   void ShutdownInternal(bool permanent = true) {
     if (permanent) shutdown_ = true;
+    if (IsHttp()) {
+      // No long-lived connection to tear down for HTTP — just drop the
+      // session so the next Connect() re-handshakes. permanent=false is the
+      // reconnect-from-kBroken path; permanent=true is a real Shutdown().
+      http_session_id_.clear();
+      NotifyConnectWaiters();
+      state_ = permanent ? State::kBroken : State::kIdle;
+      return;
+    }
     if (child_in_) { child_in_->close(); child_in_.reset(); }
     if (child_out_) { child_out_->close(); child_out_.reset(); }
     FailPending(asio::error::operation_aborted);
@@ -420,6 +533,9 @@ class McpClient::Impl
   State state_ = State::kIdle;
   std::vector<std::shared_ptr<WaiterChannel>> connect_waiters_;
 
+  std::shared_ptr<net::IHttpClient> http_;  // HTTP transports only
+  std::string http_session_id_;             // assigned by initialize
+
   pid_t child_pid_ = -1;
   std::unique_ptr<asio::posix::stream_descriptor> child_in_;
   std::unique_ptr<asio::posix::stream_descriptor> child_out_;
@@ -441,6 +557,13 @@ std::shared_ptr<McpClient> McpClient::Create(proto::McpServerSpec spec,
   // a detached ReadLoop coroutine and SendRequest registers an OnCancel
   // callback, both of which capture shared_from_this()).
   auto impl = std::make_shared<Impl>(std::move(spec), io);
+  return std::shared_ptr<McpClient>(new McpClient(std::move(impl)));
+}
+
+std::shared_ptr<McpClient> McpClient::Create(
+    proto::McpServerSpec spec, asio::io_context& io,
+    std::shared_ptr<net::IHttpClient> http) {
+  auto impl = std::make_shared<Impl>(std::move(spec), io, std::move(http));
   return std::shared_ptr<McpClient>(new McpClient(std::move(impl)));
 }
 

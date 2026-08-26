@@ -91,3 +91,21 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "mcp_http_client_test",
+    size = "small",
+    srcs = ["mcp_http_client_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/net:http_client",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
