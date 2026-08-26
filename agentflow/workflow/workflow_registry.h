@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <absl/time/time.h>
+#include "absl/time/time.h"
 
 #include "agentflow/core/event.h"
 #include "agentflow/workflow/workflow.h"

@@ -7,7 +7,7 @@
 #include <string>
 #include <string_view>
 
-#include <absl/status/statusor.h>
+#include "absl/status/statusor.h"
 
 #include "agentflow/core/event.h"
 #include "agentflow/tools/tool_registry.h"

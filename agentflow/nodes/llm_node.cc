@@ -7,7 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include <absl/status/status.h>
+#include "absl/status/status.h"
 
 #include "agentflow/core/errors.h"
 #include "agentflow/inference/canonical_message.h"
