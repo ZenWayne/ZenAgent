@@ -21,6 +21,15 @@ namespace agentflow::mcp {
 // and lazy_start are policy on top of the same connection and do NOT affect
 // keying.
 //
+// `headers` (e.g. an Authorization bearer) also does NOT participate in
+// keying -- it is policy, not identity, same as the fields above. This means
+// one (transport, command_or_url, args) can only carry ONE set of credentials
+// per pool: two AttachMcpServer calls that differ only in `headers` silently
+// share a single client, and whichever call created it wins its headers for
+// every subsequent call. Acceptable for v1's single global machine token;
+// revisit keying (or reject the conflict) if per-caller credentials are ever
+// needed on a shared URL.
+//
 // The default factory creates the in-house McpClient. Tests inject a custom
 // factory to return a FakeMcpClient (or any IMcpClient).
 class McpClientPool {

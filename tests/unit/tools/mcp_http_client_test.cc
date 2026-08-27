@@ -48,6 +48,13 @@ class FakeHttpClient : public net::IHttpClient {
       out_head->status_code = c.status;
       out_head->headers = c.headers;
     }
+    // Mirror agentflow/net/https_client.cc: the head is published before the
+    // non-2xx bail-out, and a non-2xx status fails the whole Post() call
+    // rather than being handed back as an ok body for the codec to reject.
+    if (c.status < 200 || c.status >= 300) {
+      co_return absl::UnavailableError("fake: HTTP " +
+                                        std::to_string(c.status));
+    }
     co_return c.body;
   }
 };
@@ -353,6 +360,164 @@ TEST(McpHttpClient, ResponseWithNeitherResultNorErrorIsError) {
   ASSERT_FALSE(status.ok());
   EXPECT_NE(status.message().find("neither result nor error"),
             std::string::npos);
+}
+
+// F#1: a non-object JSON-RPC payload (e.g. a bare `null` or `[1,2]` SSE data
+// frame) must surface as a non-ok status, not throw nlohmann::json::type_error
+// out of the coroutine (which would otherwise propagate through
+// asio::detached and be rethrown by io_context::run(), very likely killing
+// the process).
+TEST(McpHttpClient, NonObjectPayloadIsErrorNotThrow) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}, {"mcp-session-id", "S8"}},
+       SseFrame({{"jsonrpc", "2.0"}, {"id", 1}, {"result", json::object()}})});
+  fake->canned.push_back({202, {{"content-type", "application/json"}}, ""});
+  // Malformed server: the "response" is valid JSON but not an object.
+  fake->canned.push_back(
+      {200, {{"content-type", "text/event-stream"}}, SseFrame(json(nullptr))});
+
+  auto client = McpClient::Create(HttpSpec(), io, fake);
+
+  absl::Status status;
+  CancelToken no_cancel;
+  asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<void> {
+        auto got = co_await client->CallTool("get_shot", "{}", no_cancel);
+        status = got.status();
+        co_return;
+      },
+      asio::detached);
+  // io.run() would rethrow an uncaught exception escaping the coroutine --
+  // reaching the assertions below at all is part of what this test checks.
+  io.run();
+
+  ASSERT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("not an object"), std::string::npos);
+}
+
+// F#2: an empty 2xx body for a real request (not a notification) must not be
+// handed to the caller as an empty-but-successful tool result -- that's the
+// same swallowed-protocol-violation class the F4 fix closed for the
+// last-frame path, arriving through the empty-body door instead.
+TEST(McpHttpClient, EmptyBodyForRealRequestIsError) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}, {"mcp-session-id", "S9"}},
+       SseFrame({{"jsonrpc", "2.0"}, {"id", 1}, {"result", json::object()}})});
+  // notifications/initialized: empty 202 body on the notification path must
+  // still succeed (this is not a regression target of the F#2 fix).
+  fake->canned.push_back({202, {{"content-type", "application/json"}}, ""});
+  // tools/call is a real request (is_notification=false) but the server
+  // answers 200 with an empty body.
+  fake->canned.push_back({200, {{"content-type", "application/json"}}, ""});
+
+  auto client = McpClient::Create(HttpSpec(), io, fake);
+
+  absl::Status status;
+  CancelToken no_cancel;
+  asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<void> {
+        auto got = co_await client->CallTool("get_shot", "{}", no_cancel);
+        status = got.status();
+        co_return;
+      },
+      asio::detached);
+  io.run();
+
+  // The handshake's own notifications/initialized (empty 202) had to succeed
+  // for CallTool to even reach the tools/call POST -- so reaching this
+  // non-ok assertion already confirms the notification path is unaffected.
+  ASSERT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("empty body"), std::string::npos);
+}
+
+// F#3: a failed HTTP POST (transport error / non-2xx, as FakeHttpClient now
+// mirrors https_client.cc's non-2xx-fails-Post() behavior) must flip the
+// client out of kReady so the NEXT call re-handshakes instead of reusing a
+// session the server may have already discarded. There is no public
+// state_ accessor, so the state transition is observed indirectly: the next
+// ListTools() call must re-send "initialize" (a fresh handshake), visible as
+// new entries in fake->seen.
+TEST(McpHttpClient, FailedPostBreaksClientAndForcesRehandshake) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  // First connect: succeeds and assigns session S10.
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}, {"mcp-session-id", "S10"}},
+       SseFrame({{"jsonrpc", "2.0"}, {"id", 1}, {"result", json::object()}})});
+  fake->canned.push_back({202, {{"content-type", "application/json"}}, ""});
+  // First tools/list: the session has expired server-side -- 404.
+  fake->canned.push_back({404, {}, "session not found"});
+  // Second connect (re-handshake after kBroken): succeeds with a new session.
+  // Request ids are a monotonic counter that is NOT reset across reconnects:
+  // id=1 was the first initialize, id=2 the first (failed) tools/list, so
+  // this second initialize is id=3 and the second tools/list is id=4.
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}, {"mcp-session-id", "S11"}},
+       SseFrame({{"jsonrpc", "2.0"}, {"id", 3}, {"result", json::object()}})});
+  fake->canned.push_back({202, {{"content-type", "application/json"}}, ""});
+  // Second tools/list: succeeds for real.
+  fake->canned.push_back(
+      {200,
+       {{"content-type", "text/event-stream"}},
+       SseFrame({{"jsonrpc", "2.0"},
+                 {"id", 4},
+                 {"result",
+                  {{"tools",
+                    json::array({{{"name", "get_shot"},
+                                  {"description", "read one shot"},
+                                  {"inputSchema", {{"type", "object"}}}}})}}}})});
+
+  auto client = McpClient::Create(HttpSpec(), io, fake);
+
+  absl::Status first_status;
+  absl::Status second_status;
+  std::vector<ToolSchema> tools;
+  asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<void> {
+        auto first = co_await client->ListTools();
+        first_status = first.status();
+
+        auto second = co_await client->ListTools();
+        second_status = second.status();
+        if (second.ok()) tools = *second;
+        co_return;
+      },
+      asio::detached);
+  io.run();
+
+  ASSERT_FALSE(first_status.ok());
+
+  // If the client had stayed kReady after the broken POST, the second
+  // ListTools() would go straight to a 4th canned response (another
+  // tools/list) instead of re-running the handshake -- and since only 6
+  // responses are canned, that would either consume the wrong canned entry
+  // or exhaust `canned` and fail with "no canned response left". Observing
+  // a SUCCESSFUL second call, whose request sequence replays a fresh
+  // initialize + notifications/initialized + tools/list, is the only way
+  // through this canned sequence -- so it demonstrates the client left
+  // kReady and re-handshook.
+  ASSERT_TRUE(second_status.ok()) << second_status.message();
+  ASSERT_EQ(tools.size(), 1u);
+  EXPECT_EQ(tools[0].name, "get_shot");
+
+  ASSERT_EQ(fake->seen.size(), 6u);
+  EXPECT_EQ(json::parse(fake->seen[3].body)["method"], "initialize");
+  EXPECT_EQ(HeaderOf(fake->seen[3], "Mcp-Session-Id"), "")
+      << "re-handshake's initialize must not carry the discarded session id";
+  EXPECT_EQ(json::parse(fake->seen[4].body)["method"],
+            "notifications/initialized");
+  EXPECT_EQ(HeaderOf(fake->seen[5], "Mcp-Session-Id"), "S11");
 }
 
 }  // namespace

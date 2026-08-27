@@ -31,5 +31,12 @@ message McpServerSpec {
   // Extra static headers sent on every request (HTTP transports only).
   // This is where an Authorization bearer goes when the server sits behind
   // an authenticating gateway.
+  //
+  // NOTE: `headers` does NOT participate in McpClientPool's client keying
+  // (see mcp_client_pool.h) -- it is policy, not identity, like
+  // include_tools/exclude_tools/call_timeout_ms/lazy_start above. So one
+  // command_or_url can only carry ONE set of credentials per pool: two
+  // AttachMcpServer calls with the same URL but different headers silently
+  // share one client, and the second call's credentials never take effect.
   map<string, string> headers = 8;
 }

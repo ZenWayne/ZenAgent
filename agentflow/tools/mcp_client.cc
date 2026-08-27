@@ -354,17 +354,47 @@ class McpClient::Impl
 
     net::HttpResponseHead head;
     auto body = co_await http_->Post(std::move(req), cancel, &head);
-    if (!body.ok()) co_return body.status();
-
+    // Publish a newly assigned session id even on failure: https_client.cc
+    // populates the head before its non-2xx bail-out precisely so callers can
+    // read headers on a failure (e.g. a 404 from an expired session may still
+    // echo the session it no longer recognizes).
     if (auto sid = SessionIdFromHeaders(head.headers); !sid.empty()) {
       http_session_id_ = sid;
+    }
+    if (!body.ok()) {
+      // Mark the transport broken so the next EnsureReady() re-handshakes
+      // instead of reusing a session the server has already discarded.
+      // Cancellation is not a transport failure -- leave state_ alone so an
+      // in-flight cancel doesn't spuriously break an otherwise-healthy
+      // client.
+      if (!absl::IsCancelled(body.status())) {
+        state_ = State::kBroken;
+        http_session_id_.clear();
+      }
+      co_return body.status();
     }
 
     auto decoded = DecodeMcpHttpResponse(head.status_code, head.headers, *body);
     if (!decoded.ok()) co_return decoded.status();
-    if (!decoded->has_value()) co_return json::object();  // notification ack
+    if (!decoded->has_value()) {
+      // Empty 2xx body. Legitimate only for a notification ack; for a real
+      // request this is a swallowed protocol violation -- the caller must not
+      // see it as an empty-but-successful tool result.
+      if (is_notification) co_return json::object();
+      co_return absl::InternalError(
+          "MCP HTTP: empty body for request id " +
+          std::to_string(request_id));
+    }
 
     const json& payload = **decoded;
+    if (!payload.is_object()) {
+      // `payload` is only guaranteed to be valid JSON, not an object --
+      // `.value("id", ...)` etc. below would throw nlohmann::json::type_error
+      // on e.g. `data: null` / `data: []` / `data: "ok"`. Bail before any of
+      // that runs.
+      co_return absl::InvalidArgumentError(
+          "MCP HTTP: JSON-RPC payload is not an object: " + payload.dump());
+    }
     // DecodeMcpHttpResponse picks the LAST SSE frame as a heuristic, not a
     // correlated match — a server that trails the real response with a
     // progress/notification frame must not have that frame silently accepted
@@ -377,6 +407,10 @@ class McpClient::Impl
     }
     if (payload.contains("error")) {
       const auto& err = payload["error"];
+      if (!err.is_object()) {
+        co_return absl::InternalError(
+            "MCP HTTP: error field is not an object: " + err.dump());
+      }
       co_return absl::InternalError(
           "MCP error " + std::to_string(err.value("code", -1)) + ": " +
           err.value("message", std::string{}));
