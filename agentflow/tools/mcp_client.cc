@@ -367,9 +367,20 @@ class McpClient::Impl
       // Cancellation is not a transport failure -- leave state_ alone so an
       // in-flight cancel doesn't spuriously break an otherwise-healthy
       // client.
+      //
+      // Deliberately do NOT clear http_session_id_ here: this client is
+      // shared across concurrent CallTool/ListTools coroutines (one McpClient
+      // per AttachMcpServer -- see tool_registry.cc), and another coroutine
+      // may already be past the `state_ != kReady` gate in SendRequest,
+      // between reading http_session_id_ into its request and actually
+      // sending it. Clearing it here would make that concurrent request go
+      // out with an EMPTY Mcp-Session-Id (a guaranteed spurious failure)
+      // instead of a stale one (a pre-existing, self-healing race: the
+      // server rejects it, that coroutine also marks the client kBroken, and
+      // ConnectHttp() clears the session id itself at the start of every
+      // handshake).
       if (!absl::IsCancelled(body.status())) {
         state_ = State::kBroken;
-        http_session_id_.clear();
       }
       co_return body.status();
     }
