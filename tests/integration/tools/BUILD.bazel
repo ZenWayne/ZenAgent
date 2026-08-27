@@ -33,3 +33,24 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+# Manual acceptance test against a REAL video-maker MCP server. Skips itself
+# unless MCP_LIVE_URL is set, and is tagged "manual" so it never joins the
+# default `bazel test //tests/...` set (it needs a live external service and
+# must never run unattended). See live_mcp_manual_test.cc for the read-only
+# contract this test enforces.
+cc_test(
+    name = "live_mcp_manual_test",
+    size = "medium",
+    srcs = ["live_mcp_manual_test.cc"],
+    tags = ["manual"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
