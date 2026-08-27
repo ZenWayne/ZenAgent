@@ -17,18 +17,16 @@ namespace agentflow::mcp {
 
 // Owns one client per logical server, so multiple McpToolAdapters on the same
 // server reuse the same transport / handshake / process. Key =
-// (transport, command_or_url, args). include/exclude_tools, call_timeout_ms,
-// and lazy_start are policy on top of the same connection and do NOT affect
-// keying.
+// (transport, command_or_url, args, headers). include/exclude_tools,
+// call_timeout_ms, and lazy_start are policy on top of the same connection
+// and do NOT affect keying.
 //
-// `headers` (e.g. an Authorization bearer) also does NOT participate in
-// keying -- it is policy, not identity, same as the fields above. This means
-// one (transport, command_or_url, args) can only carry ONE set of credentials
-// per pool: two AttachMcpServer calls that differ only in `headers` silently
-// share a single client, and whichever call created it wins its headers for
-// every subsequent call. Acceptable for v1's single global machine token;
-// revisit keying (or reject the conflict) if per-caller credentials are ever
-// needed on a shared URL.
+// `headers` (e.g. an Authorization bearer) DOES participate in keying -- it
+// is identity, not policy: two AttachMcpServer calls to the same
+// (transport, command_or_url, args) but with different headers get DIFFERENT
+// clients, so the second caller's credentials can never be silently
+// overridden by the first's. Two calls with IDENTICAL headers (regardless of
+// map insertion order) still share one client/connection, same as before.
 //
 // The default factory creates the in-house McpClient. Tests inject a custom
 // factory to return a FakeMcpClient (or any IMcpClient).

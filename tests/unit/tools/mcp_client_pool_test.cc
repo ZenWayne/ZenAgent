@@ -78,6 +78,74 @@ TEST(McpClientPoolTest, FilterFieldsDoNotAffectKey) {
   EXPECT_EQ(pool.size(), 1u);
 }
 
+TEST(McpClientPoolTest, SameHeadersReturnSameClient) {
+  asio::io_context io;
+  auto tape = std::make_shared<std::vector<std::shared_ptr<FakeMcpClient>>>();
+  McpClientPool pool(io, FakeFactory(tape));
+
+  auto make = [] {
+    auto s = MakeSpec(proto::McpServerSpec::HTTP_SSE, "http://mcp.test/x");
+    (*s.mutable_headers())["Authorization"] = "Bearer tok-a";
+    (*s.mutable_headers())["X-Trace"] = "abc";
+    return s;
+  };
+
+  auto a = pool.GetOrCreate(make());
+  auto b = pool.GetOrCreate(make());
+  EXPECT_EQ(a.get(), b.get());
+  EXPECT_EQ(pool.size(), 1u);
+}
+
+TEST(McpClientPoolTest, DifferentAuthorizationReturnsDifferentClient) {
+  asio::io_context io;
+  auto tape = std::make_shared<std::vector<std::shared_ptr<FakeMcpClient>>>();
+  McpClientPool pool(io, FakeFactory(tape));
+
+  auto base = MakeSpec(proto::McpServerSpec::HTTP_SSE, "http://mcp.test/x");
+  auto spec_a = base;
+  (*spec_a.mutable_headers())["Authorization"] = "Bearer tok-a";
+  auto spec_b = base;
+  (*spec_b.mutable_headers())["Authorization"] = "Bearer tok-b";
+
+  auto a = pool.GetOrCreate(spec_a);
+  auto b = pool.GetOrCreate(spec_b);
+  EXPECT_NE(a.get(), b.get());
+  EXPECT_EQ(pool.size(), 2u);
+}
+
+// proto::Map's iteration order is UNSPECIFIED and can depend on insertion
+// order. CanonicalKey must sort entries before folding them into the key, or
+// two specs carrying the SAME headers -- just inserted in a DIFFERENT order
+// -- could produce different keys and silently defeat dedup only some of the
+// time. Insert several entries in reverse order between the two specs here
+// to exercise exactly that trap.
+TEST(McpClientPoolTest, SameHeadersDifferentInsertionOrderReturnSameClient) {
+  asio::io_context io;
+  auto tape = std::make_shared<std::vector<std::shared_ptr<FakeMcpClient>>>();
+  McpClientPool pool(io, FakeFactory(tape));
+
+  auto spec_a = MakeSpec(proto::McpServerSpec::HTTP_SSE, "http://mcp.test/x");
+  auto& ha = *spec_a.mutable_headers();
+  ha["Authorization"] = "Bearer tok";
+  ha["X-A"] = "1";
+  ha["X-B"] = "2";
+  ha["X-C"] = "3";
+  ha["X-D"] = "4";
+
+  auto spec_b = MakeSpec(proto::McpServerSpec::HTTP_SSE, "http://mcp.test/x");
+  auto& hb = *spec_b.mutable_headers();
+  hb["X-D"] = "4";
+  hb["X-C"] = "3";
+  hb["X-B"] = "2";
+  hb["X-A"] = "1";
+  hb["Authorization"] = "Bearer tok";
+
+  auto a = pool.GetOrCreate(spec_a);
+  auto b = pool.GetOrCreate(spec_b);
+  EXPECT_EQ(a.get(), b.get());
+  EXPECT_EQ(pool.size(), 1u);
+}
+
 TEST(McpClientPoolTest, ClearShutsDownAll) {
   asio::io_context io;
   auto tape = std::make_shared<std::vector<std::shared_ptr<FakeMcpClient>>>();
