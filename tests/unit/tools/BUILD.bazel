@@ -77,3 +77,35 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "mcp_http_codec_test",
+    size = "small",
+    srcs = ["mcp_http_codec_test.cc"],
+    deps = [
+        "//agentflow/tools",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "mcp_http_client_test",
+    size = "small",
+    srcs = ["mcp_http_client_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/net:http_client",
+        "//agentflow/tools",
+        "//proto:agentflow_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)

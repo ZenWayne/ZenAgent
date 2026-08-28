@@ -26,6 +26,12 @@ struct HttpRequest {
   std::vector<std::pair<std::string, std::string>> headers;
 };
 
+// What the response line + headers carried. Header names are lowercased.
+struct HttpResponseHead {
+  int status_code = 0;
+  std::vector<std::pair<std::string, std::string>> headers;
+};
+
 // One SSE frame's data payload, with "data: " already stripped. The [DONE]
 // sentinel is never delivered — it terminates the stream instead.
 //
@@ -46,9 +52,12 @@ class IHttpClient {
       HttpRequest req, const SseHandler& on_event,
       const CancelToken& cancel) = 0;
 
-  // POSTs and returns the whole response body.
+  // POSTs and returns the whole response body. When `out_head` is non-null it
+  // receives the status code and response headers — MCP needs the assigned
+  // Mcp-Session-Id, which lives only in the headers.
   virtual asio::awaitable<absl::StatusOr<std::string>> Post(
-      HttpRequest req, const CancelToken& cancel) = 0;
+      HttpRequest req, const CancelToken& cancel,
+      HttpResponseHead* out_head = nullptr) = 0;
 };
 
 }  // namespace agentflow::net

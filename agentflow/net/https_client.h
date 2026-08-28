@@ -40,7 +40,8 @@ class HttpsClient : public IHttpClient {
                                          const CancelToken& cancel) override;
 
   asio::awaitable<absl::StatusOr<std::string>> Post(
-      HttpRequest req, const CancelToken& cancel) override;
+      HttpRequest req, const CancelToken& cancel,
+      HttpResponseHead* out_head = nullptr) override;
 
  private:
   class Impl;

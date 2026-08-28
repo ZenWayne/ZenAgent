@@ -27,4 +27,15 @@ message McpServerSpec {
   // If true, defer the actual transport handshake until the first
   // ToolRegistry::Invoke() of one of this server's tools.
   bool lazy_start = 7;
+
+  // Extra static headers sent on every request (HTTP transports only).
+  // This is where an Authorization bearer goes when the server sits behind
+  // an authenticating gateway.
+  //
+  // NOTE: `headers` DOES participate in McpClientPool's client keying (see
+  // mcp_client_pool.h) -- unlike include_tools/exclude_tools/call_timeout_ms/
+  // lazy_start above, it is identity, not policy. Two AttachMcpServer calls
+  // with the same URL but different headers get DIFFERENT clients; only
+  // calls with identical headers share one connection.
+  map<string, string> headers = 8;
 }
