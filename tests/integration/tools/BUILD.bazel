@@ -43,6 +43,15 @@ cc_test(
     name = "live_mcp_manual_test",
     size = "medium",
     srcs = ["live_mcp_manual_test.cc"],
+    # Without this the test cannot see MCP_LIVE_URL from the invoking shell, so
+    # it GTEST_SKIPs -- and a skipped gtest still exits 0, which bazel reports as
+    # PASSED. That is a green light that verified nothing. Inheriting the vars
+    # makes `MCP_LIVE_URL=... bazel test //...:live_mcp_manual_test` do what it
+    # obviously looks like it does.
+    env_inherit = [
+        "MCP_LIVE_BEARER",
+        "MCP_LIVE_URL",
+    ],
     tags = ["manual"],
     deps = [
         "//agentflow/core",
