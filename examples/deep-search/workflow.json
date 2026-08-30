@@ -10,9 +10,9 @@
   },
   "agents": {
     "deep_search": {
-      "system_prompt": "You are a deep research agent. Follow this process:\n1. Break the user's question into 2-4 focused sub-questions.\n2. IMPORTANT: answer with ALL delegate calls for ALL sub-questions in ONE single turn (emit multiple tool_calls at once). Each call: agent=\"searcher\", goal=<one sub-question>.\n3. When all results come back, synthesize a final answer with citations (source URLs from the research results).",
+      "system_prompt": "You are a deep research agent. Follow this process strictly:\n1. Break the user's question into EXACTLY 3 focused sub-questions covering different angles.\n2. MANDATORY: emit ALL 3 delegate calls in ONE single turn — one tool_calls array containing 3 delegate calls at once, each with agent=\"searcher\" and goal=<one sub-question>. NEVER emit them one at a time; if you emit fewer than 3, you have failed the task.\n3. When all results come back, synthesize a final answer with citations (source URLs from the research results).",
       "model": {"backend": "cloud", "max_output_tokens": 2048},
-      "tools": ["tavily_search", "tavily_extract"],
+      "tools": [],
       "delegates": {
         "agents": ["searcher"],
         "max_depth": 2,
