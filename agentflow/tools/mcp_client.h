@@ -16,6 +16,8 @@
 #include "agentflow/tools/tool.h"  // ToolSchema
 #include "mcp_spec.pb.h"
 
+namespace agentflow::net { class IHttpClient; }
+
 namespace agentflow::mcp {
 
 // Abstract MCP client surface. The seam between the chosen client impl
@@ -51,9 +53,9 @@ class IMcpClient {
   virtual void Shutdown() = 0;
 };
 
-// In-house MCP client. Supports the stdio transport in P3; HTTP-SSE,
-// WebSocket, and TCP currently return Unimplemented (the impl is split so
-// adding them only touches mcp_client.cc).
+// In-house MCP client. Supports the stdio and streamable-HTTP (HTTP_SSE)
+// transports; WebSocket and TCP currently return Unimplemented (the impl is
+// split so adding them only touches mcp_client.cc).
 //
 // Thread-safety: a single instance is intended to be driven from one
 // io_context. CallTool() may be invoked concurrently from different
@@ -63,6 +65,12 @@ class McpClient : public IMcpClient {
  public:
   static std::shared_ptr<McpClient> Create(
       proto::McpServerSpec spec, asio::io_context& io);
+
+  // HTTP transports only. `http` non-null injects a client (tests); null makes
+  // the impl build an HttpsClient itself. Ignored for STDIO.
+  static std::shared_ptr<McpClient> Create(
+      proto::McpServerSpec spec, asio::io_context& io,
+      std::shared_ptr<net::IHttpClient> http);
   ~McpClient() override;
 
   McpClient(const McpClient&) = delete;
