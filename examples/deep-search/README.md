@@ -55,10 +55,20 @@ dispatch; a sequential loop would interleave call/return pairs).
 
 ## Wall-time comparison
 
-| Mode | Command | elapsed_ms | Notes |
-|---|---|---|---|
-| cloud | (see above) | — | — |
-| local gemma-4-E2B | (see above) | — | — |
+Measured 2026-08-30 on the same query ("Compare the camera quality, battery
+life, and performance of the latest flagship smartphones…"):
 
-Fill in after running; observe whether gemma-4-E2B-it emits multi-call turns
-unconstrained (visible as multiple delegate TOOL_CALL events per turn).
+| Mode | elapsed_ms | Result |
+|---|---|---|
+| cloud (deepseek-v4-flash via gateway) | **83,853** | Complete cited answer; 3 delegate calls fanned out concurrently (e2e assertion passed) |
+| local gemma-4-E2B-it | **51,859** | Ran to completion but the final answer was EMPTY — the model's unconstrained tool-call formatting drifted, and the last turn produced an empty text response. |
+
+**Local-mode conclusion (validation point from the spec):** gemma-4-E2B-it
+does NOT reliably complete this workflow unconstrained — the planner's
+tool-call turns misfire and the run ends with an empty answer. Additionally,
+the LiteRT-LM engine decode threadpool runs with 1 worker thread
+(`ThreadPool 'engine': Running up to 1 threads` in the run log), so even
+concurrent sessions serialize inside the engine. The parallel dispatch
+feature is therefore primarily a cloud-backend win; on-device deep-search
+needs a constrained-decoding path or a model that holds its function-call
+format unconstrained.
