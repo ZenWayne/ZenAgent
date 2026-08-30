@@ -90,7 +90,10 @@ TEST(DeepSearchE2ETest, RealCloudRunFansOutAndGathers) {
   });
 
   test::TestState state;
-  state.set_user_query("Who won the last Formula 1 race?");
+  state.set_user_query(
+      "Compare the camera quality, battery life, and performance of the "
+      "latest flagship smartphones from Apple, Samsung and Google, and "
+      "recommend the best overall choice.");
 
   CancelSource cancel;
   auto fut = asio::co_spawn(
