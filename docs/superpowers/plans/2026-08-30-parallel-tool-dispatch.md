@@ -222,19 +222,27 @@ TEST(AgentNodeTest, CancellationPropagatesToSpawnedToolCalls) {
           R"({"id":"b","function":{"name":"t","arguments":"{}"}}]})",
           R"({"role":"assistant","content":[{"type":"text","text":"done"}]})"});
 
+  // Tool-side timeline: each invocation records "start", waits 20ms, then
+  // records whether it observed the cancel. The run is cancelled 5ms in.
+  // NOTE: deliberately does NOT assert on conv->sent() or the final answer —
+  // AgentNode breaks its loop on cancel BEFORE sending the tool message back
+  // (agent_node.cc: the per-iteration `if (cancel.IsCancelled()) break;` runs
+  // before the next SendAsync), so no tool message ever reaches the fake
+  // backend under EITHER implementation.
+  auto timeline = std::make_shared<std::vector<std::string>>();
   auto registry = std::make_shared<ToolRegistry>();
   registry->Register(std::make_shared<NativeFnTool>(
       ToolSchema{.name = "t",
                  .description = "test tool",
                  .params_json_schema = R"({"type":"object","properties":{}})"},
-      [](std::string_view, const CancelToken& cancel)
+      [timeline](std::string_view, const CancelToken& cancel)
           -> asio::awaitable<std::string> {
-        if (cancel.IsCancelled()) co_return std::string("cancelled");
+        timeline->push_back("start");
         auto exec = co_await asio::this_coro::executor;
         asio::steady_timer t(exec, std::chrono::milliseconds(20));
         co_await t.async_wait(asio::use_awaitable);
-        if (cancel.IsCancelled()) co_return std::string("cancelled");
-        co_return std::string("done");
+        timeline->push_back(cancel.IsCancelled() ? "cancelled" : "done");
+        co_return std::string("ok");
       }));
 
   auto cfg = BaseConfig(backend, io);
@@ -256,25 +264,25 @@ TEST(AgentNodeTest, CancellationPropagatesToSpawnedToolCalls) {
   kill.async_wait([&](asio::error_code) { cancel.Cancel(); });
   io.run();
   State out = fut.get();
-
-  // Both spawned tool coroutines observed the cancel (never a hang/crash).
-  auto conv = backend->last_conversation();
-  ASSERT_NE(conv, nullptr);
-  ASSERT_GE(conv->sent().size(), 2u);
-  json tool_msg = json::parse(conv->sent()[1]);
-  ASSERT_EQ(tool_msg["content"].size(), 2u);
-  EXPECT_EQ(tool_msg["content"][0]["response"]["value"], "cancelled");
-  EXPECT_EQ(tool_msg["content"][1]["response"]["value"], "cancelled");
-  // The run then stopped on the cancel check; the exact final text is not
-  // asserted — only that cancellation propagated to every spawned coroutine.
   (void)out;
+
+  // Both spawned coroutines observed the cancel AND both started before
+  // either finished: [start, start, cancelled, cancelled]. A sequential
+  // dispatch loop produces [start, cancelled, start, cancelled] — so this
+  // asserts both cancel propagation AND concurrency, and is a genuine RED
+  // test against the current sequential implementation.
+  ASSERT_EQ(timeline->size(), 4u);
+  EXPECT_EQ((*timeline)[0], "start");
+  EXPECT_EQ((*timeline)[1], "start");
+  EXPECT_EQ((*timeline)[2], "cancelled");
+  EXPECT_EQ((*timeline)[3], "cancelled");
 }
 ```
 
-- [ ] **Step 6: Run the new tests — expect exactly two FAILURES**
+- [ ] **Step 6: Run the new tests — expect exactly three FAILURES**
 
 Run: `bazel test //tests/unit/nodes:agent_node_test --test_filter='AgentNodeTest.MultipleToolCallsInOneTurnRunConcurrently:AgentNodeTest.ParallelResultsKeepOriginalCallOrderAndIds:AgentNodeTest.EscapingToolExceptionYieldsErrorPlaceholderInPlace:AgentNodeTest.CancellationPropagatesToSpawnedToolCalls'`
-Expected: `MultipleToolCallsInOneTurnRunConcurrently` FAILS (the sequential loop produces `a_start, a_end, b_start, b_end`, so the `b_start before a_end` assertion fails) and `EscapingToolExceptionYieldsErrorPlaceholderInPlace` FAILS (`throw 42` aborts the run — no `catch(...)` wrapper yet). `ParallelResultsKeepOriginalCallOrderAndIds` and `CancellationPropagatesToSpawnedToolCalls` PASS under both implementations (they guard regressions, not the new behaviour) — their passing here is expected. Inspect the failure output of the two failing tests to confirm they fail for the reasons above before proceeding.
+Expected: `MultipleToolCallsInOneTurnRunConcurrently` FAILS (the sequential loop produces `a_start, a_end, b_start, b_end`, so the `b_start before a_end` assertion fails), `EscapingToolExceptionYieldsErrorPlaceholderInPlace` FAILS (`throw 42` aborts the run — no `catch(...)` wrapper yet), and `CancellationPropagatesToSpawnedToolCalls` FAILS (sequential timeline is `[start, cancelled, start, cancelled]`, not `[start, start, ...]`). `ParallelResultsKeepOriginalCallOrderAndIds` PASSES under both implementations (it guards regressions, not the new behaviour) — its passing here is expected. Inspect the failure output of the three failing tests to confirm they fail for the reasons above before proceeding.
 
 - [ ] **Step 7: Commit the failing tests**
 

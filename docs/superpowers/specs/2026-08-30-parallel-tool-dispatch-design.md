@@ -91,11 +91,13 @@ Two differences from `TeamNode::RunParallelGather`:
 
 Replace the sequential `for` loop over `resp["tool_calls"]` with:
 
-- Parse and normalize all tool calls first (name, call id, args) exactly
-  as today — the untrusted-input hardening stays. Malformed calls (not an
-  object, unreadable name/args) are skipped during normalization, exactly
-  as the current loop does, and never enter the spawn list; the 1:1
-  alignment invariant applies only to normalized calls.
+- Normalization preserves today's exact behaviour: a non-object entry is
+  skipped entirely (no result slot); an **object** entry always produces
+  one result slot, degrading to an empty-name dispatch when its fields
+  are malformed (see
+  `WrongTypedToolCallFieldsAreSkippedWithoutThrowing`). Only object
+  entries enter the spawn list, so the 1:1 alignment invariant covers
+  exactly the slots today's loop produces.
 - One `ResultChannel` per normalized call; `co_spawn` each dispatch; a
   try/catch wrapper around each coroutine closes the channel on exception
   (mirrors `RunParallelGather`).
