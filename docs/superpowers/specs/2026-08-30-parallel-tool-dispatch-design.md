@@ -68,11 +68,19 @@ Two differences from `TeamNode::RunParallelGather`:
    turn. Stateless tools (Tavily search/extract, delegate) are naturally
    safe; a host registering a stateful tool must make it internally
    synchronized or accept interleaving.
-3. **Local engines are unaffected.** The LiteRT-LM constrained path
-   produces at most one tool call per turn (grammar-enforced), so the
-   parallel path degrades to today's sequential behaviour. The win is on
-   remote OpenAI-compatible backends, where concurrent conversations let
-   the server prefill in parallel.
+3. **Primary target: remote OpenAI-compatible backends.** The backend is
+   stateless over HTTP (one connection per request), so N concurrent tool
+   calls become N concurrent HTTPS requests and the server prefills in
+   parallel. This is the deep-search run mode, exercised by the cloud e2e
+   test. **Secondary: the local LiteRT-LM engine** also supports
+   concurrency — each session decodes on its own background thread and
+   the engine is documented thread-safe — so the same workflow is run
+   once against gemma-4-E2B-it on this machine as a manual wall-time
+   comparison (not a CI test). Caveat: the local constrained path
+   grammar-forces at most one tool call per turn, so a local deep-search
+   run must be unconstrained; whether gemma-4-E2B-it reliably emits
+   multi-call turns unconstrained is a validation point. If it does not,
+   the workflow still runs correctly, just sequentially.
 4. **1:1 ordering invariant.** The tool-role message always contains
    exactly one result per tool call, in the original order, regardless of
    completion order or individual failures.
@@ -157,10 +165,24 @@ interleaved coroutines, not multiple threads, so there is no data race:
    - A single-call turn behaves exactly as today (no behavioural diff).
 2. **`workflow_loader_test.cc`**: keep the static-`parallel` rejection
    test; update the expected error substring to the reworded message.
-3. **End-to-end** (fake backend, no network): a deep-search shaped
-   workflow JSON where the main agent emits several `delegate` calls in
-   one turn; assert the sub-agents ran concurrently and the final answer
-   gathered their results.
+3. **Cloud e2e test** (`tests/integration/deep_search_e2e_test.cc`,
+   following the `remote_llm_e2e_test.cc` pattern): gated on
+   `AGENTFLOW_LLM_BASE_URL` / `AGENTFLOW_LLM_MODEL` (plus optional
+   `AGENTFLOW_LLM_API_KEY` / `AGENTFLOW_LLM_CA_PATH`) and
+   `TAVILY_API_KEY`; `GTEST_SKIP()` when unset so CI stays offline.
+   Runs the real deep-search workflow end to end against a real cloud
+   endpoint with real Tavily traffic. Asserts **structure, not model
+   prose**: the run completes, every delegate call returned a non-error
+   result (no `{"error":...}` placeholders), the final answer field is
+   non-empty, and — the parallel-specific assertion — the observed
+   sub-agent wall times overlap (spawned concurrently) rather than
+   summing to the total, so a regression to sequential dispatch is
+   detectable.
+4. **Local wall-time comparison** (manual, not CI): run the same
+   workflow against `models/gemma-4-E2B-it.litertlm` (engine default,
+   20-core CPU host) and record wall time vs. the cloud run. Documents
+   the local/remote trade-off and empirically answers whether
+   gemma-4-E2B-it emits multi-call turns unconstrained.
 
 ## 7. Deep-search deliverables
 
@@ -180,10 +202,19 @@ A runnable example under `examples/deep-search/`:
   `HttpsClient` (POST only; both Tavily endpoints are POST):
   `tavily_search` (POST `/search`) and `tavily_extract` (POST `/extract`,
   accepts multiple URLs in one call so page reading fans out server-side).
-- `main.cc` — host wiring: reads `TAVILY_API_KEY` and `AGENTFLOW_LLM_*`
-  from the environment (credentials never in the workflow JSON), builds
-  the HTTPS client + remote backend, registers the tools, loads the
-  workflow, runs the agent.
+- `main.cc` — host wiring with **dual backends selected by environment**:
+  - Cloud (default): reads `AGENTFLOW_LLM_BASE_URL` / `AGENTFLOW_LLM_MODEL`
+    / `AGENTFLOW_LLM_API_KEY` / `AGENTFLOW_LLM_CA_PATH`, builds
+    `OpenAiChatBackend`, registers it under the logical name
+    `workflow.json` references.
+  - Local (when `MODEL_PATH` is set): builds `LiteRtLmEngine` +
+    `LiteRtLmChatBackend` from `models/gemma-4-E2B-it.litertlm` and
+    registers it under the same logical name, so the identical
+    `workflow.json` runs unchanged — one binary, two run modes for the
+    wall-time comparison.
+  - Registers `tavily_search` / `tavily_extract` (`TAVILY_API_KEY` from
+    the environment; credentials never in the workflow JSON), loads the
+    workflow, runs the agent, prints timing per phase.
 - `BUILD.bazel`.
 
 ## 8. Explicit non-goals (YAGNI)
