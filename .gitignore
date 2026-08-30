@@ -21,3 +21,6 @@ android-inference/src/main/jniLibs/
 
 # Git worktrees (parallel-tool-dispatch SDD workspace)
 /.worktrees/
+
+# Local env files (credentials, never committed)
+env.local
