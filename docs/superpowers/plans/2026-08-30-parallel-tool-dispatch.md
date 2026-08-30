@@ -539,10 +539,10 @@ git commit -m "docs(workflow): parallelism is the default; reword static paralle
 - Modify: `tests/unit/tools/BUILD.bazel` (add test target)
 
 **Interfaces:**
-- Consumes: `agentflow::net::HttpsClient` (`Post(req, cancel, out_head) -> StatusOr<std::string>`), `agentflow::NativeFnTool`, `agentflow::ToolSchema`, nlohmann/json, `tests/support/fake_http_client.h` (`agentflow::net::FakeHttpClient` with scripted `FakeHttpTurn{body, status, status_code}`).
+- Consumes: `agentflow::net::IHttpClient` (`Post(req, cancel, out_head) -> StatusOr<std::string>`), `agentflow::NativeFnTool`, `agentflow::ToolSchema`, nlohmann/json, `tests/support/fake_http_client.h` (`agentflow::testing::FakeHttpClient` with scripted `FakeHttpTurn{body, status, status_code}`, public `requests()`).
 - Produces:
-  - `std::shared_ptr<agentflow::Tool> deep_search::MakeTavilySearchTool(agentflow::net::HttpsClient& http, std::string api_key);`
-  - `std::shared_ptr<agentflow::Tool> deep_search::MakeTavilyExtractTool(agentflow::net::HttpsClient& http, std::string api_key);`
+  - `std::shared_ptr<agentflow::Tool> deep_search::MakeTavilySearchTool(agentflow::net::IHttpClient& http, std::string api_key);`
+  - `std::shared_ptr<agentflow::Tool> deep_search::MakeTavilyExtractTool(agentflow::net::IHttpClient& http, std::string api_key);`
   - Tool names: `tavily_search`, `tavily_extract` (exact strings the workflow JSON and later tasks reference).
 
 - [ ] **Step 1: Create `examples/deep-search/tavily_tools.h`**
@@ -559,7 +559,7 @@ git commit -m "docs(workflow): parallelism is the default; reword static paralle
 
 namespace agentflow {
 namespace net {
-class HttpsClient;
+class IHttpClient;
 }  // namespace net
 }  // namespace agentflow
 
@@ -569,14 +569,14 @@ namespace deep_search {
 // "max_results": 5, "search_depth": "basic"}. Returns a JSON string of
 // [{title,url,content}] (trimmed) or {"error": "<message>"}.
 std::shared_ptr<agentflow::Tool> MakeTavilySearchTool(
-    agentflow::net::HttpsClient& http, std::string api_key);
+    agentflow::net::IHttpClient& http, std::string api_key);
 
 // "tavily_extract": POST https://api.tavily.com/extract with {"urls": [...],
 // "extract_depth": "basic", "format": "markdown"} (max 20 URLs; Tavily
 // fetches them server-side). Returns a JSON string of
 // [{url,raw_content}] plus failed_results, or {"error": "<message>"}.
 std::shared_ptr<agentflow::Tool> MakeTavilyExtractTool(
-    agentflow::net::HttpsClient& http, std::string api_key);
+    agentflow::net::IHttpClient& http, std::string api_key);
 
 }  // namespace deep_search
 
@@ -598,7 +598,6 @@ std::shared_ptr<agentflow::Tool> MakeTavilyExtractTool(
 #include <asio/awaitable.hpp>
 
 #include "agentflow/net/http_client.h"
-#include "agentflow/net/https_client.h"
 #include "agentflow/tools/native_fn_tool.h"
 
 namespace deep_search {
@@ -622,7 +621,7 @@ agentflow::net::HttpRequest MakeRequest(std::string path, std::string body,
 }  // namespace
 
 std::shared_ptr<agentflow::Tool> MakeTavilySearchTool(
-    agentflow::net::HttpsClient& http, std::string api_key) {
+    agentflow::net::IHttpClient& http, std::string api_key) {
   agentflow::ToolSchema schema{
       .name = "tavily_search",
       .description =
@@ -669,7 +668,7 @@ std::shared_ptr<agentflow::Tool> MakeTavilySearchTool(
 }
 
 std::shared_ptr<agentflow::Tool> MakeTavilyExtractTool(
-    agentflow::net::HttpsClient& http, std::string api_key) {
+    agentflow::net::IHttpClient& http, std::string api_key) {
   agentflow::ToolSchema schema{
       .name = "tavily_extract",
       .description =
@@ -736,7 +735,7 @@ std::shared_ptr<agentflow::Tool> MakeTavilyExtractTool(
 
 ```python
 # examples/deep-search/BUILD.bazel
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -745,9 +744,9 @@ cc_library(
     srcs = ["tavily_tools.cc"],
     hdrs = ["tavily_tools.h"],
     deps = [
-        "//agentflow/net:https_client",
+        "//agentflow/net:http_client",
         "//agentflow/tools",
-        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/status",
         "@asio",
         "@nlohmann_json//:json",
     ],
@@ -777,8 +776,8 @@ namespace agentflow {
 namespace {
 
 using json = nlohmann::json;
-using net::FakeHttpClient;
-using net::FakeHttpTurn;
+using testing::FakeHttpClient;
+using testing::FakeHttpTurn;
 using net::HttpRequest;
 
 // Runs one tool invocation on `io` and returns the result string.
