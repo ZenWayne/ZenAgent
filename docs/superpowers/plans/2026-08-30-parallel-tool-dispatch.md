@@ -1325,6 +1325,7 @@ cc_test(
         "//agentflow/inference/openai:openai_chat_backend",
         "//agentflow/net:https_client",
         "//agentflow/nodes",
+        "//agentflow/observability",
         "//agentflow/tools",
         "//agentflow/workflow:workflow_loader",
         "//agentflow/workflow:workflow_runner",
