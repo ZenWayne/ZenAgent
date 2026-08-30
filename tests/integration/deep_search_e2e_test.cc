@@ -119,6 +119,10 @@ TEST(DeepSearchE2ETest, RealCloudRunFansOutAndGathers) {
     if (events[i].has_tool_return() &&
         events[i].tool_return().tool_name() == "delegate") {
       // Structure assertion 2: no error placeholder from any sub-agent.
+      // Heuristic: this flags the literal "error" JSON key, so a legitimate
+      // sub-agent report containing the word "error" would false-positive, and
+      // a non-std exception escape emits no TOOL_RETURN at all (the count
+      // assertion above catches that case).
       EXPECT_FALSE(events[i].tool_return().result_json().find("\"error\"") !=
                    std::string::npos)
           << "delegate returned an error: "

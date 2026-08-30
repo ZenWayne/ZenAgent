@@ -206,7 +206,7 @@ asio::awaitable<State> AgentNode::Run(
         channels.push_back(ch);
         asio::co_spawn(
             exec,
-            [this, &cancel, &emit, ch, c]() mutable -> asio::awaitable<void> {
+            [this, &cancel, &emit, ch, c]() -> asio::awaitable<void> {
               try {
                 std::string result =
                     co_await DispatchTool(c.name, c.args, cancel, emit);

@@ -13,7 +13,7 @@
 //   export AGENTFLOW_LLM_API_KEY=sk-...
 //   bazel run //examples/deep-search:deep_search -- "your question"
 //   # local (wall-time comparison):
-//   MODEL_PATH=models/gemma-4-E2B-it.litertlm \
+//   MODEL_PATH=models/gemma-4-E2B-it.litertlm
 //     bazel run //examples/deep-search:deep_search -- "your question"
 //
 // Credentials live only in the environment (host code) — never in
