@@ -37,23 +37,12 @@ message WorkflowSpec {
   }
 
   message DelegateSpec {
-    // Field 3 was `bool parallel`. It was parsed by workflow_loader and then
-    // NEVER READ by anything — a workflow setting "parallel": true got fully
-    // sequential delegation with no warning. Removed rather than left in
-    // place, because a config that validates and silently does nothing is
-    // worse than one that does not exist. workflow_loader now rejects the key
-    // outright so anyone relying on it finds out at load time.
-    //
-    // TODO: implement genuine parallel delegation, then reintroduce this as a
-    // NEW field number (3 stays burned). Two places have to change together —
-    // reinstating the flag alone would not make anything parallel:
-    //   1. AgentNode's tool-dispatch loop `co_await`s each tool call in turn,
-    //      so several delegate calls in one model turn are serialised before
-    //      SubAgentRuntime is ever reached.
-    //   2. delegate_tool.cc awaits a single RunAsync per invocation; parallel
-    //      delegation needs the calls co_spawn'd and jointly awaited.
-    // Note the runner is single-threaded: the win is overlapping remote
-    // round-trips (the server prefills concurrently), not local CPU.
+    // Field 3 was `bool parallel`. Parallelism is now the DEFAULT behaviour
+    // of AgentNode's tool-dispatch loop: multiple tool calls in one turn are
+    // always executed concurrently (see the parallel-tool-dispatch design
+    // spec). There is nothing to enable and no switch to disable, so the key
+    // stays reserved and workflow_loader rejects it, telling the author that
+    // parallelism needs no declaration.
     reserved 3;
     reserved "parallel";
 
