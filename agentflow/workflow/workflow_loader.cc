@@ -101,10 +101,9 @@ absl::Status ParseDelegateSpec(const ordered_json& j,
   // See the TODO on DelegateSpec in proto/workflow_spec.proto.
   if (j.find("parallel") != j.end()) {
     return absl::InvalidArgumentError(
-        "delegates.parallel is not implemented — delegation is always "
-        "sequential today, and this key previously validated while having no "
-        "effect. Remove it; see the TODO on DelegateSpec in "
-        "proto/workflow_spec.proto for what implementing it requires");
+        "delegates.parallel is not a supported key — parallel execution is "
+        "the default behaviour of the tool-dispatch loop and needs no "
+        "declaration. Remove it.");
   }
   if (auto it = j.find("input_template"); it != j.end()) {
     if (!it->is_object()) {
