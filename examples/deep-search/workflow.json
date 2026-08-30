@@ -1,0 +1,31 @@
+{
+  "name": "deep-search",
+  "version": "1",
+  "state": {
+    "kind": "dynamic_json",
+    "fields": {
+      "user_query": {"type": "string"},
+      "assistant_reply": {"type": "string"}
+    }
+  },
+  "agents": {
+    "deep_search": {
+      "system_prompt": "You are a deep research agent. Follow this process:\n1. Break the user's question into 2-4 focused sub-questions.\n2. IMPORTANT: answer with ALL delegate calls for ALL sub-questions in ONE single turn (emit multiple tool_calls at once). Each call: agent=\"searcher\", goal=<one sub-question>.\n3. When all results come back, synthesize a final answer with citations (source URLs from the research results).",
+      "model": {"backend": "cloud", "max_output_tokens": 2048},
+      "tools": ["tavily_search", "tavily_extract"],
+      "delegates": {
+        "agents": ["searcher"],
+        "max_depth": 2,
+        "input_template": {"user_query": "{{tool.goal}}"},
+        "goal_template": "{{tool.goal}}",
+        "output_extract": "$.assistant_reply"
+      }
+    },
+    "searcher": {
+      "system_prompt": "You research ONE sub-question. Use tavily_search to find sources, then tavily_extract to read the most promising pages. Return a concise research report: key findings plus the source URLs.",
+      "model": {"backend": "cloud", "max_output_tokens": 1024},
+      "tools": ["tavily_search", "tavily_extract"]
+    }
+  },
+  "main": "deep_search"
+}
