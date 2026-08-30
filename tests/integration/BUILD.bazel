@@ -15,3 +15,25 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "deep_search_e2e_test",
+    size = "small",
+    srcs = ["deep_search_e2e_test.cc"],
+    data = ["//examples/deep-search:workflow.json"],
+    deps = [
+        "//agentflow/core",
+        "//agentflow/inference/openai:openai_chat_backend",
+        "//agentflow/net:https_client",
+        "//agentflow/nodes",
+        "//agentflow/observability",
+        "//agentflow/tools",
+        "//agentflow/workflow:workflow_loader",
+        "//agentflow/workflow:workflow_runner",
+        "//examples/deep-search:tavily_tools",
+        "//proto:agentflow_proto",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
