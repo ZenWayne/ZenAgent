@@ -401,6 +401,7 @@ TEST(AgentNodeTest, EscapingToolExceptionYieldsErrorPlaceholderInPlace) {
 
   auto conv = backend->last_conversation();
   ASSERT_NE(conv, nullptr);
+  ASSERT_EQ(conv->sent().size(), 2u);
   json tool_msg = json::parse(conv->sent()[1]);
   ASSERT_EQ(tool_msg["content"].size(), 3u);
   EXPECT_EQ(tool_msg["content"][0]["response"]["value"], "OK");
