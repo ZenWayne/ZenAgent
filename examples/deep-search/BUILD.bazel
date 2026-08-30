@@ -1,0 +1,18 @@
+# examples/deep-search/BUILD.bazel
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "tavily_tools",
+    srcs = ["tavily_tools.cc"],
+    hdrs = ["tavily_tools.h"],
+    deps = [
+        "//agentflow/net:http_client",
+        "//agentflow/tools",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@asio",
+        "@nlohmann_json//:json",
+    ],
+)
