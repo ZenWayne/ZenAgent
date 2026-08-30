@@ -9,13 +9,14 @@ config_setting(
     constraint_values = ["@platforms//os:android"],
 )
 
-# kissfft is the only non-system shared dependency of the C engine.
-cc_import(
+# kissfft used to be a machine-built .so dropped into lib/ (gitignored), which
+# made a clean checkout unbuildable. It is now compiled from pinned source —
+# see @kissfft in MODULE.bazel. Linked statically, so nothing has to ship it at
+# runtime, and the arm64-v8a variant comes from the same source via bazel's
+# cross-compilation rather than a second prebuilt.
+alias(
     name = "kissfft",
-    shared_library = select({
-        ":android_build": "lib/arm64-v8a/libkissfft-float.so.131",
-        "//conditions:default": "lib/libkissfft-float.so.131",
-    }),
+    actual = "@kissfft//:kissfft",
 )
 
 # Prebuilt LiteRT-LM C engine, split into two archives that mirror how
@@ -26,11 +27,15 @@ cc_import(
 #
 # Staging = the litert_lm component libs, whole-archived (alwayslink) so static
 # registrars survive (LITERT_LM_REGISTER_ENGINE etc.).
+# NOTE: the arm64-v8a variants were never published — lib/arm64-v8a/ does not
+# exist in a clean checkout, so --config=android has been broken independently
+# of this change. Publish those archives and add http_file entries alongside the
+# host ones to fix it.
 cc_import(
     name = "c_engine_staging",
     static_library = select({
         ":android_build": "lib/arm64-v8a/libce_staging.a",
-        "//conditions:default": "lib/libce_staging.a",
+        "//conditions:default": "@litert_ce_staging//file:libce_staging.a",
     }),
     alwayslink = True,
 )
@@ -44,7 +49,7 @@ cc_import(
     name = "c_engine_external",
     static_library = select({
         ":android_build": "lib/arm64-v8a/libce_external.a",
-        "//conditions:default": "lib/libce_external.a",
+        "//conditions:default": "@litert_ce_external//file:libce_external.a",
     }),
 )
 

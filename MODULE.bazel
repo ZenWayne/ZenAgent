@@ -27,6 +27,7 @@ bazel_dep(name = "boringssl", version = "0.20260526.0")
 
 # ── asio (header-only, not in BCR — use http_archive) ─────────────
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 http_archive(
     name = "asio",
     build_file_content = """
@@ -48,6 +49,64 @@ cc_library(
     urls = ["https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-30-2.tar.gz"],
 )
 
+# ── kissfft (built from source, NOT the machine-built .so) ────────
+# The LiteRT-LM prebuilt archives need exactly two symbols from it
+# (kiss_fftr, kiss_fftr_alloc — verified with nm --undefined-only), so only
+# kiss_fft.c + kiss_fftr.c are compiled. Statically linked, which also means the
+# runtime image no longer has to ship libkissfft-float.so.131.
+#
+# Default scalar type is float (kiss_fft.h: kiss_fft_scalar falls back to float
+# when FIXED_POINT/USE_SIMD are undefined), matching the "-float" build the
+# archives were compiled against. sha256 pinned so this is reproducible in CI.
+http_archive(
+    name = "kissfft",
+    build_file_content = """
+cc_library(
+    name = "kissfft",
+    srcs = [
+        "kiss_fft.c",
+        "kiss_fftr.c",
+    ],
+    hdrs = [
+        "_kiss_fft_guts.h",
+        "kiss_fft.h",
+        "kiss_fft_log.h",
+        "kiss_fftr.h",
+    ],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "76c1aac87ddb7258f34b08a13f0eebf9e53afa299857568346aa5c82bcafaf1a",
+    strip_prefix = "kissfft-131.1.0",
+    urls = ["https://github.com/mborgerding/kissfft/archive/refs/tags/131.1.0.tar.gz"],
+)
+
+# ── LiteRT-LM prebuilt archives (host x86_64) ─────────────────────
+# Output of an out-of-tree LiteRT-LM CMake build, re-aggregated by
+# third_party/litert_lm/scripts/split_archives.sh. Unlike kissfft these cannot
+# be compiled from source here — it is the whole TFLite/XNNPACK/sentencepiece
+# stack — so they are fetched from a pinned release instead.
+#
+# Previously they lived in a gitignored lib/ and existed only on machines that
+# had run that CMake build, which made every clean checkout (and CI) fail at
+# cc_import. sha256 pinning makes the fetch reproducible.
+#
+# Rebuilt them? Upload to a new release tag and update BOTH url and sha256.
+http_file(
+    name = "litert_ce_staging",
+    downloaded_file_path = "libce_staging.a",
+    sha256 = "353d0b51e66a2b1c0b34205546c09f906d00fcaa0dc27503d53628a5c8d3911b",
+    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-20260825/libce_staging.a"],
+)
+
+http_file(
+    name = "litert_ce_external",
+    downloaded_file_path = "libce_external.a",
+    sha256 = "0bb544f67c56077b0ec5f7399589129484a8ccfcec4dd49e427d9670c0024e6a",
+    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-20260825/libce_external.a"],
+)
+
 # ── LiteRT-LM (header-only stub) ──────────────────────────────────
 # Referenced as //third_party/litert_lm:c_engine (main workspace target).
 # Upgrade to @litert_lm//:c_engine with local_path_override in MODULE.bazel
@@ -61,13 +120,19 @@ android_ndk_repository_extension = use_extension(
     "android_ndk_repository_extension",
 )
 use_repo(android_ndk_repository_extension, "androidndk")
-register_toolchains("@androidndk//:all")
+# NOT registered here on purpose. register_toolchains() is eager — it makes
+# bazel resolve @androidndk for every build, so a host-only server build would
+# still require a real NDK on disk (and CI would need one too). The android
+# toolchains are registered via --extra_toolchains under `--config=android`
+# instead; see .bazelrc. use_repo() alone does not evaluate the extension.
+# register_toolchains("@androidndk//:all")
 
 # JDK runtime toolchain compatible with the android target platform, so that
 # @bazel_tools//tools/jdk:jni (a dep of //jni:libagentflow_jni.so) can resolve
 # a Java runtime when cross-compiling. Registered last so host builds keep
 # using the stock @local_jdk runtime toolchain. See bazel/toolchains/BUILD.bazel.
-register_toolchains("//bazel/toolchains:android_jdk_runtime_toolchain")
+# Registered under --config=android too (see .bazelrc) — same reason as above.
+# register_toolchains("//bazel/toolchains:android_jdk_runtime_toolchain")
 
 # ── Kotlin + JVM deps (dynamic schema / Wire codegen) ─────────────
 bazel_dep(name = "rules_kotlin", version = "1.9.6")
