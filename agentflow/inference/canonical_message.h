@@ -21,6 +21,14 @@ namespace agentflow {
 // text items.
 std::string ExtractAssistantText(std::string_view canonical_json);
 
+// Decodes gemma4's open_quote/close_quote special token "<|\"|>" that the
+// unconstrained engine path leaves literally inside tool-call argument
+// strings (the token IS the model's quote character, so arguments parse to
+// values like <|"|>searcher<|"|>). Each occurrence is replaced with an
+// escaped quote, keeping the JSON valid and making arguments parse to real
+// quotes. Idempotent: a response without the token is returned unchanged.
+std::string DecodeGemmaQuoteTokens(std::string_view response_json);
+
 // Accumulates LiteRT-LM stream envelopes into one canonical assistant message.
 //
 // LiteRT-LM streams each delta as a FULL message envelope wrapping one

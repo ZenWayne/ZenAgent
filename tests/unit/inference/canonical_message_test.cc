@@ -100,5 +100,43 @@ TEST(LiteRtStreamAssemblerTest, MalformedContentItemInAStreamChunkDoesNotThrow) 
   EXPECT_EQ(ExtractAssistantText(a.Canonical()), "hi");
 }
 
+TEST(DecodeGemmaQuoteTokensTest, DecodesQuoteTokensInToolArguments) {
+  // gemma4's unconstrained path leaks its open_quote/close_quote special
+  // token <|"|> literally inside tool-call argument strings, so the
+  // delegate agent name arrives as <|"|>searcher<|"|> instead of "searcher".
+  const std::string raw =
+      R"({"role":"assistant","tool_calls":[{"id":"c1","function":)"
+      R"({"name":"delegate","arguments":"{\"agent\":\"<|\"|>searcher<|\"|>\"}"}}]})";
+  const std::string decoded = DecodeGemmaQuoteTokens(raw);
+
+  json parsed = json::parse(decoded, nullptr, /*allow_exceptions=*/false);
+  ASSERT_FALSE(parsed.is_discarded()) << decoded;
+  const std::string args = parsed["tool_calls"][0]["function"]["arguments"];
+  json a = json::parse(args, nullptr, /*allow_exceptions=*/false);
+  ASSERT_FALSE(a.is_discarded()) << args;
+  EXPECT_EQ(a["agent"], "searcher");
+}
+
+TEST(DecodeGemmaQuoteTokensTest, LeavesCleanResponsesUnchanged) {
+  const std::string clean =
+      R"({"role":"assistant","content":[{"type":"text","text":"hi \"there\""}]})";
+  EXPECT_EQ(DecodeGemmaQuoteTokens(clean), clean);
+}
+
+TEST(DecodeGemmaQuoteTokensTest, HandlesMultipleTokensAndEmptyInput) {
+  const std::string raw =
+      R"({"role":"assistant","tool_calls":[{"id":"c1","function":)"
+      R"({"name":"t","arguments":"{\"a\":\"<|\"|>x<|\"|>\",\"b\":\"<|\"|>y<|\"|>\"}"}}]})";
+  const std::string decoded = DecodeGemmaQuoteTokens(raw);
+  json parsed = json::parse(decoded, nullptr, /*allow_exceptions=*/false);
+  ASSERT_FALSE(parsed.is_discarded()) << decoded;
+  const std::string args =
+      parsed["tool_calls"][0]["function"]["arguments"].get<std::string>();
+  json a = json::parse(args);
+  EXPECT_EQ(a["a"], "x");
+  EXPECT_EQ(a["b"], "y");
+  EXPECT_EQ(DecodeGemmaQuoteTokens(""), "");
+}
+
 }  // namespace
 }  // namespace agentflow

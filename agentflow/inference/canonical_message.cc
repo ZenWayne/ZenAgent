@@ -33,6 +33,31 @@ std::string ExtractAssistantText(std::string_view canonical_json) {
   return out;
 }
 
+std::string DecodeGemmaQuoteTokens(std::string_view response_json) {
+  // The token appears as the 6-character sequence <|\"|> inside tool-call
+  // argument JSON: the model emitted its open_quote/close_quote token in
+  // place of the JSON string delimiters, and the engine embedded the decoded
+  // token text (with its quote escaped) as value content. Deleting the
+  // sequence restores the intended argument values.
+  constexpr std::string_view kQuoteToken = "<|\\\"|>";
+  if (response_json.find(kQuoteToken) == std::string_view::npos) {
+    return std::string(response_json);
+  }
+  std::string out;
+  out.reserve(response_json.size());
+  size_t pos = 0;
+  for (;;) {
+    const size_t found = response_json.find(kQuoteToken, pos);
+    if (found == std::string_view::npos) {
+      out.append(response_json.substr(pos));
+      break;
+    }
+    out.append(response_json.substr(pos, found - pos));
+    pos = found + kQuoteToken.size();
+  }
+  return out;
+}
+
 void LiteRtStreamAssembler::Feed(std::string_view chunk) {
   if (chunk.empty()) return;
 
