@@ -17,7 +17,15 @@ git_override(
     commit = "74211c0dfc2777318ab53c2cd2c317a2ef9012de",  # v31.1
 )
 bazel_dep(name = "googletest", version = "1.15.2")
-bazel_dep(name = "abseil-cpp", version = "20260107.0")  # match LiteRT-LM's abseil (lts_2026010712 inline ns)
+bazel_dep(name = "abseil-cpp", version = "20260526.0")  # match LiteRT-LM 90f42140's abseil (lts_20260526 inline ns)
+# BCR's abseil-cpp@20260526.0 carries no compatibility_level (implicit 0) while
+# protobuf's graph requires compat 1, and Bazel's single_version_override has no
+# compat parameter — serve a wrapper-registry entry that declares compat 1.
+single_version_override(
+    module_name = "abseil-cpp",
+    version = "20260526.0",
+    registry = "file:///home/wayne/tools/zen/.bcr-override",
+)
 bazel_dep(name = "nlohmann_json", version = "3.11.3")
 bazel_dep(name = "platforms", version = "0.0.10")
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
@@ -97,15 +105,15 @@ cc_library(
 http_file(
     name = "litert_ce_staging",
     downloaded_file_path = "libce_staging.a",
-    sha256 = "353d0b51e66a2b1c0b34205546c09f906d00fcaa0dc27503d53628a5c8d3911b",
-    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-20260825/libce_staging.a"],
+    sha256 = "680d3e64f4abb33bae3278caa7da0787b5ad27303e9e69702ebd179cb918c00b",
+    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-20260831/libce_staging.a"],
 )
 
 http_file(
     name = "litert_ce_external",
     downloaded_file_path = "libce_external.a",
-    sha256 = "0bb544f67c56077b0ec5f7399589129484a8ccfcec4dd49e427d9670c0024e6a",
-    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-20260825/libce_external.a"],
+    sha256 = "74de2728592f2f3449957c46a4d22ea30f83938986af0ac8079fb934680ebcd4",
+    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-20260831/libce_external.a"],
 )
 
 # ── LiteRT-LM prebuilt archives (Android arm64-v8a) ────────────────

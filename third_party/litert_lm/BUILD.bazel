@@ -23,8 +23,8 @@ alias(
 # Prebuilt LiteRT-LM C engine, split into two archives that mirror how
 # litert_lm_main links (built out-of-tree via CMake, see /.litert_build; .a's
 # gitignored, machine-built). abseil objects are excluded from both — the
-# binary's abseil comes from Bazel (@abseil-cpp pinned to 20260107 to match the
-# lts_2026010712 inline namespace LiteRT-LM was compiled against).
+# binary's abseil comes from Bazel (@abseil-cpp pinned to 20260526 to match the
+# lts_20260526 inline namespace the 90f42140 archives were compiled against).
 #
 # Staging = the litert_lm component libs, whole-archived (alwayslink) so static
 # registrars survive (LITERT_LM_REGISTER_ENGINE etc.).
@@ -55,7 +55,10 @@ cc_import(
 
 cc_library(
     name = "c_engine",
-    hdrs = ["include/c/engine.h"],
+    hdrs = [
+        "include/c/engine.h",
+        "include/c/conversation.h",
+    ],
     includes = ["include"],
     linkopts = [
         # The combined archive bundles LiteRT-LM's own abseil/protobuf, which
@@ -94,6 +97,7 @@ cc_library(
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/status:status_builder",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@abseil-cpp//absl/hash",
