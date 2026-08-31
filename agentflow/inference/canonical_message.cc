@@ -6,6 +6,19 @@
 namespace agentflow {
 namespace {
 using json = nlohmann::json;
+
+// JSON-escapes a token's raw text so it can be searched inside the canonical
+// JSON string: only '"' and '\' need escaping there. E.g. gemma4's quote
+// token <|"|> appears in the canonical JSON as <|\"|>.
+std::string JsonEscape(std::string_view raw) {
+  std::string out;
+  out.reserve(raw.size());
+  for (char c : raw) {
+    if (c == '"' || c == '\\') out.push_back('\\');
+    out.push_back(c);
+  }
+  return out;
+}
 }  // namespace
 
 std::string ExtractAssistantText(std::string_view canonical_json) {
@@ -33,27 +46,25 @@ std::string ExtractAssistantText(std::string_view canonical_json) {
   return out;
 }
 
-std::string DecodeGemmaQuoteTokens(std::string_view response_json) {
-  // The token appears as the 6-character sequence <|\"|> inside tool-call
-  // argument JSON: the model emitted its open_quote/close_quote token in
-  // place of the JSON string delimiters, and the engine embedded the decoded
-  // token text (with its quote escaped) as value content. Deleting the
-  // sequence restores the intended argument values.
-  constexpr std::string_view kQuoteToken = "<|\\\"|>";
-  if (response_json.find(kQuoteToken) == std::string_view::npos) {
-    return std::string(response_json);
+std::string DecodeSpecialTokens(std::string_view response_json,
+                                const ModelSpecialTokens& tokens) {
+  if (tokens.empty()) return std::string(response_json);
+
+  std::vector<std::string> needles;
+  needles.reserve(tokens.strip.size());
+  for (const auto& t : tokens.strip) {
+    std::string escaped = JsonEscape(t);
+    if (!escaped.empty()) needles.push_back(std::move(escaped));
   }
-  std::string out;
-  out.reserve(response_json.size());
-  size_t pos = 0;
-  for (;;) {
-    const size_t found = response_json.find(kQuoteToken, pos);
-    if (found == std::string_view::npos) {
-      out.append(response_json.substr(pos));
-      break;
+
+  std::string out(response_json);
+  for (const auto& needle : needles) {
+    size_t pos = 0;
+    for (;;) {
+      pos = out.find(needle, pos);
+      if (pos == std::string::npos) break;
+      out.erase(pos, needle.size());
     }
-    out.append(response_json.substr(pos, found - pos));
-    pos = found + kQuoteToken.size();
   }
   return out;
 }

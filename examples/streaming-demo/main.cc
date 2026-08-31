@@ -44,7 +44,8 @@ int main(int argc, char** argv) {
 
   // ── Engine ──────────────────────────────────────────────
   auto engine = af::LiteRtLmEngine::Create(
-      af::LiteRtLmEngineOptions{.model_path = model_path});
+      af::LiteRtLmEngineOptions{.model_path = model_path,
+                                .model_family = af::ModelFamily::kGemma});
   if (!engine) {
     std::cerr << "Failed to create LiteRT-LM engine\n";
     return 1;

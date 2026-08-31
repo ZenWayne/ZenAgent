@@ -10,6 +10,8 @@
 #ifndef AGENTFLOW_INFERENCE_CANONICAL_MESSAGE_H_
 #define AGENTFLOW_INFERENCE_CANONICAL_MESSAGE_H_
 
+#include "agentflow/inference/special_token_probe.h"
+
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,13 +23,13 @@ namespace agentflow {
 // text items.
 std::string ExtractAssistantText(std::string_view canonical_json);
 
-// Decodes gemma4's open_quote/close_quote special token "<|\"|>" that the
-// unconstrained engine path leaves literally inside tool-call argument
-// strings (the token IS the model's quote character, so arguments parse to
-// values like <|"|>searcher<|"|>). Each occurrence is replaced with an
-// escaped quote, keeping the JSON valid and making arguments parse to real
-// quotes. Idempotent: a response without the token is returned unchanged.
-std::string DecodeGemmaQuoteTokens(std::string_view response_json);
+// Strips every registered special token in `tokens` from `response_json`,
+// wherever it appears (tool-call arguments, text content, function names).
+// Each token's text is searched in its JSON-escaped form (only '"' and '\'
+// need escaping), so the canonical JSON stays valid after removal. An empty
+// token set returns the input unchanged. Idempotent.
+std::string DecodeSpecialTokens(std::string_view response_json,
+                                const ModelSpecialTokens& tokens);
 
 // Accumulates LiteRT-LM stream envelopes into one canonical assistant message.
 //

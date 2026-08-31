@@ -13,7 +13,6 @@
 
 #include "agentflow/core/cancel.h"
 #include "agentflow/core/errors.h"
-#include "agentflow/inference/canonical_message.h"
 #include "agentflow/inference/chat_backend.h"
 #include "agentflow/workflow/json_path.h"
 #include "agentflow/workflow/template_engine.h"
@@ -299,7 +298,6 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
                      ? tc["function"]["arguments"].get<std::string>()
                      : tc["function"]["arguments"].dump();
         }
-        args = DecodeGemmaQuoteTokens(args);
         // Sub-agents dispatch tools through the host registry. The host
         // is responsible for restricting which tools exist; the per-child
         // tools_json slice scopes what the LLM sees but the dispatcher
