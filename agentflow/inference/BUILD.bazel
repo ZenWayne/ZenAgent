@@ -18,7 +18,16 @@ cc_library(
     name = "canonical_message",
     srcs = ["canonical_message.cc"],
     hdrs = ["canonical_message.h"],
-    deps = ["@nlohmann_json//:json"],
+    deps = [
+        ":special_token_probe",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "special_token_probe",
+    srcs = ["special_token_probe.cc"],
+    hdrs = ["special_token_probe.h"],
 )
 
 cc_library(
@@ -28,16 +37,19 @@ cc_library(
         "litert_lm_conversation.cc",
         "litert_lm_engine.cc",
         "litert_lm_session.cc",
+        "special_token_probe.cc",
     ],
     hdrs = [
         "litert_lm_chat_backend.h",
         "litert_lm_conversation.h",
         "litert_lm_engine.h",
         "litert_lm_session.h",
+        "special_token_probe.h",
     ],
     deps = [
         ":canonical_message",
         ":chat_backend",
+        ":special_token_probe",
         "//third_party/litert_lm:c_engine",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",

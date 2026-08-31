@@ -53,3 +53,14 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "special_token_probe_test",
+    size = "small",
+    srcs = ["special_token_probe_test.cc"],
+    deps = [
+        "//agentflow/inference:special_token_probe",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)

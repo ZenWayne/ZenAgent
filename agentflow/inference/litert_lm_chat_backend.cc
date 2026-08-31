@@ -20,10 +20,12 @@ class LiteRtLmChatConversation : public IConversation {
  public:
   LiteRtLmChatConversation(
       std::shared_ptr<LiteRtLmConversation> conv, bool constrained,
-      std::shared_ptr<LiteRtLmChatBackend::EngineSlot> engine_slot)
+      std::shared_ptr<LiteRtLmChatBackend::EngineSlot> engine_slot,
+      const ModelSpecialTokens& special_tokens)
       : conv_(std::move(conv)),
         constrained_(constrained),
-        engine_slot_(std::move(engine_slot)) {}
+        engine_slot_(std::move(engine_slot)),
+        special_tokens_(special_tokens) {}
 
   asio::awaitable<absl::StatusOr<std::string>> SendAsync(
       std::string message_json, const TokenSink& on_token,
@@ -53,7 +55,11 @@ class LiteRtLmChatConversation : public IConversation {
     // (litert_lm_conversation_send_message_stream ignores the grammar), and a
     // missing sink means nobody wants deltas.
     if (constrained_ || !on_token) {
-      co_return conv_->SendMessageSync(message_json);
+      auto response = conv_->SendMessageSync(message_json);
+      if (response.ok()) {
+        *response = DecodeSpecialTokens(*response, special_tokens_);
+      }
+      co_return response;
     }
 
     conv_->SendMessage(std::move(message_json));
@@ -76,7 +82,7 @@ class LiteRtLmChatConversation : public IConversation {
         co_await on_token(assembler.text_deltas()[i]);
       }
     }
-    co_return assembler.Canonical();
+    co_return DecodeSpecialTokens(assembler.Canonical(), special_tokens_);
   }
 
   void Cancel() override { conv_->Cancel(); }
@@ -85,6 +91,7 @@ class LiteRtLmChatConversation : public IConversation {
   std::shared_ptr<LiteRtLmConversation> conv_;
   bool constrained_;
   std::shared_ptr<LiteRtLmChatBackend::EngineSlot> engine_slot_;
+  ModelSpecialTokens special_tokens_;
   std::atomic<bool> cancel_registered_{false};
 };
 
@@ -103,7 +110,7 @@ std::shared_ptr<IConversation> LiteRtLmChatBackend::CreateConversation(
   auto conv = LiteRtLmConversation::Create(engine_, std::move(opts), io_);
   if (!conv) return nullptr;
   return std::make_shared<LiteRtLmChatConversation>(
-      std::move(conv), constrained, engine_slot_);
+      std::move(conv), constrained, engine_slot_, engine_->special_tokens());
 }
 
 }  // namespace agentflow

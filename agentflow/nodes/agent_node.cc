@@ -188,7 +188,6 @@ asio::awaitable<State> AgentNode::Run(
                        ? tc["function"]["arguments"].get<std::string>()
                        : tc["function"]["arguments"].dump();
         }
-        c.args = DecodeGemmaQuoteTokens(c.args);
         calls.push_back(std::move(c));
       }
 
