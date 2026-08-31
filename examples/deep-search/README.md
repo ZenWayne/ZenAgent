@@ -77,12 +77,19 @@ answer.
 **Fixed** (see `DecodeGemmaQuoteTokens` in
 `agentflow/inference/canonical_message.h`): tool-call arguments are now
 stripped of the leaked token in both consumers (`AgentNode` dispatch and
-`SubAgentRuntime`), so delegation resolves correctly. With delegation
-actually running, local deep-search then hits two **vendored LiteRT-LM
-engine** bugs that framework code cannot fix (the engine submodule is
-pinned): (1) multi-session prefill can fail with "Cannot auto-resize tensor
-embeddings: no dims_signature exists"; (2) engine teardown after multiple
-sessions can abort with `free(): invalid next size` (TensorBuffer
-double-free in `LlmLiteRtCompiledModelExecutorBase`'s destructor map).
-Local deep-search therefore stays a cloud-backend feature until the engine
-supports multi-session lifecycles.
+`SubAgentRuntime`), so delegation resolves correctly.
+
+Two further engine-layer limitations remain (vendored LiteRT-LM, out of
+scope for framework code):
+
+1. **Multi-session prefill** — mitigated in `LiteRtLmChatBackend` with an
+   engine-wide slot serializing LLM calls across conversations (at most one
+   conversation mid-prefill/decode; tool HTTP calls still overlap).
+2. **Engine teardown after multiple session lifecycles** — a run that
+   creates/destroys several sessions (e.g. the 3-sub-question planner →
+   3 searchers) can still abort at exit with `free(): invalid next size`
+   in the compiled-model executor's TensorBuffer map. Simple queries
+   (1 delegation) complete cleanly: verified exit 0, ~23s, real
+   Tavily-backed answer on gemma-4-E2B-it. Until the engine fixes session
+   teardown, local deep-search is reliable only for small fan-outs;
+   cloud mode is fully supported.
