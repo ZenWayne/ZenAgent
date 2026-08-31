@@ -64,11 +64,17 @@ life, and performance of the latest flagship smartphones…"):
 | local gemma-4-E2B-it | **51,859** | Ran to completion but the final answer was EMPTY — the model's unconstrained tool-call formatting drifted, and the last turn produced an empty text response. |
 
 **Local-mode conclusion (validation point from the spec):** gemma-4-E2B-it
-does NOT reliably complete this workflow unconstrained — the planner's
-tool-call turns misfire and the run ends with an empty answer. Additionally,
-the LiteRT-LM engine decode threadpool runs with 1 worker thread
-(`ThreadPool 'engine': Running up to 1 threads` in the run log), so even
-concurrent sessions serialize inside the engine. The parallel dispatch
-feature is therefore primarily a cloud-backend win; on-device deep-search
-needs a constrained-decoding path or a model that holds its function-call
-format unconstrained.
+does NOT complete this workflow unconstrained — but the root cause is not
+threading (the engine queues sessions serially, which is only a speed cost).
+Diagnosed via trace events: in the unconstrained path the model emits its
+`open_quote` special token `<|"|>` literally inside tool-call arguments, and
+the conversation layer does not decode it back to quotes. The delegate
+`agent` argument therefore arrives as `<|"|>searcher<|"|>` and every
+delegation fails with `{"error":"unknown_agent"}`, leaving the planner to
+search on its own (with token-polluted queries) and finish with an empty
+answer. Single-session `agent-demo` works only because `get_time` takes no
+arguments — no quoted strings, no token leak. Any local agent with
+string-typed tool arguments is affected; a proper fix belongs in the
+LiteRT-LM conversation layer (decode gemma4 quote tokens on the
+unconstrained path), or run local deep-search with `constrained_tool_calls`
+(sequential delegation).
