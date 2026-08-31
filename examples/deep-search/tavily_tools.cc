@@ -44,6 +44,7 @@ std::shared_ptr<agentflow::Tool> MakeTavilySearchTool(
           R"("required":["query"]})"};
   auto fn = [&http, api_key = std::move(api_key)](
                 std::string_view args_json,
+                std::string_view,
                 const agentflow::CancelToken& cancel)
                 -> asio::awaitable<std::string> {
     json args = json::parse(args_json, nullptr, /*allow_exceptions=*/false);
@@ -92,6 +93,7 @@ std::shared_ptr<agentflow::Tool> MakeTavilyExtractTool(
           R"("items":{"type":"string"}}},"required":["urls"]})"};
   auto fn = [&http, api_key = std::move(api_key)](
                 std::string_view args_json,
+                std::string_view,
                 const agentflow::CancelToken& cancel)
                 -> asio::awaitable<std::string> {
     json args = json::parse(args_json, nullptr, /*allow_exceptions=*/false);

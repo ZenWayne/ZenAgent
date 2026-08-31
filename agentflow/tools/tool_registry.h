@@ -81,6 +81,7 @@ class ToolRegistry {
   asio::awaitable<std::string> Invoke(
       std::string_view name,
       std::string_view args_json,
+      std::string_view tool_call_id,
       const CancelToken& cancel);
 
   // True iff a tool with the given name is currently registered.

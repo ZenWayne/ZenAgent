@@ -268,7 +268,7 @@ asio::awaitable<std::string> AgentNode::DispatchTool(
       emit.EmitToolCall(Id(), name, args, call_id);
       std::string result;
       try {
-        result = co_await tool->Invoke(args, cancel);
+        result = co_await tool->Invoke(args, call_id, cancel);
       } catch (const std::exception& e) {
         result = std::string("Tool error: ") + e.what();
       }
@@ -281,7 +281,7 @@ asio::awaitable<std::string> AgentNode::DispatchTool(
   emit.EmitToolCall(Id(), name, args, call_id);
   std::string result;
   try {
-    result = co_await cfg_.tool_registry->Invoke(name, args, cancel);
+    result = co_await cfg_.tool_registry->Invoke(name, args, call_id, cancel);
   } catch (const std::exception& e) {
     result = std::string("Tool error: ") + e.what();
   }

@@ -145,6 +145,7 @@ asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(
 
 asio::awaitable<std::string> ToolRegistry::Invoke(std::string_view name,
                                                   std::string_view args_json,
+                                                  std::string_view tool_call_id,
                                                   const CancelToken& cancel) {
   std::shared_ptr<Tool> tool;
   {
@@ -155,7 +156,7 @@ asio::awaitable<std::string> ToolRegistry::Invoke(std::string_view name,
     }
     tool = it->second;
   }
-  co_return co_await tool->Invoke(args_json, cancel);
+  co_return co_await tool->Invoke(args_json, tool_call_id, cancel);
 }
 
 std::string ToolRegistry::ExportToolsJson(

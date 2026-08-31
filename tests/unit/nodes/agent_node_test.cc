@@ -107,6 +107,7 @@ std::shared_ptr<ToolRegistry> RegistryWith(
                  .description = "test tool",
                  .params_json_schema = R"({"type":"object","properties":{}})"},
       [canned = std::move(canned_result)](std::string_view,
+                                           std::string_view,
                                            const CancelToken&)
           -> asio::awaitable<std::string> { co_return canned; }));
   return registry;
@@ -284,7 +285,7 @@ TEST(AgentNodeTest, MultipleToolCallsInOneTurnRunConcurrently) {
         ToolSchema{.name = name,
                    .description = "test tool",
                    .params_json_schema = R"({"type":"object","properties":{}})"},
-        [name, delay, timeline](std::string_view, const CancelToken&)
+        [name, delay, timeline](std::string_view, std::string_view, const CancelToken&)
             -> asio::awaitable<std::string> {
           timeline->push_back(name + "_start");
           if (delay.count() > 0) {
@@ -336,7 +337,7 @@ TEST(AgentNodeTest, ParallelResultsKeepOriginalCallOrderAndIds) {
         ToolSchema{.name = name,
                    .description = "test tool",
                    .params_json_schema = R"({"type":"object","properties":{}})"},
-        [canned = std::move(canned), delay](std::string_view, const CancelToken&)
+        [canned = std::move(canned), delay](std::string_view, std::string_view, const CancelToken&)
             -> asio::awaitable<std::string> {
           if (delay.count() > 0) {
             auto exec = co_await asio::this_coro::executor;
@@ -389,13 +390,13 @@ TEST(AgentNodeTest, EscapingToolExceptionYieldsErrorPlaceholderInPlace) {
       ToolSchema{.name = "good",
                  .description = "test tool",
                  .params_json_schema = R"({"type":"object","properties":{}})"},
-      [](std::string_view, const CancelToken&)
+      [](std::string_view, std::string_view, const CancelToken&)
           -> asio::awaitable<std::string> { co_return std::string("OK"); }));
   registry->Register(std::make_shared<NativeFnTool>(
       ToolSchema{.name = "bad",
                  .description = "test tool",
                  .params_json_schema = R"({"type":"object","properties":{}})"},
-      [](std::string_view, const CancelToken&)
+      [](std::string_view, std::string_view, const CancelToken&)
           -> asio::awaitable<std::string> { throw 42; }));
 
   auto cfg = BaseConfig(backend, io);
@@ -438,7 +439,7 @@ TEST(AgentNodeTest, CancellationPropagatesToSpawnedToolCalls) {
       ToolSchema{.name = "t",
                  .description = "test tool",
                  .params_json_schema = R"({"type":"object","properties":{}})"},
-      [timeline](std::string_view, const CancelToken& cancel)
+      [timeline](std::string_view, std::string_view, const CancelToken& cancel)
           -> asio::awaitable<std::string> {
         timeline->push_back("start");
         auto exec = co_await asio::this_coro::executor;
@@ -494,7 +495,7 @@ TEST(AgentNodeTest, ToolCallEventCarriesCallId) {
       ToolSchema{.name = "echo",
                  .description = "test tool",
                  .params_json_schema = R"({"type":"object","properties":{}})"},
-      [](std::string_view, const CancelToken&)
+      [](std::string_view, std::string_view, const CancelToken&)
           -> asio::awaitable<std::string> { co_return R"({"ok":true})"; }));
 
   auto cfg = BaseConfig(backend, io);

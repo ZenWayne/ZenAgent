@@ -42,7 +42,8 @@ McpToolAdapter::McpToolAdapter(std::shared_ptr<IMcpClient> client,
       timeout_(call_timeout) {}
 
 asio::awaitable<std::string> McpToolAdapter::Invoke(
-    std::string_view args_json, const CancelToken& cancel) {
+    std::string_view args_json, std::string_view /*tool_call_id*/,
+    const CancelToken& cancel) {
   using namespace asio::experimental::awaitable_operators;
 
   if (cancel.IsCancelled()) {

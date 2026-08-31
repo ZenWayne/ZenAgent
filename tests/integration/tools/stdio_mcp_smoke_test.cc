@@ -80,7 +80,7 @@ TEST(StdioMcpSmokeTest, AttachAndInvokeEcho) {
         }
         try {
           outcome.invoke_result = co_await reg.Invoke(
-              "echo", R"({"text":"hi from agentflow"})", CancelToken{});
+              "echo", R"({"text":"hi from agentflow"})", "", CancelToken{});
         } catch (const std::exception& e) {
           outcome.invoke_threw = true;
           outcome.invoke_error = e.what();

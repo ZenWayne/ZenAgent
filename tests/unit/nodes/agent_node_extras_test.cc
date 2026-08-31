@@ -14,7 +14,7 @@ TEST(AgentNodeExtrasTest, ConfigAcceptsExtraTools) {
   ToolSchema schema{"echo", "echoes args back", R"({"type":"object"})"};
   auto extra = std::make_shared<NativeFnTool>(
       schema,
-      [](std::string_view args, const CancelToken&)
+      [](std::string_view args, std::string_view, const CancelToken&)
           -> asio::awaitable<std::string> {
         co_return std::string(args);
       });

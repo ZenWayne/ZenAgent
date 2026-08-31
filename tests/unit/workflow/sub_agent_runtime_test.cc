@@ -380,7 +380,7 @@ TEST(SubAgentRuntimeTest, ToolResultCarriesOriginatingCallId) {
       ToolSchema{.name = "search",
                  .description = "test tool",
                  .params_json_schema = R"({"type":"object","properties":{}})"},
-      [](std::string_view, const CancelToken&)
+      [](std::string_view, std::string_view, const CancelToken&)
           -> asio::awaitable<std::string> { co_return "SEARCH_RESULT"; }));
 
   constexpr char kWf[] = R"({
