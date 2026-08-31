@@ -2,8 +2,9 @@
 package(default_visibility = ["//visibility:public"])
 
 # Under --config=android_arm64 (//bazel/platforms:android_arm64) the prebuilt
-# archives come from lib/arm64-v8a/ (Task 1 cross-compiled them with NDK r26d).
-# The host (x86_64) build keeps using lib/*.a (the //conditions:default path).
+# archives come from the arm64-v8a http_file releases (cross-compiled from
+# LiteRT-LM@26df558b with NDK r26d). The host (x86_64) build keeps its own
+# pair (the //conditions:default path).
 config_setting(
     name = "android_build",
     constraint_values = ["@platforms//os:android"],
@@ -27,14 +28,13 @@ alias(
 #
 # Staging = the litert_lm component libs, whole-archived (alwayslink) so static
 # registrars survive (LITERT_LM_REGISTER_ENGINE etc.).
-# NOTE: the arm64-v8a variants were never published — lib/arm64-v8a/ does not
-# exist in a clean checkout, so --config=android has been broken independently
-# of this change. Publish those archives and add http_file entries alongside the
-# host ones to fix it.
+# The arm64-v8a variants are published as litert-lm-prebuilt-arm64-20260831 and
+# fetched via http_file (see MODULE.bazel), so --config=android works from a
+# clean checkout.
 cc_import(
     name = "c_engine_staging",
     static_library = select({
-        ":android_build": "lib/arm64-v8a/libce_staging.a",
+        ":android_build": "@litert_ce_staging_arm64//file:libce_staging.a",
         "//conditions:default": "@litert_ce_staging//file:libce_staging.a",
     }),
     alwayslink = True,
@@ -48,7 +48,7 @@ cc_import(
 cc_import(
     name = "c_engine_external",
     static_library = select({
-        ":android_build": "lib/arm64-v8a/libce_external.a",
+        ":android_build": "@litert_ce_external_arm64//file:libce_external.a",
         "//conditions:default": "@litert_ce_external//file:libce_external.a",
     }),
 )
