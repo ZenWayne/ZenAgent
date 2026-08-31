@@ -46,6 +46,13 @@ void EventEmitter::EmitNodeEnd(std::string_view node_id, bool cancelled,
 void EventEmitter::EmitToolCall(std::string_view node_id,
                                 std::string_view tool_name,
                                 std::string_view args_json) {
+  EmitToolCall(node_id, tool_name, args_json, "");
+}
+
+void EventEmitter::EmitToolCall(std::string_view node_id,
+                                std::string_view tool_name,
+                                std::string_view args_json,
+                                std::string_view tool_call_id) {
   proto::TraceEvent ev;
   ev.set_kind(proto::TraceEvent::TOOL_CALL);
   ev.set_node_id(std::string(node_id));
@@ -53,12 +60,20 @@ void EventEmitter::EmitToolCall(std::string_view node_id,
   auto* p = ev.mutable_tool_call();
   p->set_tool_name(std::string(tool_name));
   p->set_args_json(std::string(args_json));
+  p->set_tool_call_id(std::string(tool_call_id));
   Emit(std::move(ev));
 }
 
 void EventEmitter::EmitToolReturn(std::string_view node_id,
                                   std::string_view tool_name,
                                   std::string_view result_json) {
+  EmitToolReturn(node_id, tool_name, result_json, "");
+}
+
+void EventEmitter::EmitToolReturn(std::string_view node_id,
+                                  std::string_view tool_name,
+                                  std::string_view result_json,
+                                  std::string_view tool_call_id) {
   proto::TraceEvent ev;
   ev.set_kind(proto::TraceEvent::TOOL_RETURN);
   ev.set_node_id(std::string(node_id));
@@ -66,6 +81,7 @@ void EventEmitter::EmitToolReturn(std::string_view node_id,
   auto* p = ev.mutable_tool_return();
   p->set_tool_name(std::string(tool_name));
   p->set_result_json(std::string(result_json));
+  p->set_tool_call_id(std::string(tool_call_id));
   Emit(std::move(ev));
 }
 

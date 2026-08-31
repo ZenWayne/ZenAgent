@@ -52,6 +52,11 @@ struct EventCapture {
     }
     return out;
   }
+
+  std::vector<proto::TraceEvent> all() {
+    std::lock_guard<std::mutex> l(m);
+    return events;
+  }
 };
 
 AgentNodeConfig BaseConfig(std::shared_ptr<IChatBackend> backend,
@@ -474,6 +479,40 @@ TEST(AgentNodeTest, CancellationPropagatesToSpawnedToolCalls) {
   EXPECT_EQ((*timeline)[1], "start");
   EXPECT_EQ((*timeline)[2], "cancelled");
   EXPECT_EQ((*timeline)[3], "cancelled");
+}
+
+TEST(AgentNodeTest, ToolCallEventCarriesCallId) {
+  asio::io_context io;
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","tool_calls":[)"
+          R"({"id":"call_42","function":{"name":"echo","arguments":"{\"x\":1}"}}]})",
+          R"({"role":"assistant","content":[{"type":"text","text":"done"}]})"});
+
+  auto registry = std::make_shared<ToolRegistry>();
+  registry->Register(std::make_shared<NativeFnTool>(
+      ToolSchema{.name = "echo",
+                 .description = "test tool",
+                 .params_json_schema = R"({"type":"object","properties":{}})"},
+      [](std::string_view, const CancelToken&)
+          -> asio::awaitable<std::string> { co_return R"({"ok":true})"; }));
+
+  auto cfg = BaseConfig(backend, io);
+  cfg.tool_registry = registry;
+  cfg.constrained_tool_calls = false;
+
+  EventCapture cap;
+  RunNode(std::move(cfg), "go", io, cap);
+
+  const auto events = cap.all();
+  const auto tc = std::find_if(events.begin(), events.end(),
+      [](const auto& e) { return e.has_tool_call(); });
+  ASSERT_NE(tc, events.end());
+  EXPECT_EQ(tc->tool_call().tool_call_id(), "call_42");
+  const auto tr = std::find_if(events.begin(), events.end(),
+      [](const auto& e) { return e.has_tool_return(); });
+  ASSERT_NE(tr, events.end());
+  EXPECT_EQ(tr->tool_return().tool_call_id(), "call_42");
 }
 
 }  // namespace
