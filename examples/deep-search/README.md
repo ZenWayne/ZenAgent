@@ -72,9 +72,17 @@ the conversation layer does not decode it back to quotes. The delegate
 `agent` argument therefore arrives as `<|"|>searcher<|"|>` and every
 delegation fails with `{"error":"unknown_agent"}`, leaving the planner to
 search on its own (with token-polluted queries) and finish with an empty
-answer. Single-session `agent-demo` works only because `get_time` takes no
-arguments — no quoted strings, no token leak. Any local agent with
-string-typed tool arguments is affected; a proper fix belongs in the
-LiteRT-LM conversation layer (decode gemma4 quote tokens on the
-unconstrained path), or run local deep-search with `constrained_tool_calls`
-(sequential delegation).
+answer.
+
+**Fixed** (see `DecodeGemmaQuoteTokens` in
+`agentflow/inference/canonical_message.h`): tool-call arguments are now
+stripped of the leaked token in both consumers (`AgentNode` dispatch and
+`SubAgentRuntime`), so delegation resolves correctly. With delegation
+actually running, local deep-search then hits two **vendored LiteRT-LM
+engine** bugs that framework code cannot fix (the engine submodule is
+pinned): (1) multi-session prefill can fail with "Cannot auto-resize tensor
+embeddings: no dims_signature exists"; (2) engine teardown after multiple
+sessions can abort with `free(): invalid next size` (TensorBuffer
+double-free in `LlmLiteRtCompiledModelExecutorBase`'s destructor map).
+Local deep-search therefore stays a cloud-backend feature until the engine
+supports multi-session lifecycles.
