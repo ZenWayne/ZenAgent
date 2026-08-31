@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 class JsonWorkflow internal constructor(
     private val modelPath: String,
     private val json: String,
+    private val tools: List<HostTool> = emptyList(),
 ) {
     fun run(userQuery: String): String =
         NativeBridge.runJsonWorkflow(modelPath, json, userQuery)
@@ -50,8 +51,7 @@ class JsonWorkflow internal constructor(
      * engine request so the run stops promptly instead of finishing in the
      * background.
      */
-    fun streamTokens(userQuery: String): Flow<String> = callbackFlow {
-        val cancelId = NativeBridge.nativeNewCancel()
+    fun streamTokens(userQuery: String): Flow<String> = callbackFlow {        val cancelId = NativeBridge.nativeNewCancel()
         val job = launch(Dispatchers.IO) {
             try {
                 NativeBridge.runJsonWorkflowStreaming(modelPath, json, userQuery, {
@@ -73,6 +73,26 @@ class JsonWorkflow internal constructor(
             job.cancel()
         }
     }
+
+    /**
+     * Constrained tool-mode run: the agent may call registered [tools], and
+     * tool lifecycle events stream to [events] live. No token stream (the
+     * constrained path has none); the full assistant reply is returned when
+     * the run completes. The run blocks the calling thread — call from a
+     * background dispatcher.
+     *
+     * Cancellation: call `nativeCancel(cancelId)` from another thread; the
+     * per-run [CancellationSignal] handed to every tool `invoke` flips and the
+     * run unwinds.
+     */
+    fun runConstrained(
+        userQuery: String,
+        events: RunEventCallback,
+        cancelId: Long,
+    ): String =
+        NativeBridge.runJsonWorkflowConstrained(
+            modelPath, json, tools.toTypedArray(), RunSignal(),
+            userQuery, events, cancelId)
 }
 
 /**
@@ -86,3 +106,13 @@ class JsonWorkflow internal constructor(
  */
 fun loadWorkflow(modelPath: String, json: String): JsonWorkflow =
     JsonWorkflow(modelPath, json)
+
+/**
+ * Loads a workflow with host-side tools registered. Names in the workflow
+ * JSON's `"tools"` arrays must match the [tools]' [HostTool.name]s.
+ */
+fun loadWorkflow(
+    modelPath: String,
+    json: String,
+    tools: List<HostTool>,
+): JsonWorkflow = JsonWorkflow(modelPath, json, tools)
