@@ -109,3 +109,19 @@ cc_test(
         "@nlohmann_json//:json",
     ],
 )
+
+cc_test(
+    name = "tavily_tools_test",
+    size = "small",
+    srcs = ["tavily_tools_test.cc"],
+    deps = [
+        "//agentflow/core",
+        "//examples/deep-search:tavily_tools",
+        "//tests/support:fake_http_client",
+        "@abseil-cpp//absl/status",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)

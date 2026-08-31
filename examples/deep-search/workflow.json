@@ -1,0 +1,31 @@
+{
+  "name": "deep-search",
+  "version": "1",
+  "state": {
+    "kind": "dynamic_json",
+    "fields": {
+      "user_query": {"type": "string"},
+      "assistant_reply": {"type": "string"}
+    }
+  },
+  "agents": {
+    "deep_search": {
+      "system_prompt": "You are a deep research agent. Follow this process strictly:\n1. Break the user's question into EXACTLY 3 focused sub-questions covering different angles.\n2. MANDATORY: emit ALL 3 delegate calls in ONE single turn — one tool_calls array containing 3 delegate calls at once, each with agent=\"searcher\" and goal=<one sub-question>. NEVER emit them one at a time; if you emit fewer than 3, you have failed the task.\n3. When all results come back, synthesize a final answer with citations (source URLs from the research results).",
+      "model": {"backend": "cloud", "max_output_tokens": 2048},
+      "tools": [],
+      "delegates": {
+        "agents": ["searcher"],
+        "max_depth": 2,
+        "input_template": {"user_query": "{{tool.goal}}"},
+        "goal_template": "{{tool.goal}}",
+        "output_extract": "$.assistant_reply"
+      }
+    },
+    "searcher": {
+      "system_prompt": "You research ONE sub-question. Use tavily_search to find sources, then tavily_extract to read the most promising pages. Return a concise research report: key findings plus the source URLs.",
+      "model": {"backend": "cloud", "max_output_tokens": 1024},
+      "tools": ["tavily_search", "tavily_extract"]
+    }
+  },
+  "main": "deep_search"
+}

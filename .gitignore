@@ -18,3 +18,9 @@ compile_commands.json
 
 # Android library native binaries (packaged into AAR at build time)
 android-inference/src/main/jniLibs/
+
+# Git worktrees (parallel-tool-dispatch SDD workspace)
+/.worktrees/
+
+# Local env files (credentials, never committed)
+env.local

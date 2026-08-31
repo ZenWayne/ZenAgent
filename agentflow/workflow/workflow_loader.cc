@@ -94,17 +94,17 @@ absl::Status ParseDelegateSpec(const ordered_json& j,
   if (auto it = j.find("max_depth"); it != j.end() && it->is_number_integer()) {
     out->set_max_depth(it->get<uint32_t>());
   }
-  // `parallel` used to be accepted here and then never read, so a workflow
-  // asking for parallel delegation silently got sequential delegation. Reject
-  // it instead of ignoring it: a spec author who set this deserves to learn at
-  // load time that it does nothing, rather than to wonder why nothing sped up.
-  // See the TODO on DelegateSpec in proto/workflow_spec.proto.
+  // `parallel` is not a meaningful key: multiple tool calls in one turn are
+  // ALWAYS dispatched concurrently (the default behaviour of AgentNode's
+  // tool-dispatch loop), so there is nothing to enable and no switch to
+  // disable. Reject it outright so a spec author learns at load time that
+  // parallelism needs no declaration. See the parallel-tool-dispatch design
+  // spec.
   if (j.find("parallel") != j.end()) {
     return absl::InvalidArgumentError(
-        "delegates.parallel is not implemented — delegation is always "
-        "sequential today, and this key previously validated while having no "
-        "effect. Remove it; see the TODO on DelegateSpec in "
-        "proto/workflow_spec.proto for what implementing it requires");
+        "delegates.parallel is not a supported key — parallel execution is "
+        "the default behaviour of the tool-dispatch loop and needs no "
+        "declaration. Remove it.");
   }
   if (auto it = j.find("input_template"); it != j.end()) {
     if (!it->is_object()) {

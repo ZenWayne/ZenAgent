@@ -5,6 +5,10 @@
 
 #include "absl/status/status.h"
 #include <asio/as_tuple.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/experimental/channel.hpp>
+#include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include "agentflow/core/errors.h"
@@ -146,59 +150,92 @@ asio::awaitable<State> AgentNode::Run(
     // assistant message when present.
     if (resp.contains("tool_calls") && resp["tool_calls"].is_array() &&
         !resp["tool_calls"].empty()) {
-      // Dispatch every tool call this turn, then send a single tool-role
-      // message back with each result.
-      json tool_content = json::array();
-      for (const auto& tc : resp["tool_calls"]) {
-        // json::value() THROWS type_error.306 on a non-object and
-        // type_error.302 when a present key has the wrong type, and the
-        // try/catch above covers only the outer parse. Model output is
-        // untrusted — never read a field without proving BOTH that its
-        // container is an object AND that the field has the type we are
-        // about to read it as. Same shape as StreamAccumulator::Feed.
-        // json::value() THROWS type_error.306 on a non-object and
-        // type_error.302 when a present key has the wrong type, and the
-        // try/catch above covers only the outer parse. Model output is
-        // untrusted — never read a field without proving BOTH that its
-        // container is an object AND that the field has the type we are
-        // about to read it as. Same shape as StreamAccumulator::Feed.
-        if (!tc.is_object()) continue;
+      // Normalize all tool calls first. Model output is untrusted — never
+      // read a field without proving BOTH that its container is an object
+      // AND that the field has the type we are about to read it as (same
+      // hardening as before). A non-object entry is skipped entirely (no
+      // result slot); an object entry always produces one slot, degrading
+      // to an empty-name dispatch when its fields are malformed.
+      struct Call {
         std::string name;
+        std::string call_id;
+        std::string args;
+      };
+      std::vector<Call> calls;
+      for (const auto& tc : resp["tool_calls"]) {
+        if (!tc.is_object()) continue;
+        Call c;
         if (tc.contains("name") && tc["name"].is_string()) {
-          name = tc["name"].get<std::string>();
+          c.name = tc["name"].get<std::string>();
         } else if (tc.contains("function") && tc["function"].is_object()) {
           const json& fn = tc["function"];
           if (fn.contains("name") && fn["name"].is_string()) {
-            name = fn["name"].get<std::string>();
+            c.name = fn["name"].get<std::string>();
           }
         }
-        // The originating call's id. LiteRT-LM does not need it (the Gemma
-        // template reads only name/response), but OpenAI-compatible backends
-        // must echo it back as tool_call_id, so it is threaded through the
-        // canonical shape. Design spec §3.2.
-        std::string call_id;
+        // The originating call's id. LiteRT-LM does not need it, but
+        // OpenAI-compatible backends must echo it back as tool_call_id.
         if (tc.contains("id") && tc["id"].is_string()) {
-          call_id = tc["id"].get<std::string>();
+          c.call_id = tc["id"].get<std::string>();
         }
-        std::string args;
         if (tc.contains("arguments")) {
-          args = tc["arguments"].is_string()
-                     ? tc["arguments"].get<std::string>()
-                     : tc["arguments"].dump();
+          c.args = tc["arguments"].is_string()
+                       ? tc["arguments"].get<std::string>()
+                       : tc["arguments"].dump();
         } else if (tc.contains("function") &&
                    tc["function"].contains("arguments")) {
-          args = tc["function"]["arguments"].is_string()
-                     ? tc["function"]["arguments"].get<std::string>()
-                     : tc["function"]["arguments"].dump();
+          c.args = tc["function"]["arguments"].is_string()
+                       ? tc["function"]["arguments"].get<std::string>()
+                       : tc["function"]["arguments"].dump();
         }
-        std::string result = co_await DispatchTool(name, args, cancel, emit);
+        c.args = DecodeGemmaQuoteTokens(c.args);
+        calls.push_back(std::move(c));
+      }
+
+      // Concurrent dispatch: one channel per call — the same ResultChannel
+      // pattern TeamNode::RunParallelGather uses. A closed channel means the
+      // coroutine caught an exception DispatchTool's std::exception handler
+      // cannot handle (e.g. a non-std throw); that yields an error
+      // placeholder so the result array stays 1:1 with the calls.
+      using ResultChannel =
+          asio::experimental::channel<void(asio::error_code, std::string)>;
+      auto exec = co_await asio::this_coro::executor;
+      std::vector<std::shared_ptr<ResultChannel>> channels;
+      channels.reserve(calls.size());
+      for (const auto& c : calls) {
+        auto ch = std::make_shared<ResultChannel>(exec, 1);
+        channels.push_back(ch);
+        asio::co_spawn(
+            exec,
+            [this, &cancel, &emit, ch, c]() -> asio::awaitable<void> {
+              try {
+                std::string result =
+                    co_await DispatchTool(c.name, c.args, cancel, emit);
+                asio::error_code ec;
+                ch->try_send(ec, std::move(result));
+              } catch (...) {
+                ch->close();
+              }
+            },
+            asio::detached);
+      }
+
+      // Collect in ORIGINAL call order — completion order must not leak into
+      // the tool-role message (OpenAI semantics: slots echo tool_call_id).
+      json tool_content = json::array();
+      for (size_t i = 0; i < calls.size(); ++i) {
+        auto [ec, result] = co_await channels[i]->async_receive(
+            asio::as_tuple(asio::use_awaitable));
+        std::string value =
+            ec ? std::string(R"({"error":"tool_execution_failed"})")
+               : std::move(result);
         // Per the Gemma jinja template each content item carries `name` +
         // `response` directly; `id` is additive and ignored on that path.
         json entry = {
-          {"name", name},
-          {"response", {{"value", result}}},
+            {"name", calls[i].name},
+            {"response", {{"value", value}}},
         };
-        if (!call_id.empty()) entry["id"] = call_id;
+        if (!calls[i].call_id.empty()) entry["id"] = calls[i].call_id;
         tool_content.push_back(std::move(entry));
       }
       json tool_message = {{"role", "tool"}, {"content", tool_content}};

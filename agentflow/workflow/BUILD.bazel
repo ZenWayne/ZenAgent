@@ -73,6 +73,7 @@ cc_library(
         ":template_engine",
         ":workflow",
         "//agentflow/core",
+        "//agentflow/inference:canonical_message",
         "//agentflow/inference:chat_backend",
         "//agentflow/tools",
         "//proto:agentflow_proto",

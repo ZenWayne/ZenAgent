@@ -118,7 +118,7 @@ TEST(WorkflowLoaderTest, RejectMalformedJson) {
   EXPECT_FALSE(WorkflowLoader::Load("{not json", host_tools).ok());
 }
 
-TEST(WorkflowLoaderTest, RejectDelegatesParallelBecauseItIsNotImplemented) {
+TEST(WorkflowLoaderTest, RejectDelegatesParallelBecauseItNeedsNoDeclaration) {
   // `parallel` used to validate here and then be ignored by every consumer,
   // so a workflow asking for parallel delegation silently ran sequentially.
   // Rejecting is the point: an author who sets it must find out at load time.
@@ -138,10 +138,10 @@ TEST(WorkflowLoaderTest, RejectDelegatesParallelBecauseItIsNotImplemented) {
   auto wf_or = WorkflowLoader::Load(spec, host_tools);
   EXPECT_FALSE(wf_or.ok());
   EXPECT_TRUE(absl::StrContains(wf_or.status().message(), "parallel"));
-  // Rejected for being unimplemented, not merely for being an unknown key —
-  // the message has to tell the author what is actually true.
+  // The message must tell the author what is actually true: parallelism is
+  // the default and needs no declaration at all.
   EXPECT_TRUE(
-      absl::StrContains(wf_or.status().message(), "not implemented"));
+      absl::StrContains(wf_or.status().message(), "default behaviour"));
 }
 
 TEST(WorkflowLoaderTest, RejectDelegatesParallelEvenWhenSetToFalse) {
