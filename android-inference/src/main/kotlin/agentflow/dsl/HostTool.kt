@@ -1,5 +1,18 @@
 package agentflow.dsl
 
+import agentflow.jni.NativeBridge
+
+/**
+ * Opaque cancellation handle for a run. Create before a blocking run, call
+ * [cancelRun] from another thread to stop it, [freeCancelHandle] after it
+ * finishes.
+ */
+fun newCancelHandle(): Long = NativeBridge.nativeNewCancel()
+
+fun cancelRun(cancelId: Long) = NativeBridge.nativeCancel(cancelId)
+
+fun freeCancelHandle(cancelId: Long) = NativeBridge.nativeFreeCancel(cancelId)
+
 /**
  * Cheap per-run cancellation probe, visible to tool implementations.
  *
