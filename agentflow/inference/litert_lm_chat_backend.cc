@@ -5,6 +5,9 @@
 #include <exception>
 #include <string>
 
+#include <asio/as_tuple.hpp>
+#include <asio/use_awaitable.hpp>
+
 #include "absl/status/status.h"
 
 #include "agentflow/inference/canonical_message.h"
@@ -15,9 +18,12 @@ namespace {
 
 class LiteRtLmChatConversation : public IConversation {
  public:
-  LiteRtLmChatConversation(std::shared_ptr<LiteRtLmConversation> conv,
-                            bool constrained)
-      : conv_(std::move(conv)), constrained_(constrained) {}
+  LiteRtLmChatConversation(
+      std::shared_ptr<LiteRtLmConversation> conv, bool constrained,
+      std::shared_ptr<LiteRtLmChatBackend::EngineSlot> engine_slot)
+      : conv_(std::move(conv)),
+        constrained_(constrained),
+        engine_slot_(std::move(engine_slot)) {}
 
   asio::awaitable<absl::StatusOr<std::string>> SendAsync(
       std::string message_json, const TokenSink& on_token,
@@ -28,6 +34,20 @@ class LiteRtLmChatConversation : public IConversation {
       auto conv = conv_;
       cancel.OnCancel([conv]() { conv->Cancel(); });
     }
+
+    // Acquire the engine-wide slot so this conversation is the only one
+    // mid-prefill/decode. SlotRelease returns it on every exit path.
+    if (cancel.IsCancelled()) co_return absl::CancelledError("cancelled");
+    auto [lock_ec, _] = co_await engine_slot_->async_receive(
+        asio::as_tuple(asio::use_awaitable));
+    if (lock_ec) co_return absl::CancelledError("cancelled");
+    struct SlotRelease {
+      LiteRtLmChatBackend::EngineSlot* slot;
+      ~SlotRelease() {
+        asio::error_code ec;
+        slot->try_send(ec, true);
+      }
+    } release{engine_slot_.get()};
 
     // Non-streaming path. The constrained C bridge has no streaming variant
     // (litert_lm_conversation_send_message_stream ignores the grammar), and a
@@ -64,6 +84,7 @@ class LiteRtLmChatConversation : public IConversation {
  private:
   std::shared_ptr<LiteRtLmConversation> conv_;
   bool constrained_;
+  std::shared_ptr<LiteRtLmChatBackend::EngineSlot> engine_slot_;
   std::atomic<bool> cancel_registered_{false};
 };
 
@@ -81,8 +102,8 @@ std::shared_ptr<IConversation> LiteRtLmChatBackend::CreateConversation(
   const bool constrained = opts.constrained_tool_calls;
   auto conv = LiteRtLmConversation::Create(engine_, std::move(opts), io_);
   if (!conv) return nullptr;
-  return std::make_shared<LiteRtLmChatConversation>(std::move(conv),
-                                                     constrained);
+  return std::make_shared<LiteRtLmChatConversation>(
+      std::move(conv), constrained, engine_slot_);
 }
 
 }  // namespace agentflow
