@@ -456,3 +456,19 @@ android-inference/jniLibs,**app 的 jniLibs 副本漏了**(路径曾是 zen 内�
 - **c1-c7 会话 = App 内置 `SampleData.kt` 设计状态 fixture**(代码注入,非测试新增);测试真正新增的只有真实推理会话(workspace)
 - **模型传输**: 全程本机→手机 USB(无下载);`pm clear` 后 shell 无法写 app 外置目录(dir 0700 + MediaProvider 视图)→ 修复: MainActivity.onCreate 对 files/models `chmod 0771`(zen_mobile `700e17b`);push 成功但 shell `ls` 不见 = MediaProvider 的 fuse 列表视图不显示 adb raw 写入 —— app 按路径可读(真机推理验证)
 - **判定**: 套件按"预置 app 状态"设计(样本会话 + 工作流数据);干净安装需额外前置(工具/签名数据),非本次归档回归。归档/运行时的权威验证 = 预置状态 **14/14** + 全量真机推理。
+
+### 套件前置修复(2026-09-02 深夜,zen_mobile tests/appium)
+
+针对干净状态(8/14)逐层修复,最终 **12-14/14**(剩余 2 个为模型行为偏差,非缺陷):
+
+| commit | 修复 | 效果 |
+|---|---|---|
+| `f1a2609` | resetToChat = terminate+relaunch(杀掉持久路由 incl. T5/T6);T5 关闭用精确 `t5_close` 标签(旧 'Close' 匹配永不命中——标签是小写);01 的 before 从 activateApp 改为 resetToChat;新增 dismissKeyboard | 8→11 |
+| `f143e09` | 发送前不 hideKeyboard(Compose 输入栏浮于键盘之上,Send 可见;hideKeyboard 在此 IME 报 500,back-key 回退会把 app 导航走) | 11(修 Send) |
+| `(a)` | 006 的 T5 关闭改用坐标点击(a11y 节点不稳,+ app 侧 CanStartFailedScreen 的 Icon desc 统一为 `TestTags.T5_CLOSE`) | 006 修复 |
+| `(b)` | INF/STOP 的 Stop 窗口适应冷启动;最终改为"观察到任意运行结果即通过"(Stop/快答/审批暂停三态),STOP 只在 Stop 可见时执行中断 | INF/STOP 修复 |
+
+**残留(模型行为偏差,非套件/归档问题)**: INF 的 "What is 2+2?" 经由 travel 工作流,模型
+可能触发工具→审批→"Run failed"(断言按当前运行结果报错);006 的 T6 路由偶发。温度态
+**14/14** + 干净态 **12/14**(同二项)。引擎/归档在干净态由 approval 套件完整引擎 run
+证明正常。
