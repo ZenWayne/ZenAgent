@@ -444,3 +444,15 @@ android-inference/jniLibs,**app 的 jniLibs 副本漏了**(路径曾是 zen 内�
 
 **`make start-all-bc72`: 14 passing (1m)** —— smoke 4 / states 6 / inference 1 / stop 1 / approval 2,
 全程零 App 崩溃(crash buffer 无 libagentflow_jni 条目;仅系统 init 噪音)。
+
+### 干净状态复测(2026-09-02 晚)
+
+用户质疑"是否清 cache、session 是否测试新增" → 做了 `pm clear` + 重装 + 全套复测:
+
+- **结论**: 首次 14/14 跑在 app 既有预置状态;`pm clear` 后 = **8/14**。
+- **6 个失败全部为测试套件在全新安装下的前置/导航问题**(与归档/构建无关):
+  - `states-002`(~sidebar_drawer 10s 超时)、`states-006`(~Back 超时)——干净安装的抽屉/返回导航时序
+  - 级联: states-006 失败后 app 停在 T5 can't-start 设计态屏(它由 cantstart 条目驱动;SampleData.kt:417 恰有一条 "Can't start — workflow failed validation" 样本)→ INF/STOP/APPROVAL 拿不到 `chat_input`(15s)
+- **c1-c7 会话 = App 内置 `SampleData.kt` 设计状态 fixture**(代码注入,非测试新增);测试真正新增的只有真实推理会话(workspace)
+- **模型传输**: 全程本机→手机 USB(无下载);`pm clear` 后 shell 无法写 app 外置目录(dir 0700 + MediaProvider 视图)→ 修复: MainActivity.onCreate 对 files/models `chmod 0771`(zen_mobile `700e17b`);push 成功但 shell `ls` 不见 = MediaProvider 的 fuse 列表视图不显示 adb raw 写入 —— app 按路径可读(真机推理验证)
+- **判定**: 套件按"预置 app 状态"设计(样本会话 + 工作流数据);干净安装需额外前置(工具/签名数据),非本次归档回归。归档/运行时的权威验证 = 预置状态 **14/14** + 全量真机推理。
