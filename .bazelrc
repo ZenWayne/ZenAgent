@@ -9,6 +9,24 @@ build:ubsan --copt=-fsanitize=undefined --linkopt=-fsanitize=undefined
 # Test output
 test --test_output=errors
 
+# ── Android NDK / JDK toolchain registration ─────────────────────────
+#
+# MODULE.bazel deliberately does NOT register these eagerly:
+# register_toolchains() is eager — it makes bazel resolve @androidndk for
+# EVERY build, so a host-only server build would still require a real NDK
+# on disk (and CI would too). use_repo() alone does not evaluate the
+# extension. The android toolchains live under --config=android instead;
+# default / host builds never touch the NDK.
+#
+# Order mirrors the old MODULE.bazel block: NDK toolchains first, then the
+# JDK runtime toolchain registered LAST so host builds keep using the stock
+# @local_jdk runtime (only the android target, which the stock one rejects,
+# falls through to this one). See bazel/toolchains/BUILD.bazel.
+#
+# ANDROID_NDK_HOME must be exported in the build shell (NDK r26d).
+build:android --extra_toolchains=@androidndk//:all
+build:android --extra_toolchains=//bazel/toolchains:android_jdk_runtime_toolchain
+
 # Android arm64-v8a cross-compile (on-device inference).
 build:android_arm64 --platforms=//bazel/platforms:android_arm64
 build:android_arm64 --android_platforms=//bazel/platforms:android_arm64
@@ -21,6 +39,10 @@ build:android_arm64 --copt=-DANDROID --cxxopt=-std=c++20 --host_cxxopt=-std=c++2
 # (The repo-root name is the Bazel 7 bzlmod canonical form pinned via
 # .bazelversion; abseil-cpp is pinned in MODULE.bazel.)
 build:android_arm64 --copt=-Iexternal/abseil-cpp~
+# Inherit --config=android so the NDK / android JDK toolchains registered
+# there are present for android-platform builds (build_jni_arm64.sh passes
+# --config=android_arm64 alone).
+build:android_arm64 --config=android
 
 # On-device test executables (adb push + run on a real arm64 device).
 #
