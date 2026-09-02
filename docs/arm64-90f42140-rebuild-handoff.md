@@ -403,3 +403,28 @@ arm64 JNI app 链接暴露了归档的**两个 final 缺陷**:
 
 **最终验证链**(app 侧): JNI arm64 .so(NDK r28b,69.7MB)→ android-inference AAR →
 zen_mobile APK(53MB,内部 so md5 与 bazel 产物一致,成员 arm64-v8a)。
+
+## 16. 真机闪退:protobuf Map ABI 不匹配(2026-09-02,框架侧修复)
+
+**症状**: 设备运行 JSON-workflow 推理(`native-token-st` 线程)SIGABRT:
+`map.h:837] Check failed: num_elements_ <= CalculateHiCutoff(num_buckets_) (1 vs. 0)`。
+**栈**: `WorkflowLoader::Load` → `WorkflowSpec::~WorkflowSpec` →
+`google::protobuf::Map<string,WorkflowSpec_AgentDef>::~Map()` →
+`KeyMapBase::AssertLoadFactor`(absl)。
+
+**根因**: JNI .so 混入两种 protobuf——框架 Bazel 侧 pin **v31.1**,归档(90f42140)是
+**7.35.1**(fork `v35.1`)。两者 `google::protobuf::Map` 内部布局(absl 表格)不同 →
+Map 字段析构活在对方版本的解释下 → 检查崩。**与归档/引擎无关**(引擎运行时此前已通过)。
+
+**修复**(commit `c9d1450` + `f049d69`,PR #40):
+- MODULE.bazel: protobuf git_override v31.1 → **v35.1**(35cd01f9);Bazel 7.4.1 与
+  protobuf v35.1 不兼容(`>= 8.0.0`)→ 用 **bazelisk 8.4.2** 构建;加 rules_java 8.6.1
+  + 显式注册 `@local_jdk`(Bazel 8 移除隐式 repo;`local_jdk_extension` 在 8.6.1 中
+  名为 `toolchains`)。
+- proto/BUILD.bazel: `cc_proto_library` 改从 `@com_google_protobuf//bazel` 加载
+  (Bazel 8 从 rules_cc 移除)。
+- build_jni_arm64.sh: `bazel` → `bazelisk`(USE_BAZEL_VERSION=8.4.2)。
+
+JNI 已重编(1581 actions,protobuf 35.1)并通过 arm64 链接;AAR/APK 已重建。
+**遗留**: 设备在重装前断开(QV7808CA8G 无 USB)——接回后:
+`adb install -r app-debug.apk && make start-inference-bc72` 复测。
