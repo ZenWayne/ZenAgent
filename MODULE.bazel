@@ -133,7 +133,7 @@ http_file(
 http_file(
     name = "litert_ce_external_arm64",
     downloaded_file_path = "libce_external.a",
-    sha256 = "6d0ed95bf5c16d05d30fa15133faa1f2b81e24439325b0b50e9b17c33817fb26",
+    sha256 = "b3a3891d7185e802c915ecd9204b7bca44c885e089e1b88aff19785933933726",
     urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-arm64-20260902/libce_external.a"],
 )
 
@@ -143,7 +143,7 @@ http_file(
 # when a prebuilt libc_engine.a is available.
 
 # ── Android NDK toolchain (arm64-v8a on-device builds) ─────────────
-# ANDROID_NDK_HOME must be exported in the build shell (NDK r26d).
+# ANDROID_NDK_HOME must be exported in the build shell (NDK r28b - archive requires libc++19 ABI).
 bazel_dep(name = "rules_android_ndk", version = "0.1.3")
 android_ndk_repository_extension = use_extension(
     "@rules_android_ndk//:extension.bzl",

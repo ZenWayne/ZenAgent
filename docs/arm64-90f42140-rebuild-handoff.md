@@ -382,3 +382,24 @@ a4a831eb, 40e0d33b(13 个)。
 **遗留(下一步,链第 4 项)**: `AGENTFLOW_ENABLE_LITERTLM_TOKENIZER_API=1` → Bazel
 repro 套件 → 本地 deep-search 4 会话 teardown 原始 bug 验证。MODULE.bazel 已指向新
 归档(未提交)。
+
+## 15. App 侧验证修复(2026-09-02,zen_mobile 编译中发现)
+
+arm64 JNI app 链接暴露了归档的**两个 final 缺陷**:
+
+1. `166c769b`(fork): **re2 未 PIC**——re2 EP 是唯一没设 `-DCMAKE_POSITION_INDEPENDENT_CODE=ON`
+   的包;非 PIC 对象使 `libagentflow_jni.so` 链接失败
+   (`R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol 'vtable for re2::...'`)。
+   → 重新 split 后 `libce_external.a` sha256 变为
+   `b3a3891d7185e802c915ecd9204b7bca44c885e089e1b88aff19785933933726`(staging 不变),
+   已重新发布(clobber)+ 重指 MODULE.bazel。
+2. **NDK 版本必须 r28b**: 归档的 antlr4 对象使用 libc++ **19 新异常 ABI**
+   (`make_exception_ptr[abi:ne190000]`、`__cxa_init_primary_exception`),r26d 的
+   libc++(17)不提供 → 链接报 undefined symbol。App 侧 Bazel android_arm64 构建
+   的 NDK 从 r26d 切到 **r28b**(`.bazelrc`/AGENTS.md/build_jni_arm64.sh/MODULE.bazel
+   注释同步更新);`@androidndk` repo(env 非追踪)需删除缓存重取。JNI .so 用
+   **静态 libc++**(NEEDED 仅系统库,`__cxa_init_primary_exception` T 定义在 so 内)
+   → APK 无需 libc++_shared,运行时 ABI 一致。
+
+**最终验证链**(app 侧): JNI arm64 .so(NDK r28b,69.7MB)→ android-inference AAR →
+zen_mobile APK(53MB,内部 so md5 与 bazel 产物一致,成员 arm64-v8a)。

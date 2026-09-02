@@ -23,7 +23,7 @@ SO_NAME="libagentflow_jni.so"
 JNILIBS_DIR="/home/wayne/tools/zen_mobile/app/src/main/jniLibs/${ABI}"
 STAGED_SO="${JNILIBS_DIR}/${SO_NAME}"
 
-export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$HOME/android-ndk/android-ndk-r26d}"
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$HOME/android-ndk/android-ndk-r28b}"
 export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 export https_proxy="${https_proxy:-http://127.0.0.1:10809}"
 export http_proxy="${http_proxy:-http://127.0.0.1:10809}"
