@@ -100,5 +100,66 @@ TEST(LiteRtStreamAssemblerTest, MalformedContentItemInAStreamChunkDoesNotThrow) 
   EXPECT_EQ(ExtractAssistantText(a.Canonical()), "hi");
 }
 
+TEST(DecodeSpecialTokensTest, StripsRegisteredTokensFromToolArguments) {
+  // gemma4's unconstrained path leaks its registered quote token <|"|>
+  // literally inside tool-call argument strings, so the delegate agent name
+  // arrives as <|"|>searcher<|"|> instead of "searcher". The token set comes
+  // from the probe (tokenizer-verified), never hardcoded here.
+  ModelSpecialTokens tokens;
+  tokens.strip = {"<|\"|>"};
+  const std::string raw =
+      R"({"role":"assistant","tool_calls":[{"id":"c1","function":)"
+      R"({"name":"delegate","arguments":"{\"agent\":\"<|\"|>searcher<|\"|>\"}"}}]})";
+  const std::string decoded = DecodeSpecialTokens(raw, tokens);
+
+  json parsed = json::parse(decoded, nullptr, /*allow_exceptions=*/false);
+  ASSERT_FALSE(parsed.is_discarded()) << decoded;
+  const std::string args = parsed["tool_calls"][0]["function"]["arguments"];
+  json a = json::parse(args, nullptr, /*allow_exceptions=*/false);
+  ASSERT_FALSE(a.is_discarded()) << args;
+  EXPECT_EQ(a["agent"], "searcher");
+}
+
+TEST(DecodeSpecialTokensTest, StripsFromTextContentToo) {
+  // The same leak can appear outside tool calls (final answer text); the
+  // backend-level decode must cover the whole canonical message, not just
+  // arguments. The engine embeds the token text JSON-escaped (<|\"|>), which
+  // is what the canonical JSON actually contains.
+  ModelSpecialTokens tokens;
+  tokens.strip = {"<|\"|>", "<end_of_turn>"};
+  const std::string raw =
+      R"({"role":"assistant","content":[{"type":"text",)"
+      R"("text":"answer <|\"|>quoted<|\"|> <end_of_turn> done"}]})";
+  const std::string decoded = DecodeSpecialTokens(raw, tokens);
+
+  json parsed = json::parse(decoded, nullptr, /*allow_exceptions=*/false);
+  ASSERT_FALSE(parsed.is_discarded()) << decoded;
+  EXPECT_EQ(parsed["content"][0]["text"], "answer quoted  done");
+}
+
+TEST(DecodeSpecialTokensTest, EmptyTokenSetReturnsInputUnchanged) {
+  ModelSpecialTokens tokens;  // empty — unknown model family
+  const std::string clean =
+      R"({"role":"assistant","content":[{"type":"text","text":"hi \"there\""}]})";
+  EXPECT_EQ(DecodeSpecialTokens(clean, tokens), clean);
+}
+
+TEST(DecodeSpecialTokensTest, HandlesMultipleTokensAndEmptyInput) {
+  ModelSpecialTokens tokens;
+  tokens.strip = {"<|\"|>", "<end_of_turn>"};
+  const std::string raw =
+      R"({"role":"assistant","tool_calls":[{"id":"c1","function":)"
+      R"({"name":"t","arguments":"{\"a\":\"<|\"|>x<|\"|>\",\"b\":\"<end_of_turn><|\"|>y<|\"|>\"}"}}]})";
+  const std::string decoded = DecodeSpecialTokens(raw, tokens);
+  json parsed = json::parse(decoded, nullptr, /*allow_exceptions=*/false);
+  ASSERT_FALSE(parsed.is_discarded()) << decoded;
+  const std::string args =
+      parsed["tool_calls"][0]["function"]["arguments"].get<std::string>();
+  json a = json::parse(args);
+  EXPECT_EQ(a["a"], "x");
+  EXPECT_EQ(a["b"], "y");
+  EXPECT_EQ(DecodeSpecialTokens("", tokens), "");
+}
+
 }  // namespace
 }  // namespace agentflow

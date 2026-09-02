@@ -64,12 +64,17 @@ std::shared_ptr<LiteRtLmConversation> LiteRtLmConversation::Create(
   const char* msgs = opts.messages_json.empty() || opts.messages_json == "[]"
                          ? nullptr
                          : opts.messages_json.c_str();
-  ::LiteRtLmConversationConfig* cfg = litert_lm_conversation_config_create(
-      engine->Get(),
-      /*session_config=*/nullptr,
-      sys, tools, msgs,
-      /*enable_constrained_decoding=*/false);
+  // Upstream (90f42140) replaced the one-shot config_create(engine, ...) with
+  // a builder + setters API. The engine is no longer a config argument — it is
+  // passed to litert_lm_conversation_create instead.
+  ::LiteRtLmConversationConfig* cfg = litert_lm_conversation_config_create();
   if (!cfg) return nullptr;
+  litert_lm_conversation_config_set_system_message(cfg, sys);
+  litert_lm_conversation_config_set_tools(cfg, tools);
+  litert_lm_conversation_config_set_messages(cfg, msgs);
+  // enable_constrained_decoding stays off; constrained tool-call decoding is
+  // done through the P8 bridge (litert_lm_engine_create_constrained_conversation).
+  litert_lm_conversation_config_set_enable_constrained_decoding(cfg, false);
 
   ::LiteRtLmConversation* conv = litert_lm_conversation_create(
       engine->Get(), cfg);
@@ -117,7 +122,8 @@ absl::StatusOr<std::string> LiteRtLmConversation::SendMessageSync(
   }
   ::LiteRtLmJsonResponse* resp = litert_lm_conversation_send_message(
       conv_, message_json.c_str(),
-      extra_context.empty() ? nullptr : extra_context.c_str());
+      extra_context.empty() ? nullptr : extra_context.c_str(),
+      /*optional_args=*/nullptr);
   if (!resp) {
     return absl::InternalError("send_message returned null");
   }
@@ -147,6 +153,7 @@ void LiteRtLmConversation::SendMessage(std::string message_json,
       conv_,
       message_json.c_str(),
       extra_context.empty() ? nullptr : extra_context.c_str(),
+      /*optional_args=*/nullptr,
       &LiteRtLmConversation::StreamCallback,
       this);
   if (rc != 0) {
@@ -183,14 +190,14 @@ void LiteRtLmConversation::Cancel() {
   channel_.close();
 }
 
-void LiteRtLmConversation::StreamCallback(void* data, const char* chunk,
-                                           bool is_final,
-                                           const char* error_msg) {
+void LiteRtLmConversation::StreamCallback(void* data,
+                                          const LiteRtLmStreamChunk* chunk) {
   auto* self = static_cast<LiteRtLmConversation*>(data);
   if (self->cancelled_) return;
 
   // Called from a LiteRT-LM worker thread. asio channels and our accum buffer
   // are not thread-safe — marshal everything onto io_.
+  const char* error_msg = litert_lm_stream_chunk_get_error(chunk);
   if (error_msg) {
     asio::post(self->io_, [self, msg = std::string(error_msg)]() mutable {
       self->channel_.try_send(make_error_code(std::errc::io_error),
@@ -200,8 +207,10 @@ void LiteRtLmConversation::StreamCallback(void* data, const char* chunk,
     return;
   }
 
+  const char* text = litert_lm_stream_chunk_get_text(chunk);
+  bool is_final = litert_lm_stream_chunk_is_final(chunk);
   asio::post(self->io_,
-             [self, tok = chunk ? std::string(chunk) : std::string{},
+             [self, tok = text ? std::string(text) : std::string{},
               is_final]() mutable {
                if (!tok.empty()) {
                  {

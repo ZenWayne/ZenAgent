@@ -14,6 +14,7 @@
 
 #include "agentflow/inference/chat_backend.h"
 #include "agentflow/inference/litert_lm_engine.h"
+#include "c/conversation.h"
 #include "c/engine.h"
 
 namespace agentflow {
@@ -81,8 +82,7 @@ class LiteRtLmConversation {
                        std::shared_ptr<LiteRtLmEngine> engine,
                        asio::io_context& io_ctx);
 
-  static void StreamCallback(void* data, const char* chunk,
-                              bool is_final, const char* error_msg);
+  static void StreamCallback(void* data, const LiteRtLmStreamChunk* chunk);
 
   std::shared_ptr<LiteRtLmEngine> engine_;  // keep engine alive
   ::LiteRtLmConversation* conv_;            // owned

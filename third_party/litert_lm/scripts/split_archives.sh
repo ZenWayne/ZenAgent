@@ -8,8 +8,12 @@
 #   <BUILD_DIR>/CMakeFiles/litert_lm_main.dir/link.txt
 # which lists every .a the final binary links. staging archives live under
 # staging/lib/; abseil archives (external/abseil-cpp/.../libabsl_*.a) are
-# excluded from the external aggregate. The kissfft shared lib is copied under
-# its SONAME libkissfft-float.so.131.
+# excluded from the external aggregate.
+#
+# kissfft is NOT handled here: since ZenAgent f5a847e (PR #37) Bazel compiles it
+# from pinned source (@kissfft in MODULE.bazel) and links it statically, so the
+# runtime image ships no libkissfft-float.so.131. Only the CMake-built
+# litert_lm_main still links it dynamically.
 #
 # Usage: split_archives.sh <CMAKE_BUILD_DIR> <OUTPUT_DIR>
 #   CMAKE_BUILD_DIR e.g. LiteRT-LM/cmake/build/android-arm64/litert_lm/build
@@ -20,6 +24,11 @@ set -euo pipefail
 BUILD_DIR="${1:?need CMAKE_BUILD_DIR (dir containing CMakeFiles/litert_lm_main.dir/link.txt)}"
 OUT_DIR="${2:?need OUTPUT_DIR}"
 AR="${AR:-ar}"
+
+# Must be absolute: combine() extracts members from inside a per-archive temp
+# dir (`cd "$sub" && ar xN ... "$src"`), so a relative BUILD_DIR would make
+# every source archive path unresolvable once we chdir.
+BUILD_DIR="$(cd "$BUILD_DIR" && pwd)"
 
 LINK_TXT="$BUILD_DIR/CMakeFiles/litert_lm_main.dir/link.txt"
 [ -f "$LINK_TXT" ] || { echo "ERROR: link.txt not found: $LINK_TXT" >&2; exit 1; }
@@ -36,7 +45,11 @@ for a in "${ALL_ARCHIVES[@]}"; do
   abspath="$BUILD_DIR/$a"
   [ -f "$abspath" ] || { echo "WARN: missing archive $a" >&2; continue; }
   case "$a" in
-    staging/lib/*)                              STAGING_ARCHIVES+=("$abspath") ;;
+    # LiteRT-LM-authored component libs. Two layouts are in play:
+    #   staging/lib/   -- LITERTLM_STAGING_DIR default (litert_lm_config.cmake)
+    #   ../tmp/lib/    -- the override in packages/litert_lm/CMakeLists.txt,
+    #                     which is what the 90f42140 tree actually builds into.
+    staging/lib/*|../tmp/lib/*)                 STAGING_ARCHIVES+=("$abspath") ;;
     external/abseil-cpp/install/lib/libabsl_*.a) : ;;   # abseil excluded; Bazel supplies it
     *)                                          EXTERNAL_ARCHIVES+=("$abspath") ;;
   esac
@@ -111,14 +124,6 @@ combine() {
 
 combine "$OUT_DIR/libce_staging.a"  "${STAGING_ARCHIVES[@]}"
 combine "$OUT_DIR/libce_external.a" "${EXTERNAL_ARCHIVES[@]}"
-
-# kissfft shared lib under its SONAME.
-KISS="$(find "$BUILD_DIR" -name 'libkissfft-float.so.131' -type f 2>/dev/null | head -1)"
-if [ -z "$KISS" ]; then
-  KISS="$(find "$BUILD_DIR" -name 'libkissfft-float.so.131*' 2>/dev/null | head -1)"
-fi
-[ -n "$KISS" ] || { echo "ERROR: kissfft .so not found under $BUILD_DIR" >&2; exit 1; }
-cp -f "$KISS" "$OUT_DIR/libkissfft-float.so.131"
 
 echo "=== output ==="
 ls -la "$OUT_DIR"

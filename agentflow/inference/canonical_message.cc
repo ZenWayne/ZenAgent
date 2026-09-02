@@ -6,6 +6,19 @@
 namespace agentflow {
 namespace {
 using json = nlohmann::json;
+
+// JSON-escapes a token's raw text so it can be searched inside the canonical
+// JSON string: only '"' and '\' need escaping there. E.g. gemma4's quote
+// token <|"|> appears in the canonical JSON as <|\"|>.
+std::string JsonEscape(std::string_view raw) {
+  std::string out;
+  out.reserve(raw.size());
+  for (char c : raw) {
+    if (c == '"' || c == '\\') out.push_back('\\');
+    out.push_back(c);
+  }
+  return out;
+}
 }  // namespace
 
 std::string ExtractAssistantText(std::string_view canonical_json) {
@@ -28,6 +41,29 @@ std::string ExtractAssistantText(std::string_view canonical_json) {
     }
     if (item.contains("text") && item["text"].is_string()) {
       out.append(item["text"].get<std::string>());
+    }
+  }
+  return out;
+}
+
+std::string DecodeSpecialTokens(std::string_view response_json,
+                                const ModelSpecialTokens& tokens) {
+  if (tokens.empty()) return std::string(response_json);
+
+  std::vector<std::string> needles;
+  needles.reserve(tokens.strip.size());
+  for (const auto& t : tokens.strip) {
+    std::string escaped = JsonEscape(t);
+    if (!escaped.empty()) needles.push_back(std::move(escaped));
+  }
+
+  std::string out(response_json);
+  for (const auto& needle : needles) {
+    size_t pos = 0;
+    for (;;) {
+      pos = out.find(needle, pos);
+      if (pos == std::string::npos) break;
+      out.erase(pos, needle.size());
     }
   }
   return out;

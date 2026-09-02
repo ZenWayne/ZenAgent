@@ -37,8 +37,7 @@ class LiteRtLmSession {
   void Abort();
 
  private:
-  static void StreamCallback(void* data, const char* chunk,
-                              bool is_final, const char* error_msg);
+  static void StreamCallback(void* data, const LiteRtLmStreamChunk* chunk);
 
   ::LiteRtLmSession* session_;  // owned; deleted in Abort()
   asio::io_context& io_;

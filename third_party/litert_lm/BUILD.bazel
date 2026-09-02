@@ -2,35 +2,40 @@
 package(default_visibility = ["//visibility:public"])
 
 # Under --config=android_arm64 (//bazel/platforms:android_arm64) the prebuilt
-# archives come from lib/arm64-v8a/ (Task 1 cross-compiled them with NDK r26d).
-# The host (x86_64) build keeps using lib/*.a (the //conditions:default path).
+# archives come from the arm64-v8a http_file releases (cross-compiled from
+# LiteRT-LM@26df558b with NDK r26d). The host (x86_64) build keeps its own
+# pair (the //conditions:default path).
 config_setting(
     name = "android_build",
     constraint_values = ["@platforms//os:android"],
 )
 
-# kissfft is the only non-system shared dependency of the C engine.
-cc_import(
+# kissfft used to be a machine-built .so dropped into lib/ (gitignored), which
+# made a clean checkout unbuildable. It is now compiled from pinned source —
+# see @kissfft in MODULE.bazel. Linked statically, so nothing has to ship it at
+# runtime, and the arm64-v8a variant comes from the same source via bazel's
+# cross-compilation rather than a second prebuilt.
+alias(
     name = "kissfft",
-    shared_library = select({
-        ":android_build": "lib/arm64-v8a/libkissfft-float.so.131",
-        "//conditions:default": "lib/libkissfft-float.so.131",
-    }),
+    actual = "@kissfft//:kissfft",
 )
 
 # Prebuilt LiteRT-LM C engine, split into two archives that mirror how
 # litert_lm_main links (built out-of-tree via CMake, see /.litert_build; .a's
 # gitignored, machine-built). abseil objects are excluded from both — the
-# binary's abseil comes from Bazel (@abseil-cpp pinned to 20260107 to match the
-# lts_2026010712 inline namespace LiteRT-LM was compiled against).
+# binary's abseil comes from Bazel (@abseil-cpp pinned to 20260526 to match the
+# lts_20260526 inline namespace the 90f42140 archives were compiled against).
 #
 # Staging = the litert_lm component libs, whole-archived (alwayslink) so static
 # registrars survive (LITERT_LM_REGISTER_ENGINE etc.).
+# The arm64-v8a variants are published as litert-lm-prebuilt-arm64-20260831 and
+# fetched via http_file (see MODULE.bazel), so --config=android works from a
+# clean checkout.
 cc_import(
     name = "c_engine_staging",
     static_library = select({
-        ":android_build": "lib/arm64-v8a/libce_staging.a",
-        "//conditions:default": "lib/libce_staging.a",
+        ":android_build": "@litert_ce_staging_arm64//file:libce_staging.a",
+        "//conditions:default": "@litert_ce_staging//file:libce_staging.a",
     }),
     alwayslink = True,
 )
@@ -43,14 +48,17 @@ cc_import(
 cc_import(
     name = "c_engine_external",
     static_library = select({
-        ":android_build": "lib/arm64-v8a/libce_external.a",
-        "//conditions:default": "lib/libce_external.a",
+        ":android_build": "@litert_ce_external_arm64//file:libce_external.a",
+        "//conditions:default": "@litert_ce_external//file:libce_external.a",
     }),
 )
 
 cc_library(
     name = "c_engine",
-    hdrs = ["include/c/engine.h"],
+    hdrs = [
+        "include/c/engine.h",
+        "include/c/conversation.h",
+    ],
     includes = ["include"],
     linkopts = [
         # The combined archive bundles LiteRT-LM's own abseil/protobuf, which
@@ -89,6 +97,7 @@ cc_library(
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/status:status_builder",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@abseil-cpp//absl/hash",
