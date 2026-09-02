@@ -439,3 +439,8 @@ android-inference/jniLibs,**app 的 jniLibs 副本漏了**(路径曾是 zen 内�
 用 APK 内 .so 的 BuildID 与 bazel 产物对比定位;补拷 → 重建 APK → 复测通过。
 **经验: 换 .so 后必须同时更新两处 jniLibs(android-inference 的 AAR 源 + zen_mobile/app),
 并用 BuildID/md5 校验 APK 内实际装载的库。**
+
+### 全量 Appium 套件(QV7808CA8G,2026-09-02 16:2x)
+
+**`make start-all-bc72`: 14 passing (1m)** —— smoke 4 / states 6 / inference 1 / stop 1 / approval 2,
+全程零 App 崩溃(crash buffer 无 libagentflow_jni 条目;仅系统 init 噪音)。
