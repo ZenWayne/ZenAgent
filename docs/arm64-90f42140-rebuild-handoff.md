@@ -428,3 +428,14 @@ Map 字段析构活在对方版本的解释下 → 检查崩。**与归档/引�
 JNI 已重编(1581 actions,protobuf 35.1)并通过 arm64 链接;AAR/APK 已重建。
 **遗留**: 设备在重装前断开(QV7808CA8G 无 USB)——接回后:
 `adb install -r app-debug.apk && make start-inference-bc72` 复测。
+
+### 复测结果(设备 QV7808CA8G,2026-09-02 15:1x)
+
+**✅ Appium 推理套件通过**: `02_inference_streaming.test.js → TC-INF-001 1 passing (23.7s)`。
+真机手动驱动也确认: 消息发送 → agent 完整回复(真实模型输出,无崩溃)。
+期间踩到一个坑: 首次重装后 APK 内的 .so 仍是旧的(BuildID `477eb1ca` = protobuf 修复前)
+——build_jni_arm64.sh 只在 12:53 跑过(修复前),protobuf 重编后只拷进了
+android-inference/jniLibs,**app 的 jniLibs 副本漏了**(路径曾是 zen 内相对路径 bug)。
+用 APK 内 .so 的 BuildID 与 bazel 产物对比定位;补拷 → 重建 APK → 复测通过。
+**经验: 换 .so 后必须同时更新两处 jniLibs(android-inference 的 AAR 源 + zen_mobile/app),
+并用 BuildID/md5 校验 APK 内实际装载的库。**
