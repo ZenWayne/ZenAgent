@@ -7,14 +7,15 @@ bazel_dep(name = "rules_cc", version = "0.2.13")
 bazel_dep(name = "rules_proto", version = "6.0.0")
 bazel_dep(name = "protobuf", version = "30.1", repo_name = "com_google_protobuf")
 
-# Override protobuf to v31.1 (not yet in BCR) so both our //proto-generated code
-# AND the prebuilt LiteRT-LM combined archive use the SAME protobuf runtime.
-# Without this, descriptor structs from 30.1 are interpreted by 31.1 method
-# code under --allow-multiple-definition → reflection segfaults.
+# Override protobuf to v35.1 (matching the 90f42140 archive's protobuf 7.35.1)
+# so both our //proto-generated code AND the prebuilt LiteRT-LM combined
+# archive use the SAME protobuf runtime. Without this, the Map/descriptor
+# layouts differ between versions in one .so and the WorkflowSpec destructor
+# dies in absl KeyMapBase::AssertLoadFactor (num_elements_ 1 vs buckets 0).
 git_override(
     module_name = "protobuf",
     remote = "https://github.com/protocolbuffers/protobuf.git",
-    commit = "74211c0dfc2777318ab53c2cd2c317a2ef9012de",  # v31.1
+    commit = "35cd01f9fe9afbeea38cc7b979a3b6bfcde82c03",  # v35.1
 )
 bazel_dep(name = "googletest", version = "1.15.2")
 bazel_dep(name = "abseil-cpp", version = "20260526.0")  # match LiteRT-LM 90f42140's abseil (lts_20260526 inline ns)
@@ -156,6 +157,15 @@ use_repo(android_ndk_repository_extension, "androidndk")
 # toolchains are registered via --extra_toolchains under `--config=android`
 # instead; see .bazelrc. use_repo() alone does not evaluate the extension.
 # register_toolchains("@androidndk//:all")
+
+# Bazel 8 no longer creates the implicit @local_jdk repo. //bazel/toolchains
+# (copy_jni_md, android JDK runtime toolchain) and @bazel_tools//tools/jdk:jni
+# reference it, so register it explicitly from rules_java (already in the graph
+# via rules_kotlin; the direct bazel_dep makes it visible to this module).
+# Bazel 7 tolerated this because its implicit repo did.
+bazel_dep(name = "rules_java", version = "8.6.1")
+java_toolchains = use_extension("@rules_java//java:extensions.bzl", "toolchains")
+use_repo(java_toolchains, "local_jdk")
 
 # JDK runtime toolchain compatible with the android target platform, so that
 # @bazel_tools//tools/jdk:jni (a dep of //jni:libagentflow_jni.so) can resolve
