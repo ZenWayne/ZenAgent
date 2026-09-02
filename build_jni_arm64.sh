@@ -24,6 +24,7 @@ JNILIBS_DIR="/home/wayne/tools/zen_mobile/app/src/main/jniLibs/${ABI}"
 STAGED_SO="${JNILIBS_DIR}/${SO_NAME}"
 
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$HOME/android-ndk/android-ndk-r28b}"
+export USE_BAZEL_VERSION="${USE_BAZEL_VERSION:-8.4.2}"  # protobuf v35.1 requires Bazel >= 8
 export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 export https_proxy="${https_proxy:-http://127.0.0.1:10809}"
 export http_proxy="${http_proxy:-http://127.0.0.1:10809}"
