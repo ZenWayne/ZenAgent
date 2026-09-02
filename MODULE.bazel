@@ -117,24 +117,24 @@ http_file(
 )
 
 # ── LiteRT-LM prebuilt archives (Android arm64-v8a) ────────────────
-# Same split recipe as the host pair, cross-compiled from LiteRT-LM@26df558b
-# (the same snapshot the 20260825 host archives were built from) with NDK r26d
-# via the android-arm64 preset. kissfft needs no arm64 prebuilt — the Bazel
+# Same split recipe as the host pair, cross-compiled from LiteRT-LM@90f42140
+# (LLGuidance port, fork bf6197c9 + fix/ndk-r28b-preset) with NDK r28b via the
+# android-arm64 preset. kissfft needs no arm64 prebuilt — the Bazel
 # target compiles it from @kissfft source for android too.
 #
 # Rebuilt them? Upload to a new release tag and update BOTH url and sha256.
 http_file(
     name = "litert_ce_staging_arm64",
     downloaded_file_path = "libce_staging.a",
-    sha256 = "8af99bc94773504c761199cfdde80ba682e112e907bfa8f8c16a600ddfaca730",
-    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-arm64-20260831/libce_staging.a"],
+    sha256 = "52ed0746398bdcff6855fdc81d481bbd6ca1e1f3a3845534dd3457f40a2b4d70",
+    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-arm64-20260902/libce_staging.a"],
 )
 
 http_file(
     name = "litert_ce_external_arm64",
     downloaded_file_path = "libce_external.a",
-    sha256 = "f1fd431fc40ade8def7b95b7fe2307c90761bea8bbcc98375f59841c39383303",
-    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-arm64-20260831/libce_external.a"],
+    sha256 = "6d0ed95bf5c16d05d30fa15133faa1f2b81e24439325b0b50e9b17c33817fb26",
+    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-arm64-20260902/libce_external.a"],
 )
 
 # ── LiteRT-LM (header-only stub) ──────────────────────────────────
