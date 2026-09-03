@@ -24,6 +24,7 @@ JNILIBS_DIR="/home/wayne/tools/zen_mobile/app/src/main/jniLibs/${ABI}"
 STAGED_SO="${JNILIBS_DIR}/${SO_NAME}"
 
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$HOME/android-ndk/android-ndk-r28b}"
+export USE_BAZEL_VERSION="${USE_BAZEL_VERSION:-8.4.2}"  # protobuf v35.1 requires Bazel >= 8
 export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 export https_proxy="${https_proxy:-http://127.0.0.1:10809}"
 export http_proxy="${http_proxy:-http://127.0.0.1:10809}"
@@ -31,11 +32,11 @@ export http_proxy="${http_proxy:-http://127.0.0.1:10809}"
 # --- build -----------------------------------------------------------------
 cd "$ZEN_ROOT"
 echo "[build_jni_arm64] building $TARGET (--config=$BAZEL_CONFIG)"
-bazel build --config="$BAZEL_CONFIG" "$TARGET"
+bazelisk build --config="$BAZEL_CONFIG" "$TARGET"
 
 # --- locate the freshly built .so ------------------------------------------
 # Resolve via `bazel cquery` so we pick the arm64 output, not a stale k8 one.
-BIN_PATH="$(bazel cquery --config="$BAZEL_CONFIG" --output=files "$TARGET" 2>/dev/null | tail -1)"
+BIN_PATH="$(bazelisk --host_jvm_args=-Dhttps.proxyHost=127.0.0.1 --host_jvm_args=-Dhttps.proxyPort=10808 cquery --config="$BAZEL_CONFIG" --output=files "$TARGET" 2>/dev/null | tail -1)"
 if [ -z "$BIN_PATH" ] || [ ! -f "$BIN_PATH" ]; then
   # Fallback: bazel-bin symlink (valid right after the build above).
   BIN_PATH="$ZEN_ROOT/bazel-bin/jni/${SO_NAME}"
