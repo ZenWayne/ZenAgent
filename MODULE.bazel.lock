@@ -215,6 +215,22 @@
         "recordedRepoMappingEntries": []
       }
     },
+    "@@rules_android_ndk+//:extension.bzl%android_ndk_repository_extension": {
+      "general": {
+        "bzlTransitiveDigest": "oV/TPZWCXAAcpJG/DBV/lNiWCISUTk5ba0KRjUb7adg=",
+        "usagesDigest": "mdFAXDf6e10wJiGa+cS/eUK8bL7zhDzp0qaENBNLf4Q=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "androidndk": {
+            "repoRuleId": "@@rules_android_ndk+//:rules.bzl%android_ndk_repository",
+            "attributes": {}
+          }
+        },
+        "recordedRepoMappingEntries": []
+      }
+    },
     "@@rules_python+//python/uv:uv.bzl%uv": {
       "general": {
         "bzlTransitiveDigest": "PmZM/pIkZKEDDL68TohlKJrWPYKL5VwUw3MA7kmm6fk=",

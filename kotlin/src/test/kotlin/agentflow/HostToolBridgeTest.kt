@@ -26,8 +26,7 @@ class HostToolBridgeTest {
             "main":{
               "system_prompt":
                 "Use the echo tool when asked to echo something. Reply with the tool's result only.",
-              "model":{"max_output_tokens":64},
-              "constrained_tool_calls":true,
+              "model":{"max_output_tokens":64,"constrained_tool_calls":true},
               "tools":["echo"]
             }
           },
