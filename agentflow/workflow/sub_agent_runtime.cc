@@ -313,7 +313,7 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
         // token-channel drain).
         auto& reg = const_cast<ToolRegistry&>(host_tools_);
         try {
-          result = co_await reg.Invoke(name, args, cancel_ref);
+          result = co_await reg.Invoke(name, args, call_id, cancel_ref);
         } catch (const std::exception& e) {
           result = std::string("Tool error: ") + e.what();
         }

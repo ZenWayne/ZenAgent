@@ -7,8 +7,9 @@ NativeFnTool::NativeFnTool(ToolSchema schema, Fn fn)
     : schema_(std::move(schema)), fn_(std::move(fn)) {}
 
 asio::awaitable<std::string> NativeFnTool::Invoke(
-    std::string_view args_json, const CancelToken& cancel) {
-  co_return co_await fn_(args_json, cancel);
+    std::string_view args_json, std::string_view tool_call_id,
+    const CancelToken& cancel) {
+  co_return co_await fn_(args_json, tool_call_id, cancel);
 }
 
 }  // namespace agentflow

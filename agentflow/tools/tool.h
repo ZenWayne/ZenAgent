@@ -23,6 +23,7 @@ class Tool {
   virtual const ToolSchema& Schema() const = 0;
   virtual asio::awaitable<std::string> Invoke(
       std::string_view args_json,
+      std::string_view tool_call_id,
       const CancelToken& cancel) = 0;
 };
 

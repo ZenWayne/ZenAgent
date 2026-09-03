@@ -73,4 +73,25 @@ internal object NativeBridge {
 
     /** Releases a cancel handle. Call after the run has finished. */
     external fun nativeFreeCancel(cancelId: Long)
+
+    /**
+     * Constrained tool-mode run. The main agent runs with constrained tool-call
+     * decoding (no token stream — LiteRT-LM has no streaming constrained
+     * variant); tool lifecycle events are delivered to [onEvent] live, and the
+     * full assistant reply is returned when the run completes.
+     *
+     * [tools] are registered into the run's host tool registry; names declared
+     * in the workflow JSON's `"tools"` must match, or the loader rejects them.
+     * [signal] is the per-run [agentflow.dsl.CancellationSignal] flipped when
+     * [cancelId] is cancelled.
+     */
+    external fun runJsonWorkflowConstrained(
+        modelPath: String,
+        workflowJson: String,
+        tools: Array<agentflow.dsl.HostTool>,
+        signal: agentflow.dsl.CancellationSignal,
+        userQuery: String,
+        onEvent: agentflow.dsl.RunEventCallback,
+        cancelId: Long,
+    ): String
 }

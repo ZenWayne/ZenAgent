@@ -209,7 +209,7 @@ asio::awaitable<State> AgentNode::Run(
             [this, &cancel, &emit, ch, c]() -> asio::awaitable<void> {
               try {
                 std::string result =
-                    co_await DispatchTool(c.name, c.args, cancel, emit);
+                    co_await DispatchTool(c.name, c.args, c.call_id, cancel, emit);
                 asio::error_code ec;
                 ch->try_send(ec, std::move(result));
               } catch (...) {
@@ -259,32 +259,33 @@ asio::awaitable<State> AgentNode::Run(
 
 asio::awaitable<std::string> AgentNode::DispatchTool(
     const std::string& name, const std::string& args,
+    const std::string& call_id,
     const CancelToken& cancel, EventEmitter& emit) {
   // Extras take precedence over the registry on name collisions.
   for (const auto& tool : cfg_.extra_tools) {
     if (!tool) continue;
     if (tool->Schema().name == name) {
-      emit.EmitToolCall(Id(), name, args);
+      emit.EmitToolCall(Id(), name, args, call_id);
       std::string result;
       try {
-        result = co_await tool->Invoke(args, cancel);
+        result = co_await tool->Invoke(args, call_id, cancel);
       } catch (const std::exception& e) {
         result = std::string("Tool error: ") + e.what();
       }
-      emit.EmitToolReturn(Id(), name, result);
+      emit.EmitToolReturn(Id(), name, result, call_id);
       co_return result;
     }
   }
   if (!cfg_.tool_registry) co_return std::string{};
 
-  emit.EmitToolCall(Id(), name, args);
+  emit.EmitToolCall(Id(), name, args, call_id);
   std::string result;
   try {
-    result = co_await cfg_.tool_registry->Invoke(name, args, cancel);
+    result = co_await cfg_.tool_registry->Invoke(name, args, call_id, cancel);
   } catch (const std::exception& e) {
     result = std::string("Tool error: ") + e.what();
   }
-  emit.EmitToolReturn(Id(), name, result);
+  emit.EmitToolReturn(Id(), name, result, call_id);
   co_return result;
 }
 

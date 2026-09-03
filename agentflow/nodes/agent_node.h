@@ -80,6 +80,7 @@ class AgentNode : public Node {
   std::string BuildUserMessageJson(const State& state) const;
   asio::awaitable<std::string> DispatchTool(
       const std::string& name, const std::string& args,
+      const std::string& call_id,
       const CancelToken& cancel, EventEmitter& emit);
   void WriteOutput(State& state, const std::string& text) const;
 

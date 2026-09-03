@@ -43,7 +43,7 @@ TEST(McpToolAdapterTest, InvokeReturnsResult) {
   auto fut = asio::co_spawn(
       io,
       [&]() -> asio::awaitable<std::string> {
-        co_return co_await adapter.Invoke("{\"x\":1}", CancelToken{});
+        co_return co_await adapter.Invoke("{\"x\":1}", "", CancelToken{});
       },
       asio::use_future);
   io.run();
@@ -61,7 +61,7 @@ TEST(McpToolAdapterTest, InvokeServerErrorWrapsMcpErrorJson) {
   auto fut = asio::co_spawn(
       io,
       [&]() -> asio::awaitable<std::string> {
-        co_return co_await adapter.Invoke("{}", CancelToken{});
+        co_return co_await adapter.Invoke("{}", "", CancelToken{});
       },
       asio::use_future);
   io.run();
@@ -84,7 +84,7 @@ TEST(McpToolAdapterTest, InvokeTimeoutWrapsMcpErrorJson) {
   auto fut = asio::co_spawn(
       io,
       [&]() -> asio::awaitable<std::string> {
-        co_return co_await adapter.Invoke("{}", CancelToken{});
+        co_return co_await adapter.Invoke("{}", "", CancelToken{});
       },
       asio::use_future);
   io.run();
@@ -108,7 +108,7 @@ TEST(McpToolAdapterTest, InvokePreCancelledShortCircuits) {
   auto fut = asio::co_spawn(
       io,
       [&]() -> asio::awaitable<std::string> {
-        co_return co_await adapter.Invoke("{}", src.Token());
+        co_return co_await adapter.Invoke("{}", "", src.Token());
       },
       asio::use_future);
   io.run();

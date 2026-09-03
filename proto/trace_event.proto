@@ -20,11 +20,13 @@ message NodeEndPayload {
 message ToolCallPayload {
   string tool_name = 1;
   string args_json = 2;
+  string tool_call_id = 3;
 }
 
 message ToolReturnPayload {
   string tool_name = 1;
   string result_json = 2;
+  string tool_call_id = 3;
 }
 
 message EdgeFirePayload {

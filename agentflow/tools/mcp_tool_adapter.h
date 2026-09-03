@@ -35,6 +35,7 @@ class McpToolAdapter : public Tool {
   const ToolSchema& Schema() const override { return schema_; }
 
   asio::awaitable<std::string> Invoke(std::string_view args_json,
+                                      std::string_view tool_call_id,
                                       const CancelToken& cancel) override;
 
  private:

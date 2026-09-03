@@ -17,7 +17,7 @@ std::shared_ptr<NativeFnTool> MakeEcho() {
   return std::make_shared<NativeFnTool>(
       ToolSchema{.name = "echo", .description = "echo",
                  .params_json_schema = R"({"type":"object"})"},
-      [](std::string_view args, const CancelToken&) -> asio::awaitable<std::string> {
+      [](std::string_view args, std::string_view, const CancelToken&) -> asio::awaitable<std::string> {
         co_return std::string(args);
       });
 }
@@ -29,7 +29,7 @@ TEST(ToolRegistryTest, RegisterAndInvoke) {
   asio::io_context io;
   auto fut = asio::co_spawn(io,
       [reg]() -> asio::awaitable<void> {
-        auto result = co_await reg->Invoke("echo", "\"test\"", CancelToken{});
+        auto result = co_await reg->Invoke("echo", "\"test\"", "", CancelToken{});
         EXPECT_EQ(result, "\"test\"");
       },
       asio::use_future);
@@ -43,7 +43,7 @@ TEST(ToolRegistryTest, InvokeUnknownThrows) {
   auto fut = asio::co_spawn(io,
       [reg]() -> asio::awaitable<bool> {
         try {
-          (void)co_await reg->Invoke("nobody", "{}", CancelToken{});
+          (void)co_await reg->Invoke("nobody", "{}", "", CancelToken{});
           co_return false;
         } catch (const AgentflowError&) {
           co_return true;

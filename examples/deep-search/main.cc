@@ -84,8 +84,7 @@ int main(int argc, char** argv) {
   const std::string model_path = OptionalEnv("MODEL_PATH");
   if (!model_path.empty()) {
     auto engine = af::LiteRtLmEngine::Create(
-        af::LiteRtLmEngineOptions{.model_path = model_path,
-                                  .model_family = af::ModelFamily::kGemma});
+        af::LiteRtLmEngineOptions{.model_path = model_path});
     if (!engine) {
       std::cerr << "failed to create LiteRT-LM engine\n";
       return 1;

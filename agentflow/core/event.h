@@ -23,8 +23,14 @@ class EventEmitter {
   void EmitNodeEnd(std::string_view node_id, bool cancelled, bool failed);
   void EmitToolCall(std::string_view node_id, std::string_view tool_name,
                     std::string_view args_json);
+  void EmitToolCall(std::string_view node_id, std::string_view tool_name,
+                    std::string_view args_json,
+                    std::string_view tool_call_id);
   void EmitToolReturn(std::string_view node_id, std::string_view tool_name,
                       std::string_view result_json);
+  void EmitToolReturn(std::string_view node_id, std::string_view tool_name,
+                      std::string_view result_json,
+                      std::string_view tool_call_id);
   void EmitEdgeFire(std::string_view from, std::string_view to, int group);
   void EmitNodeFailed(std::string_view node_id, std::string_view type,
                        std::string_view message);

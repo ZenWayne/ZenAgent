@@ -51,6 +51,7 @@ std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
       BuildSchema(allowed_children)};
   auto fn = [runtime, parent_agent = std::move(parent_agent), ctx, io,
              top_channel](std::string_view args_json,
+                          std::string_view /*tool_call_id*/,
                           const ::agentflow::CancelToken& cancel)
                 -> asio::awaitable<std::string> {
     auto args = nlohmann::ordered_json::parse(args_json, nullptr, false);

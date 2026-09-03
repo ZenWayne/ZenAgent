@@ -27,7 +27,7 @@ std::string Invoke(std::shared_ptr<Tool> tool, std::string args,
   auto fut = asio::co_spawn(
       io,
       [&]() -> asio::awaitable<std::string> {
-        co_return co_await tool->Invoke(args, cancel.Token());
+        co_return co_await tool->Invoke(args, "", cancel.Token());
       },
       asio::use_future);
   io.run();

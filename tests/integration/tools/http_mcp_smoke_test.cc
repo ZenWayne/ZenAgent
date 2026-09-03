@@ -178,7 +178,7 @@ TEST(HttpMcpSmokeTest, AttachAndInvokeEcho) {
         }
         try {
           outcome.invoke_result =
-              co_await reg.Invoke("echo", R"({"text":"hi over http"})",
+              co_await reg.Invoke("echo", R"({"text":"hi over http"})", "",
                                   CancelToken{});
         } catch (const std::exception& e) {
           outcome.invoke_threw = true;

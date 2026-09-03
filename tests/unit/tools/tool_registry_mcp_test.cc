@@ -87,7 +87,7 @@ TEST(ToolRegistryMcpTest, AttachRegistersRemoteTools) {
       io,
       [&]() -> asio::awaitable<std::string> {
         co_await reg.AttachMcpServer(MakeSpec());  // idempotent on re-attach
-        co_return co_await reg.Invoke("b", "{}", CancelToken{});
+        co_return co_await reg.Invoke("b", "{}", "", CancelToken{});
       },
       asio::use_future);
   io.run();
@@ -183,7 +183,7 @@ TEST(ToolRegistryMcpTest, LocalToolWinsOnCollision) {
       ToolSchema{.name = "t",
                  .description = "local",
                  .params_json_schema = R"({"type":"object"})"},
-      [](std::string_view, const CancelToken&)
+      [](std::string_view, std::string_view, const CancelToken&)
           -> asio::awaitable<std::string> {
         co_return std::string("from-native");
       }));
@@ -192,7 +192,7 @@ TEST(ToolRegistryMcpTest, LocalToolWinsOnCollision) {
       io,
       [&]() -> asio::awaitable<std::string> {
         co_await reg.AttachMcpServer(MakeSpec());
-        co_return co_await reg.Invoke("t", "{}", CancelToken{});
+        co_return co_await reg.Invoke("t", "{}", "", CancelToken{});
       },
       asio::use_future);
   io.run();
