@@ -2,6 +2,18 @@
 build --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
 build --features=layering_check
 
+# ── Module registries ────────────────────────────────────────────────
+#
+# .bcr-override is a one-module wrapper registry: BCR's abseil-cpp@20260526.0
+# carries no compatibility_level (implicit 0) while protobuf's graph requires
+# compat 1, and single_version_override has no compat parameter. It is declared
+# here rather than on the override because MODULE.bazel's `registry` attribute
+# takes a URL — necessarily absolute, and therefore machine-specific — while
+# %workspace% resolves relative to whatever checkout is building.
+# The upstream BCR must stay listed: naming any registry replaces the default.
+common --registry=file://%workspace%/.bcr-override
+common --registry=https://bcr.bazel.build
+
 # Sanitizers
 build:asan --copt=-fsanitize=address --linkopt=-fsanitize=address
 build:ubsan --copt=-fsanitize=undefined --linkopt=-fsanitize=undefined
