@@ -149,3 +149,40 @@ The arm64 LiteRT-LM build requires submodule-local CMake fixes captured in
 cd LiteRT-LM && git apply ../third_party/litert_lm/android-arm64-litertlm.patch
 ```
 Then run `../build_jni_arm64.sh` (builds + verifies aarch64 + stages the .so).
+
+## Host archives and -fPIC
+
+The host `libce_external.a` (the `litert_ce_external` http_file in
+MODULE.bazel) was built without `-fPIC`. Its re2 objects therefore carry
+`R_X86_64_PC32` relocations against global symbols, and ld.gold refuses to
+link them into a shared library:
+
+```
+requires dynamic R_X86_64_PC32 reloc against '...' which may overflow at
+runtime; recompile with -fPIC
+```
+
+Nothing on-device is affected — the arm64 archive was already rebuilt this
+way in 5bc421a — but it takes out the whole Kotlin JVM test layer
+(`//kotlin`: HostToolBridgeTest, SmokeTest, WorkflowJsonTest), which loads
+`libagentflow_jni.so`.
+
+re2 is the only offender, so `scripts/rebuild_re2_pic_host.sh` rebuilds re2
+alone with `CMAKE_POSITION_INDEPENDENT_CODE=ON` and swaps its objects into the
+archive, instead of rebuilding LiteRT-LM (hours, and a 13 GB build tree).
+
+The rebuilt archive is published as
+`litert-lm-prebuilt-host-pic-20260904` and `litert_ce_external` already points
+at it, so a fresh checkout links out of the box.
+
+Verified 2026-09-04 against that release URL (not a local file): the host
+`libagentflow_jni.so` links (x86-64) and `gradle test` in `kotlin/` is 6/6 green
+with `MODEL_PATH` set.
+
+Note when re-verifying: the `:test` task does not track the native `.so` as an
+input, so Gradle reports UP-TO-DATE after a rebuild. Use `gradle cleanTest test`
+or the run proves nothing.
+
+If you rebuild the archive again, upload it to a **new** tag and update both
+`urls` and `sha256`. Pointing the http_file at a local `file://` path is fine
+for verification but must never be committed — it only resolves on one machine.
