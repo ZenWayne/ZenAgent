@@ -171,10 +171,18 @@ re2 is the only offender, so `scripts/rebuild_re2_pic_host.sh` rebuilds re2
 alone with `CMAKE_POSITION_INDEPENDENT_CODE=ON` and swaps its objects into the
 archive, instead of rebuilding LiteRT-LM (hours, and a 13 GB build tree).
 
-Verified 2026-09-04: after the swap the host `libagentflow_jni.so` links
-(x86-64) and `gradle test` in `kotlin/` is 6/6 green with `MODEL_PATH` set.
+The rebuilt archive is published as
+`litert-lm-prebuilt-host-pic-20260904` and `litert_ce_external` already points
+at it, so a fresh checkout links out of the box.
 
-The archive is consumed **by URL**, so finishing the fix means uploading the
-rebuilt archive to a new release tag and updating both `urls` and `sha256` of
-`litert_ce_external`. Pointing the http_file at a local path verifies the fix
-but must never be committed — it only resolves on one machine.
+Verified 2026-09-04 against that release URL (not a local file): the host
+`libagentflow_jni.so` links (x86-64) and `gradle test` in `kotlin/` is 6/6 green
+with `MODEL_PATH` set.
+
+Note when re-verifying: the `:test` task does not track the native `.so` as an
+input, so Gradle reports UP-TO-DATE after a rebuild. Use `gradle cleanTest test`
+or the run proves nothing.
+
+If you rebuild the archive again, upload it to a **new** tag and update both
+`urls` and `sha256`. Pointing the http_file at a local `file://` path is fine
+for verification but must never be committed — it only resolves on one machine.
