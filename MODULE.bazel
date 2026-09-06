@@ -115,8 +115,11 @@ http_file(
 http_file(
     name = "litert_ce_external",
     downloaded_file_path = "libce_external.a",
-    sha256 = "74de2728592f2f3449957c46a4d22ea30f83938986af0ac8079fb934680ebcd4",
-    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-20260831/libce_external.a"],
+    # re2 objects rebuilt with -fPIC (scripts/rebuild_re2_pic_host.sh); the
+    # 20260831 archive's re2 objects carry R_X86_64_PC32 relocs that ld.gold
+    # refuses to link into libagentflow_jni.so, which took out //kotlin's tests.
+    sha256 = "7d44e9cb9ca14b1e7e8f9fc68ec96a8c29148c9b54cb79a73a915fbb292d700e",
+    urls = ["https://github.com/ZenWayne/ZenAgent/releases/download/litert-lm-prebuilt-host-pic-20260904/libce_external.a"],
 )
 
 # ── LiteRT-LM prebuilt archives (Android arm64-v8a) ────────────────
