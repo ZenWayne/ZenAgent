@@ -82,6 +82,21 @@ TEST(ToOpenAiMessagesTest, AssistantWithToolCallsIsPassedThrough) {
   EXPECT_EQ(m["tool_calls"][0]["function"]["arguments"], "{}");
 }
 
+TEST(ToOpenAiMessagesTest, AssistantReasoningContentIsPassedBack) {
+  // DeepSeek v4 thinking mode: the previous assistant turn's
+  // reasoning_content MUST be passed back on the follow-up request, else the
+  // API rejects with "The reasoning_content in the thinking mode must be
+  // passed back to the API". It must survive the canonical → OpenAI round-trip.
+  auto r = ToOpenAiMessages(
+      R"({"role":"assistant","content":[{"type":"text","text":"改"}],)"
+      R"("reasoning_content":"先看项目","tool_calls":[{"id":"c1","function":{"name":"s","arguments":"{}"}}]})");
+  ASSERT_TRUE(r.ok());
+  ASSERT_EQ(r->size(), 1u);
+  const json& m = (*r)[0];
+  EXPECT_EQ(m["role"], "assistant");
+  EXPECT_EQ(m["reasoning_content"], "先看项目");
+}
+
 TEST(ToOpenAiMessagesTest, OneToolMessageExpandsToOnePerResult) {
   // THE reason ChatConversationOptions carries tool-call ids (design spec §3.2):
   // OpenAI needs one message per result, each with its own tool_call_id.
@@ -181,6 +196,165 @@ TEST(ResponseToCanonicalTest, NonObjectChoiceIsAnErrorNotACrash) {
 TEST(ResponseToCanonicalTest, ChoiceWithoutAMessageObjectIsAnError) {
   EXPECT_FALSE(ResponseToCanonical(R"({"choices":[{}]})").ok());
   EXPECT_FALSE(ResponseToCanonical(R"({"choices":[{"message":7}]})").ok());
+}
+
+TEST(BuildRequestBodyTest, StrictToolsOnlyForDeepSeekFamily) {
+  ChatConversationOptions opts;
+  opts.tools_json =
+      R"([{"type":"function","function":{"name":"update_dialogue","description":"d","parameters":{"type":"object","properties":{"project_id":{"type":"string"},"updates":{"type":"array","items":{"type":"object","properties":{"shot_id":{"type":"integer"}}}}},"required":["project_id","updates"]}}}])";
+
+  auto run = [&](std::string_view model, bool strict) {
+    std::string body =
+        BuildRequestBody(model, opts, {}, true, strict);
+    return body;
+  };
+
+  // DeepSeek family + strict: normalized (strict:true, all props required,
+  // additionalProperties:false, nested empty-object untouched).
+  std::string ds = run("deepseek-v4-flash", true);
+  EXPECT_NE(ds.find(R"("strict":true)"), std::string::npos);
+  EXPECT_NE(ds.find(R"("additionalProperties":false)"), std::string::npos);
+  EXPECT_NE(ds.find(R"("required":["project_id","updates"])"), std::string::npos);
+
+  // Non-strict: untouched (no strict:true anywhere).
+  std::string ns = run("deepseek-v4-flash", false);
+  EXPECT_EQ(ns.find(R"("strict":true)"), std::string::npos);
+
+  // OTHER family + strict flag on: must NOT be normalized — strict is a
+  // DeepSeek-only (Beta) feature, other OpenAI-compatible endpoints must get
+  // tools verbatim.
+  std::string other = run("gpt-4o", true);
+  EXPECT_EQ(other.find(R"("strict":true)"), std::string::npos);
+  EXPECT_EQ(other.find(R"("additionalProperties":false)"), std::string::npos);
+}
+
+TEST(BuildRequestBodyTest, EmptyObjectFallsBackNonStrict) {
+  // batch_update_shots.updates[] is {"type":"object","additionalProperties":
+  // true} — DeepSeek strict rejects ANY object with no properties
+  // ("An object with no properties is not allowed"), even when nested. The
+  // accepted strategy (verified against /beta): leave the WHOLE function
+  // non-strict, schema verbatim.
+  ChatConversationOptions opts;
+  opts.tools_json =
+      R"([{"type":"function","function":{"name":"batch_update_shots","description":"d","parameters":{"type":"object","properties":{"project_id":{"type":"string"},"updates":{"type":"array","items":{"type":"object","additionalProperties":true}}},"required":["project_id","updates"]}}}])";
+  std::string body = BuildRequestBody("deepseek-v4-flash", opts, {}, true, true);
+  // No strict:true anywhere; original schema passed through verbatim — the
+  // empty items object keeps its original additionalProperties:true.
+  EXPECT_EQ(body.find(R"("strict":true)"), std::string::npos);
+  EXPECT_NE(body.find(R"("items":{"additionalProperties":true,"type":"object"})"),
+            std::string::npos);
+}
+
+// --- RepairToolCallPairing ------------------------------------------------
+
+// Builds an assistant message asking for the given tool_call ids.
+json Asst(const std::vector<std::string>& ids) {
+  json calls = json::array();
+  for (const auto& id : ids) {
+    calls.push_back({{"id", id},
+                     {"type", "function"},
+                     {"function", {{"name", "t"}, {"arguments", "{}"}}}});
+  }
+  return {{"role", "assistant"}, {"content", ""}, {"tool_calls", calls}};
+}
+
+json ToolMsg(const std::string& id) {
+  return {{"role", "tool"}, {"tool_call_id", id}, {"content", "result"}};
+}
+
+// Collects, per assistant tool_calls message, the ids answered by the run of
+// tool messages directly following it -- exactly what the provider checks.
+std::vector<std::pair<std::vector<std::string>, std::vector<std::string>>>
+Pairing(const std::vector<json>& msgs) {
+  std::vector<std::pair<std::vector<std::string>, std::vector<std::string>>> out;
+  for (size_t i = 0; i < msgs.size(); ++i) {
+    if (msgs[i].value("role", "") != "assistant" ||
+        !msgs[i].contains("tool_calls")) {
+      continue;
+    }
+    std::vector<std::string> want, got;
+    for (const auto& c : msgs[i]["tool_calls"]) want.push_back(c.value("id", ""));
+    for (size_t j = i + 1; j < msgs.size(); ++j) {
+      if (msgs[j].value("role", "") != "tool") break;
+      got.push_back(msgs[j].value("tool_call_id", ""));
+    }
+    out.push_back({want, got});
+  }
+  return out;
+}
+
+TEST(RepairToolCallPairingTest, FillsAnUnansweredToolCall) {
+  // The poisoned-session shape: the turn ended after the model asked for a
+  // tool call but before the result came back, then a new user turn followed.
+  std::vector<json> msgs = {
+      {{"role", "user"}, {"content", "a"}},
+      Asst({"c1"}),
+      {{"role", "user"}, {"content", "b"}},
+  };
+  RepairToolCallPairing(&msgs);
+
+  ASSERT_EQ(msgs.size(), 4u);
+  EXPECT_EQ(msgs[2]["role"], "tool");
+  EXPECT_EQ(msgs[2]["tool_call_id"], "c1");
+  // The placeholder must say the call did NOT run — a blank/success-looking
+  // result would have the model act on data it never received.
+  EXPECT_NE(msgs[2]["content"].get<std::string>().find("not executed"),
+            std::string::npos);
+  // The following user turn is preserved, after the inserted result.
+  EXPECT_EQ(msgs[3]["role"], "user");
+  EXPECT_EQ(Pairing(msgs)[0].first, Pairing(msgs)[0].second);
+}
+
+TEST(RepairToolCallPairingTest, FillsOnlyTheMissingHalfOfAPartialAnswer) {
+  // "insufficient tool messages" literally: some ids answered, some not.
+  std::vector<json> msgs = {Asst({"c1", "c2", "c3"}), ToolMsg("c2")};
+  RepairToolCallPairing(&msgs);
+
+  auto p = Pairing(msgs);
+  ASSERT_EQ(p.size(), 1u);
+  EXPECT_EQ(p[0].second, (std::vector<std::string>{"c2", "c1", "c3"}));
+  // The real result is untouched; only the two absent ones are synthesized.
+  EXPECT_EQ(msgs[1]["content"], "result");
+}
+
+TEST(RepairToolCallPairingTest, LeavesAFullyAnsweredHistoryAloneAndIsIdempotent) {
+  const std::vector<json> original = {
+      {{"role", "user"}, {"content", "a"}},
+      Asst({"c1", "c2"}),
+      ToolMsg("c1"),
+      ToolMsg("c2"),
+      {{"role", "assistant"}, {"content", "done"}},
+  };
+  std::vector<json> msgs = original;
+  RepairToolCallPairing(&msgs);
+  EXPECT_EQ(msgs, original);
+  // Running it again must not start stacking placeholders.
+  RepairToolCallPairing(&msgs);
+  EXPECT_EQ(msgs, original);
+}
+
+TEST(RepairToolCallPairingTest, RepairsEveryAssistantTurnNotJustTheFirst) {
+  std::vector<json> msgs = {
+      Asst({"c1"}),
+      {{"role", "user"}, {"content", "b"}},
+      Asst({"c2"}),
+  };
+  RepairToolCallPairing(&msgs);
+
+  auto p = Pairing(msgs);
+  ASSERT_EQ(p.size(), 2u);
+  EXPECT_EQ(p[0].second, (std::vector<std::string>{"c1"}));
+  EXPECT_EQ(p[1].second, (std::vector<std::string>{"c2"}));
+}
+
+TEST(RepairToolCallPairingTest, IgnoresAssistantMessagesWithoutToolCalls) {
+  const std::vector<json> original = {
+      {{"role", "assistant"}, {"content", "just text"}},
+      {{"role", "user"}, {"content", "b"}},
+  };
+  std::vector<json> msgs = original;
+  RepairToolCallPairing(&msgs);
+  EXPECT_EQ(msgs, original);
 }
 
 }  // namespace

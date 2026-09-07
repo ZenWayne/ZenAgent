@@ -25,6 +25,14 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
     text_.append(text_delta);
   }
 
+  // Thinking mode: reasoning_content arrives as its own delta field, parallel
+  // to content. Accumulate it so the canonical assistant message can carry it
+  // back — DeepSeek rejects a follow-up request (with tools) that drops it.
+  if (delta.contains("reasoning_content") &&
+      delta["reasoning_content"].is_string()) {
+    reasoning_.append(delta["reasoning_content"].get<std::string>());
+  }
+
   if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
     for (const auto& tc : delta["tool_calls"]) {
       // Guard: an element of tool_calls that is not an object (stray
@@ -67,6 +75,7 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
 std::string StreamAccumulator::Canonical() const {
   json out = {{"role", "assistant"}};
   out["content"] = json::array({{{"type", "text"}, {"text", text_}}});
+  if (!reasoning_.empty()) out["reasoning_content"] = reasoning_;
 
   if (!calls_.empty()) {
     json arr = json::array();

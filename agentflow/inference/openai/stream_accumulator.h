@@ -35,6 +35,10 @@ class StreamAccumulator {
   };
 
   std::string text_;
+  // Thinking-mode (reasoner) content. DeepSeek requires the previous turn's
+  // reasoning_content to be passed back when the request carries tools;
+  // dropping it makes the next request fail (see guides/thinking_mode).
+  std::string reasoning_;
   // Keyed by the stream's `index` so parallel calls stay separate and ordered.
   std::map<int, PartialCall> calls_;
 };

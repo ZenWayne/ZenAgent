@@ -1,6 +1,9 @@
 // agentflow/inference/openai/message_map.cc
 #include "agentflow/inference/openai/message_map.h"
 
+#include <algorithm>
+#include <functional>
+
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 
@@ -95,6 +98,11 @@ absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
   json msg = {{"role", role.empty() ? "user" : role}};
   msg["content"] = m.contains("content") ? FlattenContent(m["content"])
                                           : std::string{};
+  // Thinking-mode round-trip: DeepSeek v4 requires the previous turn's
+  // reasoning_content to be passed back when that turn emitted tool_calls.
+  if (m.contains("reasoning_content") && m["reasoning_content"].is_string()) {
+    msg["reasoning_content"] = m["reasoning_content"].get<std::string>();
+  }
   if (m.contains("tool_calls") && m["tool_calls"].is_array() &&
       !m["tool_calls"].empty()) {
     json calls = json::array();
@@ -110,10 +118,148 @@ absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
   return out;
 }
 
+void RepairToolCallPairing(std::vector<nlohmann::json>* messages) {
+  if (messages == nullptr) return;
+  // Placeholder for a call whose result never arrived. Shaped like every other
+  // in-band tool failure the agent already feeds back (an {"error": ...}
+  // object), so the model reads it as a failed call rather than as data.
+  static constexpr char kNotExecuted[] =
+      R"({"error":"tool call was not executed: the turn ended before the )"
+      R"(result was produced"})";
+
+  for (size_t i = 0; i < messages->size(); ++i) {
+    const json& m = (*messages)[i];
+    if (!m.is_object() || m.value("role", "") != "assistant") continue;
+    auto calls = m.find("tool_calls");
+    if (calls == m.end() || !calls->is_array() || calls->empty()) continue;
+
+    // The ids this assistant turn asked to have answered, in order.
+    std::vector<std::string> want;
+    for (const auto& c : *calls) {
+      if (c.is_object() && c.contains("id") && c["id"].is_string()) {
+        const auto& id = c["id"].get_ref<const std::string&>();
+        // An empty id cannot be paired with anything; ToOpenAiMessages already
+        // refuses to build a tool result for one, so leave it alone here.
+        if (!id.empty()) want.push_back(id);
+      }
+    }
+
+    // The run of tool messages directly after it is the only place a result
+    // may live — the provider stops looking at the first non-tool message.
+    size_t end = i + 1;
+    std::vector<std::string> answered;
+    while (end < messages->size() && (*messages)[end].is_object() &&
+           (*messages)[end].value("role", "") == "tool") {
+      answered.push_back((*messages)[end].value("tool_call_id", ""));
+      ++end;
+    }
+
+    std::vector<json> missing;
+    for (const auto& id : want) {
+      if (std::find(answered.begin(), answered.end(), id) == answered.end()) {
+        missing.push_back({{"role", "tool"},
+                           {"tool_call_id", id},
+                           {"content", kNotExecuted}});
+      }
+    }
+    if (!missing.empty()) {
+      messages->insert(messages->begin() + end, missing.begin(),
+                       missing.end());
+    }
+    // Skip the whole paired run; ++i then lands on the message after it.
+    i = end + missing.size() - 1;
+  }
+}
+
+// DeepSeek strict-mode normalization — family-specialized tool passing.
+// Per https://api-docs.deepseek.com/zh-cn/guides/tool_calls#strict-模式beta:
+//   every object's properties must ALL be `required` and `additionalProperties
+//   : false`; unsupported keywords (minLength/maxLength/minItems/maxItems)
+//   must be dropped; objects with NO properties cannot be strict at all
+//   (verified against /beta: "An object with no properties is not allowed" —
+//   even inside anyOf, even with additionalProperties:false). The accepted
+//   strategy for such tools is to LEAVE THEM NON-STRICT (schema verbatim):
+//   the beta endpoint accepts a mixed array of strict + non-strict functions
+//   (12 strict + 5 non-strict verified ACCEPTED).
+//
+// Family gate: OTHER model families must never be normalized like this —
+// `strict_tools` only takes effect for the deepseek family (BuildRequestBody).
+json NormalizeStrictSchema(json func) {
+  // Scope: full-recursive check whether ANY object node (at any depth, in any
+  // dict/array value) has type==object but no properties dict. Strict-mode
+  // beta rejects such nodes; tools carrying them fall back to non-strict.
+  auto HasEmptyObject = [](const json& p) -> bool {
+    std::function<bool(const json&)> scan = [&](const json& node) -> bool {
+      if (node.is_array()) {
+        for (const auto& v : node)
+          if (scan(v)) return true;
+        return false;
+      }
+      if (!node.is_object()) return false;
+      if (node.value("type", "") == "object") {
+        const auto& props = node.find("properties");
+        if (props == node.end() || !props->is_object() ||
+            props->empty()) {
+          return true;
+        }
+      }
+      for (const auto& [k, v] : node.items()) {
+        if (scan(v)) return true;
+      }
+      return false;
+    };
+    return scan(p);
+  };
+
+  // Top level: no parameterized properties at all (e.g. list_projects) —
+  // nothing to mark required; stay non-strict.
+  if (func.contains("parameters") && func["parameters"].is_object()) {
+    const auto& params = func["parameters"];
+    bool has_props = params.contains("properties") && params["properties"].is_object() &&
+                     !params["properties"].empty();
+    if (!has_props) return func;
+    // Nested empty object anywhere → this whole function cannot be strict.
+    if (HasEmptyObject(params)) return func;
+  }
+  func["strict"] = true;
+  if (func.contains("parameters") && func["parameters"].is_object()) {
+    std::function<void(json&)> recurse = [&](json& p) -> void {
+      if (!p.is_object()) return;
+      if (p.contains("properties") && p["properties"].is_object()) {
+        std::vector<std::string> req;
+        for (auto& [key, val] : p["properties"].items()) {
+          req.push_back(key);
+          // Delete DeepSeek-unsupported validation keywords from every
+          // property node (strict schema validation rejects them).
+          if (val.is_object()) {
+            for (const char* k : {"minLength", "maxLength", "minItems",
+                                  "maxItems"}) {
+              val.erase(k);
+            }
+            if (val.value("type", "") == "object") recurse(val);
+            if (val.contains("items") && val["items"].is_object()) {
+              recurse(val["items"]);
+            }
+          }
+        }
+        p["required"] = req;
+      }
+      p["additionalProperties"] = false;
+    };
+    recurse(func["parameters"]);
+  }
+  return func;
+}
+
+bool IsDeepSeekFamily(std::string_view model) {
+  // Family gate: deepseek-v4-*, deepseek-chat, deepseek-reasoner...
+  return model.rfind("deepseek", 0) == 0;
+}
+
 std::string BuildRequestBody(std::string_view model,
                               const ChatConversationOptions& opts,
                               const std::vector<nlohmann::json>& messages,
-                              bool stream) {
+                              bool stream, bool strict_tools) {
   json body;
   body["model"] = std::string(model);
   body["messages"] = messages;
@@ -122,6 +268,17 @@ std::string BuildRequestBody(std::string_view model,
 
   json tools = json::parse(opts.tools_json, nullptr, false);
   if (!tools.is_discarded() && tools.is_array() && !tools.empty()) {
+    // Family-specialized: only DeepSeek models get strict-mode tool passing.
+    // Other OpenAI-compatible endpoints pass tools through verbatim — strict
+    // kwargs/additionalProperties constraints are DeepSeek-specific (Beta).
+    if (strict_tools && IsDeepSeekFamily(model)) {
+      for (auto& t : tools) {
+        if (t.is_object() && t.contains("function") &&
+            t["function"].is_object()) {
+          t["function"] = NormalizeStrictSchema(t["function"]);
+        }
+      }
+    }
     body["tools"] = std::move(tools);
   }
   return body.dump();
@@ -154,6 +311,11 @@ absl::StatusOr<std::string> ResponseToCanonical(std::string_view body) {
     text = msg["content"].get<std::string>();
   }
   out["content"] = json::array({{{"type", "text"}, {"text", text}}});
+  // Non-streaming path: preserve thinking-mode reasoning_content too.
+  if (msg.contains("reasoning_content") &&
+      msg["reasoning_content"].is_string()) {
+    out["reasoning_content"] = msg["reasoning_content"].get<std::string>();
+  }
 
   if (msg.contains("tool_calls") && msg["tool_calls"].is_array() &&
       !msg["tool_calls"].empty()) {

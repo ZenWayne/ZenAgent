@@ -32,13 +32,32 @@ std::optional<nlohmann::json> SystemMessage(
 absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
     std::string_view canonical_message_json);
 
+// Restores the tool-call pairing invariant on a conversation history, in place.
+//
+// An assistant message carrying `tool_calls` MUST be followed by one tool
+// message per `tool_call_id`; a provider rejects anything else with
+//   400 An assistant message with 'tool_calls' must be followed by tool
+//       messages responding to each 'tool_call_id'.
+// The assistant message enters history the moment its stream completes, but a
+// turn can end before the results are fed back — the ReAct loop hits max_iter,
+// the client aborts, tool dispatch throws. History then holds an unanswered
+// tool_calls, and since the whole history is resent on every later turn, the
+// SESSION is poisoned, not just the turn that broke: every subsequent message
+// fails the same way until the session is discarded.
+//
+// Missing results are filled with an explicit "not executed" placeholder
+// rather than dropped: the assistant's own text/reasoning stays intact, and
+// the model can see the call never ran instead of silently believing it did.
+// An already-paired history is left untouched, so this is idempotent.
+void RepairToolCallPairing(std::vector<nlohmann::json>* messages);
+
 // Builds the request body. `opts.tools_json` is already the OpenAI tools shape
 // (AgentNode::BuildToolsJson emits it), so it is passed through verbatim; an
 // empty array is omitted entirely.
 std::string BuildRequestBody(std::string_view model,
                               const ChatConversationOptions& opts,
                               const std::vector<nlohmann::json>& messages,
-                              bool stream);
+                              bool stream, bool strict_tools = false);
 
 // Converts a NON-streaming /v1/chat/completions response body into canonical
 // assistant JSON. (The streaming path uses StreamAccumulator instead.)
