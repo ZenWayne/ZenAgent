@@ -30,8 +30,14 @@
 #include <vector>
 
 #include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/read_until.hpp>
+#include <asio/streambuf.hpp>
+#include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
+#include <asio/write.hpp>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -262,6 +268,102 @@ TEST(HttpsClientIntegrationTest, RejectsUnsupportedScheme) {
   auto r = fut.get();
   EXPECT_FALSE(r.ok());
   EXPECT_EQ(r.status().code(), absl::StatusCode::kInvalidArgument);
+}
+
+// --- Local server, no live endpoint needed ---------------------------------
+//
+// Everything above is opt-in and skips by default, so the read loop's own
+// end-of-stream handling had no coverage that actually runs. These do: a
+// one-shot in-process HTTP server on an ephemeral port, over plain http://
+// (the client drives the same object for both schemes and skips the handshake
+// for http, so no TLS setup is needed).
+
+// Serves `response` verbatim to exactly one connection, then closes. Returns
+// the port it is listening on; the coroutine is already accepting by then.
+uint16_t ServeOnce(asio::io_context& io, std::string response) {
+  auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
+      io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+  const uint16_t port = acceptor->local_endpoint().port();
+  asio::co_spawn(io,
+      [acceptor, response = std::move(response)]() -> asio::awaitable<void> {
+        asio::ip::tcp::socket sock =
+            co_await acceptor->async_accept(asio::use_awaitable);
+        asio::streambuf buf;
+        // Read just the request head; the body is irrelevant to these tests.
+        co_await asio::async_read_until(sock, buf, "\r\n\r\n",
+                                        asio::use_awaitable);
+        co_await asio::async_write(sock, asio::buffer(response),
+                                   asio::use_awaitable);
+        // Close WITHOUT a graceful shutdown handshake: this is the "server
+        // hung up" path the framer flush exists for.
+        asio::error_code ignored;
+        sock.close(ignored);
+        co_return;
+      },
+      asio::detached);
+  return port;
+}
+
+std::vector<std::string> CollectSseFrames(const std::string& response,
+                                          absl::Status* out_status) {
+  asio::io_context io;
+  const uint16_t port = ServeOnce(io, response);
+
+  HttpsClientOptions opts;
+  HttpsClient client(io, opts);
+  HttpRequest req;
+  req.url = "http://127.0.0.1:" + std::to_string(port) + "/v1/chat/completions";
+  req.headers = {{"Content-Type", "application/json"}};
+  req.body = "{}";
+
+  std::vector<std::string> frames;
+  SseHandler on_event = [&](std::string_view data) -> asio::awaitable<void> {
+    frames.emplace_back(data);
+    co_return;
+  };
+  CancelSource cancel;
+  auto fut = asio::co_spawn(io,
+      [&]() -> asio::awaitable<absl::Status> {
+        co_return co_await client.PostSse(req, on_event, cancel.Token());
+      },
+      asio::use_future);
+  io.run();
+  *out_status = fut.get();
+  return frames;
+}
+
+TEST(HttpsClientLocalTest, DeliversAFinalFrameTheServerLeftUnterminated) {
+  // The last frame has no terminating blank line and no [DONE]: the server
+  // wrote it and hung up. Before the flush, the read loop simply broke and
+  // this frame -- the model's final token -- was dropped on the floor.
+  const std::string response =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/event-stream\r\n"
+      "\r\n"
+      "data: {\"a\":1}\n\n"
+      "data: {\"b\":2}";
+
+  absl::Status status;
+  auto frames = CollectSseFrames(response, &status);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(frames, (std::vector<std::string>{R"({"a":1})", R"({"b":2})"}));
+}
+
+TEST(HttpsClientLocalTest, DoesNotInventAFrameAfterACleanDoneSignOff) {
+  // Properly terminated and signed off: nothing extra may be delivered, and
+  // trailing bytes after [DONE] are noise, not an event.
+  const std::string response =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/event-stream\r\n"
+      "\r\n"
+      "data: {\"a\":1}\n\n"
+      "data: [DONE]\n\n"
+      ": trailing keep-alive";
+
+  absl::Status status;
+  auto frames = CollectSseFrames(response, &status);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(frames, (std::vector<std::string>{R"({"a":1})"}));
 }
 
 }  // namespace

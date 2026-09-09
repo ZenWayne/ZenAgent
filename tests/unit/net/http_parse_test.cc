@@ -169,5 +169,53 @@ TEST(SseFramerTest, JoinsMultipleDataLinesInOneFrame) {
   EXPECT_EQ(got, (std::vector<std::string>{"line one\nline two"}));
 }
 
+// --- Flush(): the last frame when the peer closes without a blank line ------
+//
+// A well-behaved OpenAI-style server ends every frame with a blank line and
+// signs off with `data: [DONE]`, so Flush() has nothing to do. It matters when
+// the server writes its final frame and closes immediately, omitting the
+// terminating blank line: Feed() is still holding that frame, and the read
+// loop used to just break, dropping the model's last token on the floor.
+//
+// The SSE spec says an event left incomplete at EOF should be discarded, but
+// discarding here loses real content -- and a genuinely truncated payload is
+// harmless downstream (StreamAccumulator parses with allow_exceptions=false
+// and ignores anything that is not JSON).
+
+TEST(SseFramerTest, FlushDeliversAFinalFrameThatHasNoBlankLine) {
+  SseFramer f;
+  EXPECT_TRUE(f.Feed("data: {\"a\":1}").empty());  // held: no blank line yet
+  EXPECT_EQ(f.Flush(), (std::vector<std::string>{R"({"a":1})"}));
+}
+
+TEST(SseFramerTest, FlushIsEmptyWhenEveryFrameWasTerminated) {
+  SseFramer f;
+  auto got = f.Feed("data: {\"a\":1}\n\n");
+  EXPECT_EQ(got, (std::vector<std::string>{R"({"a":1})"}));
+  EXPECT_TRUE(f.Flush().empty());
+}
+
+TEST(SseFramerTest, FlushHonoursTheDoneSentinel) {
+  // An unterminated [DONE] is still the sentinel, not a payload to deliver.
+  SseFramer f;
+  EXPECT_TRUE(f.Feed("data: [DONE]").empty());
+  EXPECT_TRUE(f.Flush().empty());
+  EXPECT_TRUE(f.saw_done());
+}
+
+TEST(SseFramerTest, FlushIgnoresANonDataRemnant) {
+  // A trailing comment or keep-alive is not an event; it must not be delivered.
+  SseFramer f;
+  EXPECT_TRUE(f.Feed(": keep-alive").empty());
+  EXPECT_TRUE(f.Flush().empty());
+}
+
+TEST(SseFramerTest, FlushIsIdempotentAndDrainsTheBuffer) {
+  SseFramer f;
+  f.Feed("data: tail");
+  EXPECT_EQ(f.Flush(), (std::vector<std::string>{"tail"}));
+  EXPECT_TRUE(f.Flush().empty());
+}
+
 }  // namespace
 }  // namespace agentflow::net
