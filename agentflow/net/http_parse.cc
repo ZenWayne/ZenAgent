@@ -175,6 +175,29 @@ absl::StatusOr<std::string> ChunkedDecoder::Feed(std::string_view bytes) {
   return out;
 }
 
+namespace {
+
+// Joins the `data:` lines of ONE frame's field block into its payload.
+// Comments (": ..."), `event:`/`id:`/`retry:` and blank lines are ignored.
+std::string FramePayload(std::string_view frame) {
+  std::string payload;
+  while (!frame.empty()) {
+    auto [line, tail] = SplitOnce(frame, "\n");
+    frame = tail;
+    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+    if (line.empty() || line.front() == ':') continue;  // blank or comment
+    auto [name, value] = SplitOnce(line, ":");
+    if (name != "data") continue;  // ignore event:, id:, retry:
+    // Per the SSE spec a single leading space after the colon is stripped.
+    if (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+    if (!payload.empty()) payload.push_back('\n');
+    payload.append(value);
+  }
+  return payload;
+}
+
+}  // namespace
+
 std::vector<std::string> SseFramer::Feed(std::string_view bytes) {
   buf_.append(bytes);
   std::vector<std::string> out;
@@ -190,20 +213,7 @@ std::vector<std::string> SseFramer::Feed(std::string_view bytes) {
     }
     if (end == std::string::npos) break;
 
-    std::string_view frame(buf_.data(), end);
-    std::string payload;
-    while (!frame.empty()) {
-      auto [line, tail] = SplitOnce(frame, "\n");
-      frame = tail;
-      if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-      if (line.empty() || line.front() == ':') continue;  // blank or comment
-      auto [name, value] = SplitOnce(line, ":");
-      if (name != "data") continue;  // ignore event:, id:, retry:
-      // Per the SSE spec a single leading space after the colon is stripped.
-      if (!value.empty() && value.front() == ' ') value.remove_prefix(1);
-      if (!payload.empty()) payload.push_back('\n');
-      payload.append(value);
-    }
+    std::string payload = FramePayload(std::string_view(buf_.data(), end));
     buf_.erase(0, end + sep_len);
 
     if (payload.empty()) continue;
@@ -213,6 +223,22 @@ std::vector<std::string> SseFramer::Feed(std::string_view bytes) {
     }
     out.push_back(std::move(payload));
   }
+  return out;
+}
+
+std::vector<std::string> SseFramer::Flush() {
+  std::vector<std::string> out;
+  // EOF stands in for the frame-terminating blank line. Parsed through the
+  // same path as Feed, so a remnant that carries no `data:` line (a trailing
+  // comment or keep-alive) yields nothing, exactly as it would mid-stream.
+  std::string payload = FramePayload(buf_);
+  buf_.clear();
+  if (payload.empty()) return out;
+  if (payload == "[DONE]") {
+    saw_done_ = true;
+    return out;
+  }
+  out.push_back(std::move(payload));
   return out;
 }
 

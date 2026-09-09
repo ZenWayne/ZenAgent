@@ -45,6 +45,11 @@ class OpenAiConversation : public IConversation {
     auto incoming = ToOpenAiMessages(message_json);
     if (!incoming.ok()) co_return incoming.status();
     for (auto& m : *incoming) messages_.push_back(std::move(m));
+    // AFTER appending, never before: when `incoming` IS the tool results for
+    // the previous turn's tool_calls, appending first is what lets the repair
+    // see them as answered. Repairing first would insert placeholders ahead of
+    // the real results and answer every call twice.
+    RepairToolCallPairing(&messages_);
 
     net::HttpRequest req;
     req.url = absl::StrCat(opts_.base_url, "/chat/completions");
@@ -58,7 +63,7 @@ class OpenAiConversation : public IConversation {
           {"Authorization", absl::StrCat("Bearer ", opts_.api_key)});
     }
     req.body = BuildRequestBody(opts_.model, conv_opts_, messages_,
-                                 /*stream=*/true);
+                                 /*stream=*/true, opts_.strict_tools);
 
     absl::Status last = absl::UnknownError("no attempt made");
     for (int attempt = 0; attempt < opts_.max_retries; ++attempt) {

@@ -79,6 +79,22 @@ TEST(StreamAccumulatorTest, IgnoresRoleOnlyAndEmptyDeltaFrames) {
   EXPECT_EQ(json::parse(a.Canonical())["content"][0]["text"], "");
 }
 
+TEST(StreamAccumulatorTest, CarriesReasoningContentForThinkingModeRoundTrip) {
+  // DeepSeek v4 thinking mode: delta.reasoning_content arrives alongside
+  // content; the canonical assistant message must carry it back so the next
+  // request can pass it to the API (dropping it makes DeepSeek reply
+  // "The reasoning_content in the thinking mode must be passed back").
+  StreamAccumulator a;
+  a.Feed(R"({"choices":[{"delta":{"reasoning_content":"思考一下，"}}]})");
+  a.Feed(R"({"choices":[{"delta":{"reasoning_content":"直接执行"}}]})");
+  a.Feed(R"({"choices":[{"delta":{"content":"我来改。"}}]})");
+
+  json got = json::parse(a.Canonical());
+  ASSERT_TRUE(got.contains("reasoning_content"));
+  EXPECT_EQ(got["reasoning_content"], "思考一下，直接执行");
+  EXPECT_EQ(got["content"][0]["text"], "我来改。");
+}
+
 TEST(StreamAccumulatorTest, IgnoresMalformedFramesRatherThanThrowing) {
   // A provider emitting a stray keep-alive or truncated frame must not abort
   // a half-finished answer.
