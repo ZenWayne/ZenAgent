@@ -66,6 +66,23 @@ class ChunkedDecoder {
 class SseFramer {
  public:
   std::vector<std::string> Feed(std::string_view bytes);
+
+  // Delivers a final frame left unterminated when the stream ended, and drains
+  // the buffer. Call it once the peer has closed.
+  //
+  // A well-behaved server ends every frame with a blank line and signs off with
+  // `data: [DONE]`, so this returns nothing. It matters for a server that
+  // writes its last frame and closes immediately without the terminating blank
+  // line: Feed() is still holding that frame, and dropping it loses the model's
+  // final token. The SSE spec says to discard an event left incomplete at EOF,
+  // but a truncated payload is harmless to the only consumer here
+  // (StreamAccumulator parses with allow_exceptions=false and ignores non-JSON),
+  // whereas a silently swallowed last token is not.
+  //
+  // Non-data remnants (a trailing comment or keep-alive) are dropped, and an
+  // unterminated "[DONE]" is still the sentinel rather than a payload.
+  std::vector<std::string> Flush();
+
   bool saw_done() const { return saw_done_; }
 
  private:

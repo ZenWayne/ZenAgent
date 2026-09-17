@@ -365,6 +365,19 @@ class HttpsClient::Impl {
       if (auto s = co_await consume(*chunk); !s.ok()) co_return s;
     }
 
+    // The body is over. A server that wrote its last frame and closed without
+    // the terminating blank line leaves that frame sitting in the framer, and
+    // simply breaking out of the loop above would drop the model's final
+    // token. Deliver it.
+    //
+    // Only when [DONE] was never seen: after a clean sign-off anything still
+    // buffered is trailing noise, not an event the caller is waiting for.
+    if (on_event && !framer.saw_done()) {
+      for (const auto& payload : framer.Flush()) {
+        co_await (*on_event)(payload);
+      }
+    }
+
     conn->Close();
     co_return absl::OkStatus();
   }

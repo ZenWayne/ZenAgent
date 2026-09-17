@@ -27,6 +27,13 @@ struct OpenAiOptions {
   // Total attempts, not retries-after-the-first. 1 disables retrying.
   int max_retries = 3;
   std::chrono::milliseconds retry_base_delay{100};
+
+  // DeepSeek strict-mode tool calling (Beta): base_url must point at
+  // ".../beta"; every function in `tools` is emitted with strict:true and a
+  // normalized JSON Schema (all properties required, additionalProperties:
+  // false) so the model emits standard OpenAI tool_calls instead of the
+  // inline-<tool_calls> fallback. No effect on other providers.
+  bool strict_tools = false;
 };
 
 // IChatBackend over an OpenAI-compatible /v1/chat/completions endpoint.

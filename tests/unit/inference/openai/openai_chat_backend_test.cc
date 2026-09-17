@@ -308,5 +308,73 @@ TEST(OpenAiChatBackendTest, ConstrainedToolCallsIsReportedNotSilentlyDropped) {
   EXPECT_TRUE(backend->last_warning().find("constrained") != std::string::npos);
 }
 
+// --- Orphaned tool_calls in conversation history -------------------------
+//
+// Reproduces the "insufficient tool messages following tool_calls message"
+// 400 seen against DeepSeek. A turn can end right after the model asked for
+// tool calls but before their results are fed back -- the ReAct loop hits
+// max_iter, the client aborts, or building the tool message throws. The
+// assistant message carrying tool_calls is ALREADY in history at that point
+// (SendAsync records it the moment the stream completes), so the NEXT user
+// turn resends a history where an assistant tool_calls message is followed
+// directly by a user message. OpenAI-compatible providers reject that:
+//   400 An assistant message with 'tool_calls' must be followed by tool
+//       messages responding to each 'tool_call_id'.
+// The conversation must never emit such a history, however the previous turn
+// ended.
+std::string ToolCallFrame(const std::string& id, const std::string& name) {
+  json f = {{"choices", json::array({{{"delta",
+      {{"tool_calls", json::array({{{"index", 0}, {"id", id}, {"type", "function"},
+        {"function", {{"name", name}, {"arguments", "{}"}}}}})}}}}})}};
+  return f.dump();
+}
+
+TEST(OpenAiChatBackendTest, AbandonedToolCallTurnDoesNotPoisonNextRequest) {
+  asio::io_context io;
+  testing::FakeHttpClient http({
+      {.frames = {ToolCallFrame("call_0", "get_project")}},  // turn 1: tool call
+      {.frames = {TextFrame("done")}},                        // turn 2: next user msg
+  });
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+  CancelSource cancel;
+
+  // Turn 1: the model asks for a tool call. The caller then abandons the turn
+  // (max_iter reached / user aborted) and never feeds a tool result back.
+  auto r1 = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"a"}]})",
+                 io, cancel.Token());
+  ASSERT_TRUE(r1.response.ok());
+  ASSERT_TRUE(json::parse(*r1.response).contains("tool_calls"));
+
+  // Turn 2: a fresh user message on the SAME conversation.
+  auto r2 = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"b"}]})",
+                 io, cancel.Token());
+  ASSERT_TRUE(r2.response.ok());
+
+  // Every assistant tool_call in the sent history must be answered by a tool
+  // message before any non-tool message follows it.
+  ASSERT_EQ(http.requests().size(), 2u);
+  json msgs = json::parse(http.requests()[1].body)["messages"];
+  for (size_t i = 0; i < msgs.size(); ++i) {
+    if (msgs[i].value("role", "") != "assistant" ||
+        !msgs[i].contains("tool_calls")) {
+      continue;
+    }
+    std::vector<std::string> want;
+    for (const auto& tc : msgs[i]["tool_calls"]) {
+      want.push_back(tc.value("id", ""));
+    }
+    std::vector<std::string> got;
+    for (size_t j = i + 1; j < msgs.size(); ++j) {
+      if (msgs[j].value("role", "") != "tool") break;
+      got.push_back(msgs[j].value("tool_call_id", ""));
+    }
+    EXPECT_EQ(got, want)
+        << "assistant message [" << i << "] has " << want.size()
+        << " tool_calls but is followed by " << got.size()
+        << " tool messages; provider rejects this with 400";
+  }
+}
+
 }  // namespace
 }  // namespace agentflow::openai
