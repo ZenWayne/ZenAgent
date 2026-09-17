@@ -19,7 +19,13 @@
 //                               can be verified without hardcoding its path
 //                               here — it's a temporary local artifact, not
 //                               something this file should know about.
-// Both tests below skip unless URL and MODEL are set. Skipped by default.
+// The HttpsClientIntegrationTest cases skip unless URL and MODEL are set, so
+// they are skipped by default. RejectsAServerCertItDoesNotTrust additionally
+// needs AGENTFLOW_TEST_CA_PATH to name a PRIVATE CA (see the test): against a
+// publicly-trusted endpoint there is no untrusted chain for it to reject.
+//
+// The HttpsClientLocalTest cases need no endpoint at all -- they serve their
+// own one-shot HTTP response on an ephemeral port -- so they always run.
 #include "agentflow/net/https_client.h"
 
 #include <chrono>
@@ -194,6 +200,18 @@ TEST(HttpsClientIntegrationTest, RejectsAServerCertItDoesNotTrust) {
     GTEST_SKIP() << "AGENTFLOW_TEST_HTTP_URL is not https://; this test only "
                     "exercises the TLS reject path";
   }
+  // The "wrong anchor" below is the system CA store, which is only actually
+  // wrong when the live endpoint presents a PRIVATE certificate (a local test
+  // proxy). Point this suite at a publicly-trusted endpoint instead -- the
+  // obvious thing to do, e.g. https://api.deepseek.com/v1/chat/completions --
+  // and the system store becomes the RIGHT anchor: the handshake correctly
+  // succeeds and the assertion below inverts into a false alarm announcing
+  // that certificate verification is not enforced, when it demonstrably is.
+  //
+  // So require the explicit signal that the endpoint uses a private CA: an
+  // AGENTFLOW_TEST_CA_PATH that is something OTHER than the system store.
+  // Without it there is no "chain that should not be trusted" to test.
+  const char* private_ca = std::getenv("AGENTFLOW_TEST_CA_PATH");
 
   // The wrong trust anchor is platform-specific: a bundle FILE on desktop, a
   // hashed CA DIRECTORY on Android. Both are real system stores that do NOT
@@ -214,6 +232,13 @@ TEST(HttpsClientIntegrationTest, RejectsAServerCertItDoesNotTrust) {
   }
   if (system_store.empty()) {
     GTEST_SKIP() << "no system CA store found to use as a wrong trust anchor";
+  }
+  if (private_ca == nullptr || system_store == private_ca) {
+    GTEST_SKIP()
+        << "live endpoint is not backed by a private CA (set "
+           "AGENTFLOW_TEST_CA_PATH to the test proxy's own cert); against a "
+           "publicly-trusted endpoint the system store is the CORRECT anchor, "
+           "so there is no untrusted chain to reject here";
   }
 
   asio::io_context io;
