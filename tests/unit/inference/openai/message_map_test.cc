@@ -357,5 +357,23 @@ TEST(RepairToolCallPairingTest, IgnoresAssistantMessagesWithoutToolCalls) {
   EXPECT_EQ(msgs, original);
 }
 
+TEST(ToOpenAiMessagesTest, FinishReasonIsNotSentBackToTheProvider) {
+  // StreamAccumulator now records finish_reason on the canonical assistant
+  // message, and that message is replayed as history on every later turn.
+  // finish_reason is a RESPONSE field -- echoing it back on a request message
+  // is not something the API defines. ToOpenAiMessages builds its outgoing
+  // object field by field, and this pins that finish_reason is not among them.
+  auto out = ToOpenAiMessages(
+      R"({"role":"assistant","content":[{"type":"text","text":"hi"}],)"
+      R"("finish_reason":"length","reasoning_content":"think"})");
+  ASSERT_TRUE(out.ok());
+  ASSERT_EQ(out->size(), 1u);
+  EXPECT_FALSE((*out)[0].contains("finish_reason"));
+  // reasoning_content, by contrast, MUST be echoed back (DeepSeek thinking
+  // mode rejects a follow-up request that drops it).
+  EXPECT_EQ((*out)[0]["reasoning_content"], "think");
+  EXPECT_EQ((*out)[0]["content"], "hi");
+}
+
 }  // namespace
 }  // namespace agentflow::openai

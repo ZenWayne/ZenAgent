@@ -149,5 +149,59 @@ TEST(StreamAccumulatorTest, SkipsToolCallEntriesWithAWrongTypedIndex) {
   EXPECT_EQ(got["tool_calls"][0]["function"]["arguments"], "{}");
 }
 
+// --- finish_reason ---------------------------------------------------------
+//
+// finish_reason lives on the CHOICE, not inside `delta`, and the frame that
+// carries it normally has an empty delta. Carrying it into the canonical
+// message is what lets the caller tell "the model had nothing to say" apart
+// from "the model was cut off at the token limit" -- two very different
+// things that otherwise both surface as an empty assistant turn.
+
+TEST(StreamAccumulatorTest, CarriesFinishReasonFromTheChoice) {
+  StreamAccumulator a;
+  a.Feed(R"({"choices":[{"delta":{"content":"hi"},"finish_reason":null}]})");
+  a.Feed(R"({"choices":[{"delta":{},"finish_reason":"stop"}]})");
+
+  json got = json::parse(a.Canonical());
+  EXPECT_EQ(got["finish_reason"], "stop");
+}
+
+TEST(StreamAccumulatorTest, FinishReasonLengthSurvivesAnEmptyContentTurn) {
+  // The real DeepSeek thinking-mode shape: the whole token budget went to
+  // reasoning, no content was ever emitted, and generation stopped at the
+  // limit. Without finish_reason this is indistinguishable from a model that
+  // simply had nothing to say.
+  StreamAccumulator a;
+  a.Feed(R"({"choices":[{"delta":{"reasoning_content":"We need answer"},)"
+         R"("finish_reason":null}]})");
+  a.Feed(R"({"choices":[{"delta":{},"finish_reason":"length"}]})");
+
+  json got = json::parse(a.Canonical());
+  EXPECT_EQ(got["finish_reason"], "length");
+  EXPECT_EQ(got["content"][0]["text"], "");
+  EXPECT_EQ(got["reasoning_content"], "We need answer");
+}
+
+TEST(StreamAccumulatorTest, NullFinishReasonIsNotRecorded) {
+  // Every non-final chunk carries "finish_reason": null; that must not be
+  // mistaken for a value, and must not overwrite a real one.
+  StreamAccumulator a;
+  a.Feed(R"({"choices":[{"delta":{"content":"a"},"finish_reason":null}]})");
+  json got = json::parse(a.Canonical());
+  EXPECT_FALSE(got.contains("finish_reason"));
+}
+
+TEST(StreamAccumulatorTest, FinishReasonIsReadEvenWithNoDeltaAtAll) {
+  // A provider may send the terminal chunk with no `delta` key whatsoever.
+  // The delta guard must not swallow finish_reason on the way past.
+  StreamAccumulator a;
+  a.Feed(R"({"choices":[{"delta":{"content":"x"}}]})");
+  a.Feed(R"({"choices":[{"finish_reason":"stop"}]})");
+
+  json got = json::parse(a.Canonical());
+  EXPECT_EQ(got["finish_reason"], "stop");
+  EXPECT_EQ(got["content"][0]["text"], "x");
+}
+
 }  // namespace
 }  // namespace agentflow::openai
