@@ -20,9 +20,10 @@
 //                               here — it's a temporary local artifact, not
 //                               something this file should know about.
 // The HttpsClientIntegrationTest cases skip unless URL and MODEL are set, so
-// they are skipped by default. RejectsAServerCertItDoesNotTrust additionally
-// needs AGENTFLOW_TEST_CA_PATH to name a PRIVATE CA (see the test): against a
-// publicly-trusted endpoint there is no untrusted chain for it to reject.
+// they are skipped by default. They work against ANY OpenAI-compatible https
+// endpoint, publicly-trusted or a private test proxy -- including the TLS
+// reject case, which anchors on a CA that signed nothing rather than assuming
+// anything about the endpoint's own issuer.
 //
 // The HttpsClientLocalTest cases need no endpoint at all -- they serve their
 // own one-shot HTTP response on an ephemeral port -- so they always run.
@@ -31,6 +32,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
@@ -80,6 +82,49 @@ std::optional<LiveEndpoint> GetLiveEndpoint() {
 std::string GetCaPath() {
   if (const char* ca = std::getenv("AGENTFLOW_TEST_CA_PATH")) return ca;
   return "/etc/ssl/certs/ca-certificates.crt";
+}
+
+// A trust anchor that is wrong for EVERY endpoint: a self-signed CA that
+// signed nothing, so no real chain can verify against it. Embedded rather
+// than generated at runtime so the test needs no openssl, and it is a public
+// certificate only -- there is no private key here. Valid until 2126.
+constexpr char kUnrelatedCaPem[] = R"PEM(
+-----BEGIN CERTIFICATE-----
+MIIDLzCCAhegAwIBAgIUN5LbqQldyiDBcZBKPTifXhtUwvIwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbYWdlbnRmbG93LXRlc3QtdW5yZWxhdGVkLWNhMCAXDTI2
+MDkxNzA0MDAxMVoYDzIxMjYwODI0MDQwMDExWjAmMSQwIgYDVQQDDBthZ2VudGZs
+b3ctdGVzdC11bnJlbGF0ZWQtY2EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK
+AoIBAQCZR+Zn+HpdQ41EcyER0K5OYX5CfHeUqwlrb5Q4hh9cPvJcNiNjZuECSLTX
+cJUx5nSVCMuj4cge05PgSqRCx+TXAIB4jO6UpudwgtMH7bX4QijvSTZCSCq7wMJz
+K8IVarF0XVEoNOUxeoEcXK1SwW917ynkDFVEIlodLwDIIJrGVf9N7iGDHytvfah2
+9aUOpqRNgq3hHD1ZHO5blEeHxmLDpopuvvW7v3oJcjxR8F2cZxyXpPaHyXeQa0iH
+emgb68idtmRiJ+Gmfg1OwpbSB5MWkQDYL2YHw7py7yCdfldGYRW+veV7LMMRSo50
+X+n5uUWb/TN2afn8xqjfw64YS/cDAgMBAAGjUzBRMB0GA1UdDgQWBBT+uXuCUCav
+R2DbcTuAxmhuuwGXBzAfBgNVHSMEGDAWgBT+uXuCUCavR2DbcTuAxmhuuwGXBzAP
+BgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQAzbiMOVDrf1ACkUnmM
+pJO4LcQZZcwFNkrqobzak5D8eRZfUxg68rAtWrngXWJq80v/8chYspqgkEmDw8h8
+/rMQ+Sr+BNZH/anzyr2LvSaFM+QHfp8ad98jw0VuUxxCDBT0ZSm2Pm7GKKV/E0oc
+NbIkKjeNf+y3z2dfQrOuxJXIe44ImXVu65mKdcP3qftX2tf0IwA1AX+J9LGd0Vbv
+WsOXtA569JnXezzGpxVGrU4FAoegVPmNosLl1H2mhgg94yX+mUCJd3GVNuDuS33y
+a2x4HMSdBO4Vq4ngUu6KfF/jnBZcDMHdJUSZ/NgUqCcb8d8x3qmaHwq9niESgGos
+Adr5
+-----END CERTIFICATE-----
+)PEM";
+
+// Materializes kUnrelatedCaPem on disk (ca_path is a path, not a blob) and
+// returns it. TEST_TMPDIR is bazel's per-test scratch dir.
+std::string WriteUnrelatedCa() {
+  std::filesystem::path dir;
+  if (const char* t = std::getenv("TEST_TMPDIR")) {
+    dir = t;
+  } else {
+    dir = std::filesystem::temp_directory_path();
+  }
+  const std::filesystem::path path = dir / "agentflow_unrelated_ca.pem";
+  std::ofstream out(path);
+  out << kUnrelatedCaPem;
+  out.close();
+  return path.string();
 }
 
 HttpRequest BuildChatRequest(const LiveEndpoint& ep, bool stream) {
@@ -183,12 +228,20 @@ TEST(HttpsClientIntegrationTest, PostSseDeliversFrames) {
 }
 
 TEST(HttpsClientIntegrationTest, RejectsAServerCertItDoesNotTrust) {
-  // Same live TLS endpoint as the accept-path tests above, but with the
-  // system CA bundle as the trust anchor instead of the proxy's self-signed
-  // cert. The handshake MUST fail. This is the property that actually
-  // distinguishes "verification is configured" from "verification rejects":
-  // a client that silently accepted any certificate chain would pass the
-  // accept-path tests identically and only get caught here.
+  // The accept-path tests above would pass identically against a client that
+  // silently accepted ANY certificate chain. This is the case that catches
+  // that: the same live endpoint, anchored on a CA that signed nothing.
+  //
+  // The anchor has to be wrong for EVERY endpoint, not merely some. An earlier
+  // version used the system CA store, which is only the "wrong" anchor when the
+  // endpoint presents a private certificate (a local TLS-terminating test
+  // proxy). Point the suite at a publicly-trusted endpoint instead -- the
+  // obvious thing to do, e.g. https://api.deepseek.com/v1/chat/completions --
+  // and the system store becomes the RIGHT anchor: the handshake correctly
+  // succeeds and the assertion below inverts into a false alarm announcing
+  // that verification is not enforced, when it demonstrably is. An unrelated
+  // self-signed CA is wrong for the public endpoint and the private proxy
+  // alike, so this runs wherever a live https endpoint is configured.
   auto ep = GetLiveEndpoint();
   if (!ep) {
     GTEST_SKIP() << "AGENTFLOW_TEST_HTTP_URL / AGENTFLOW_TEST_HTTP_MODEL not "
@@ -200,53 +253,10 @@ TEST(HttpsClientIntegrationTest, RejectsAServerCertItDoesNotTrust) {
     GTEST_SKIP() << "AGENTFLOW_TEST_HTTP_URL is not https://; this test only "
                     "exercises the TLS reject path";
   }
-  // The "wrong anchor" below is the system CA store, which is only actually
-  // wrong when the live endpoint presents a PRIVATE certificate (a local test
-  // proxy). Point this suite at a publicly-trusted endpoint instead -- the
-  // obvious thing to do, e.g. https://api.deepseek.com/v1/chat/completions --
-  // and the system store becomes the RIGHT anchor: the handshake correctly
-  // succeeds and the assertion below inverts into a false alarm announcing
-  // that certificate verification is not enforced, when it demonstrably is.
-  //
-  // So require the explicit signal that the endpoint uses a private CA: an
-  // AGENTFLOW_TEST_CA_PATH that is something OTHER than the system store.
-  // Without it there is no "chain that should not be trusted" to test.
-  const char* private_ca = std::getenv("AGENTFLOW_TEST_CA_PATH");
-
-  // The wrong trust anchor is platform-specific: a bundle FILE on desktop, a
-  // hashed CA DIRECTORY on Android. Both are real system stores that do NOT
-  // contain the test proxy's self-signed cert, so either works as the "should
-  // be rejected" anchor — and covering Android matters most, because that is
-  // where the client is least otherwise exercised.
-  static constexpr const char* kCandidateSystemStores[] = {
-      "/etc/ssl/certs/ca-certificates.crt",     // desktop Linux bundle
-      "/system/etc/security/cacerts",           // Android hashed CA dir
-      "/apex/com.android.conscrypt/cacerts",    // Android 10+ Conscrypt store
-  };
-  std::string system_store;
-  for (const char* candidate : kCandidateSystemStores) {
-    if (std::filesystem::exists(candidate)) {
-      system_store = candidate;
-      break;
-    }
-  }
-  if (system_store.empty()) {
-    GTEST_SKIP() << "no system CA store found to use as a wrong trust anchor";
-  }
-  if (private_ca == nullptr || system_store == private_ca) {
-    GTEST_SKIP()
-        << "live endpoint is not backed by a private CA (set "
-           "AGENTFLOW_TEST_CA_PATH to the test proxy's own cert); against a "
-           "publicly-trusted endpoint the system store is the CORRECT anchor, "
-           "so there is no untrusted chain to reject here";
-  }
 
   asio::io_context io;
   HttpsClientOptions opts;
-  // Deliberately the WRONG trust anchor: a real system store, which does not
-  // contain the test proxy's self-signed cert (unlike AGENTFLOW_TEST_CA_PATH,
-  // used by the accept-path tests above), so verification must fail.
-  opts.ca_path = system_store;
+  opts.ca_path = WriteUnrelatedCa();  // deliberately the WRONG trust anchor
   opts.read_timeout = std::chrono::milliseconds(120'000);
   HttpsClient client(io, opts);
 
@@ -262,16 +272,19 @@ TEST(HttpsClientIntegrationTest, RejectsAServerCertItDoesNotTrust) {
 
   auto result = fut.get();
   // Not asserting a specific status code or message: TLS failures surface
-  // differently across OpenSSL/BoringSSL versions, which would make a
-  // tighter assertion brittle. The property that matters is that the call
-  // does NOT succeed. That the endpoint itself is reachable is established
-  // by the accept-path tests running in the same suite/run, so a failure
-  // here can only be attributed to certificate verification rejecting the
-  // chain, not to the endpoint being unreachable.
-  EXPECT_FALSE(result.ok())
-      << "handshake succeeded against a certificate chain that should NOT "
-         "be trusted — certificate verification is not actually being "
-         "enforced";
+  // differently across OpenSSL/BoringSSL versions, which would make a tighter
+  // assertion brittle. The property that matters is that the call does NOT
+  // succeed. That the endpoint itself is reachable is established by the
+  // accept-path tests in the same run.
+  ASSERT_FALSE(result.ok())
+      << "handshake succeeded against a chain anchored on a CA that signed "
+         "nothing — certificate verification is not actually being enforced";
+  // ...but it must have failed AT VERIFICATION, not because the anchor file
+  // was unreadable. That would fail the call for the wrong reason and let a
+  // client with verification disabled sail through this test.
+  EXPECT_EQ(std::string(result.status().message()).find("cannot load ca_path"),
+            std::string::npos)
+      << "failed before verification even ran: " << result.status().message();
 }
 
 TEST(HttpsClientIntegrationTest, RejectsUnsupportedScheme) {
