@@ -16,6 +16,16 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
     return {};
   }
   const json& choice = f["choices"][0];
+  if (!choice.is_object()) return {};
+
+  // finish_reason hangs off the CHOICE, not the delta, and the chunk carrying
+  // it usually has an empty delta -- or, from some providers, no delta key at
+  // all. Read it BEFORE the delta guard below, or that guard swallows it.
+  // is_string() also screens out the null every non-final chunk sends.
+  if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
+    finish_reason_ = choice["finish_reason"].get<std::string>();
+  }
+
   if (!choice.contains("delta") || !choice["delta"].is_object()) return {};
   const json& delta = choice["delta"];
 
@@ -23,6 +33,14 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
   if (delta.contains("content") && delta["content"].is_string()) {
     text_delta = delta["content"].get<std::string>();
     text_.append(text_delta);
+  }
+
+  // Thinking mode: reasoning_content arrives as its own delta field, parallel
+  // to content. Accumulate it so the canonical assistant message can carry it
+  // back — DeepSeek rejects a follow-up request (with tools) that drops it.
+  if (delta.contains("reasoning_content") &&
+      delta["reasoning_content"].is_string()) {
+    reasoning_.append(delta["reasoning_content"].get<std::string>());
   }
 
   if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
@@ -67,6 +85,8 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
 std::string StreamAccumulator::Canonical() const {
   json out = {{"role", "assistant"}};
   out["content"] = json::array({{{"type", "text"}, {"text", text_}}});
+  if (!reasoning_.empty()) out["reasoning_content"] = reasoning_;
+  if (!finish_reason_.empty()) out["finish_reason"] = finish_reason_;
 
   if (!calls_.empty()) {
     json arr = json::array();

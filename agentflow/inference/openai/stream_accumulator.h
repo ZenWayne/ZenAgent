@@ -35,6 +35,17 @@ class StreamAccumulator {
   };
 
   std::string text_;
+  // choices[0].finish_reason: "stop" | "length" | "tool_calls" |
+  // "content_filter". Carried into the canonical message because it is the
+  // only thing that distinguishes "the model had nothing to say" from "the
+  // model was cut off at the token limit" -- both otherwise arrive as an
+  // empty assistant turn. Every non-final chunk sends it as null, which is
+  // NOT a value and must never overwrite a real one.
+  std::string finish_reason_;
+  // Thinking-mode (reasoner) content. DeepSeek requires the previous turn's
+  // reasoning_content to be passed back when the request carries tools;
+  // dropping it makes the next request fail (see guides/thinking_mode).
+  std::string reasoning_;
   // Keyed by the stream's `index` so parallel calls stay separate and ordered.
   std::map<int, PartialCall> calls_;
 };
