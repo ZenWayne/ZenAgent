@@ -1,16 +1,20 @@
 #ifndef AGENTFLOW_WORKFLOW_WORKFLOW_RUNNER_H_
 #define AGENTFLOW_WORKFLOW_WORKFLOW_RUNNER_H_
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
+#include <unordered_map>
 
 #include "agentflow/core/event.h"
 #include "agentflow/core/token_channel.h"
 #include "agentflow/inference/chat_backend.h"
 #include "agentflow/nodes/agent_node.h"
 #include "agentflow/tools/tool_registry.h"
+#include "agentflow/tools/gated_tool.h"
 #include "agentflow/workflow/workflow.h"
 
 namespace asio { class io_context; }
@@ -22,6 +26,11 @@ struct AgentNodeBuildSpec {
   std::shared_ptr<Workflow> workflow;
   std::string agent_name;                       // which agent in the spec
   std::shared_ptr<ToolRegistry> host_tools;     // shared with caller
+  std::unordered_map<std::string, ToolTier> tool_tiers;
+  std::shared_ptr<ToolInvocationGate> tool_gate;
+  bool fail_closed_confirm = false;
+  std::function<void(std::string_view, const ToolInvocationContext&,
+                     std::string_view, std::string_view)> tool_event;
 
   // Default inference backend, used by any agent whose ModelSpec.backend is
   // empty.

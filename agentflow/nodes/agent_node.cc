@@ -37,9 +37,11 @@ std::string AgentNode::BuildSystemMessageJson() const {
 }
 
 std::string AgentNode::BuildToolsJson() const {
-  if (!cfg_.tool_registry && cfg_.extra_tools.empty()) return "[]";
+  if (!cfg_.tool_registry && !cfg_.tool_view && cfg_.extra_tools.empty()) return "[]";
   json arr;
-  if (cfg_.tool_registry) {
+  if (cfg_.tool_view) {
+    arr = json::parse(cfg_.tool_view->ExportToolsJson());
+  } else if (cfg_.tool_registry) {
     arr = json::parse(cfg_.tool_registry->ExportToolsJson(cfg_.tool_names));
   } else {
     arr = json::array();
@@ -276,12 +278,16 @@ asio::awaitable<std::string> AgentNode::DispatchTool(
       co_return result;
     }
   }
-  if (!cfg_.tool_registry) co_return std::string{};
+  if (!cfg_.tool_registry && !cfg_.tool_view) co_return std::string{};
 
   emit.EmitToolCall(Id(), name, args, call_id);
   std::string result;
   try {
-    result = co_await cfg_.tool_registry->Invoke(name, args, call_id, cancel);
+    if (cfg_.tool_view) {
+      result = co_await cfg_.tool_view->Invoke(name, args, call_id, cancel);
+    } else {
+      result = co_await cfg_.tool_registry->Invoke(name, args, call_id, cancel);
+    }
   } catch (const std::exception& e) {
     result = std::string("Tool error: ") + e.what();
   }

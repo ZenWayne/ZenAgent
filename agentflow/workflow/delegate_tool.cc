@@ -68,6 +68,9 @@ std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
     }
 
     SubAgentContext sub_ctx = ctx;
+    // The gate and policy in ctx are inherited, while cancellation belongs to
+    // this concrete delegate invocation and must also cancel a pending gate.
+    sub_ctx.parent_cancel = &cancel;
 
     // Per-invocation token stream: one fresh channel per delegate call (so
     // concurrent/sequential sub-agents never share a channel). A drain

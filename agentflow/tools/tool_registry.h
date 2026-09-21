@@ -87,6 +87,11 @@ class ToolRegistry {
   // True iff a tool with the given name is currently registered.
   bool Has(std::string_view name) const;
 
+  // Returns the shared underlying tool without decorating it.  Callers that
+  // need per-invocation policy must wrap this result rather than registering a
+  // wrapper back into the registry.
+  std::shared_ptr<Tool> Find(std::string_view name) const;
+
   // OpenAI-compatible tools JSON array. Empty span → all registered tools.
   std::string ExportToolsJson(
       std::span<const std::string> tool_names) const;

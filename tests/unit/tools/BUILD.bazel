@@ -2,6 +2,18 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
 
 cc_test(
+    name = "gated_tool_test",
+    size = "small",
+    srcs = ["gated_tool_test.cc"],
+    deps = [
+        "//agentflow/tools",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "native_fn_tool_test",
     size = "small",
     srcs = ["native_fn_tool_test.cc"],

@@ -60,6 +60,12 @@ bool ToolRegistry::Has(std::string_view name) const {
   return tools_.find(std::string(name)) != tools_.end();
 }
 
+std::shared_ptr<Tool> ToolRegistry::Find(std::string_view name) const {
+  std::lock_guard<std::mutex> lk(mu_);
+  auto it = tools_.find(std::string(name));
+  return it == tools_.end() ? nullptr : it->second;
+}
+
 bool ToolRegistry::TryRegisterIfAbsent(std::shared_ptr<Tool> tool) {
   std::lock_guard<std::mutex> lk(mu_);
   const auto& name = tool->Schema().name;

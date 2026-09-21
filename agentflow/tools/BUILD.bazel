@@ -11,6 +11,8 @@ cc_library(
         "mcp_http_codec.cc",
         "mcp_tool_adapter.cc",
         "native_fn_tool.cc",
+        "gated_tool.cc",
+        "invocation_tool_view.cc",
         "tool_registry.cc",
     ],
     hdrs = [
@@ -19,6 +21,8 @@ cc_library(
         "mcp_http_codec.h",
         "mcp_tool_adapter.h",
         "native_fn_tool.h",
+        "gated_tool.h",
+        "invocation_tool_view.h",
         "tool.h",
         "tool_registry.h",
     ],

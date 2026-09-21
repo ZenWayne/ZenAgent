@@ -64,6 +64,24 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
   cfg.tool_names.clear();
   cfg.tool_names.reserve(agent_def.tools_size());
   for (const auto& t : agent_def.tools()) cfg.tool_names.push_back(t);
+  if (spec.fail_closed_confirm && !spec.tool_gate) {
+    // Validate the whole workflow because any listed child may later be
+    // reached through delegate, not merely the top-level agent being built.
+    for (const auto& [agent_name, def] : agents) {
+      for (const auto& name : def.tools()) {
+        auto tier = spec.tool_tiers.find(name);
+        if (tier != spec.tool_tiers.end() && tier->second == ToolTier::kConfirm) {
+          throw AgentflowError("confirm tool requires ToolInvocationGate: " + name);
+        }
+      }
+    }
+  }
+  ToolInvocationContext top_context;
+  top_context.caller = spec.agent_name;
+  top_context.event = spec.tool_event;
+  cfg.tool_view = std::make_shared<InvocationToolView>(
+      *spec.host_tools, cfg.tool_names, spec.tool_tiers, std::move(top_context),
+      spec.tool_gate);
 
   // Auto-wire the delegate tool if this agent delegates.
   if (agent_def.has_delegates() && cfg.backend && spec.io_ctx) {
@@ -91,6 +109,9 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
 
     SubAgentContext sub_ctx;  // depth 0 at top level
     sub_ctx.root_invocation_id.clear();
+    sub_ctx.gate = spec.tool_gate;
+    sub_ctx.tool_tiers = spec.tool_tiers;
+    sub_ctx.tool_event = spec.tool_event;
 
     auto delegate = MakeDelegateTool(runtime, spec.agent_name,
                                        std::move(allowed), sub_ctx,
