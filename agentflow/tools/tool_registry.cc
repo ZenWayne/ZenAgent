@@ -75,17 +75,25 @@ bool ToolRegistry::TryRegisterIfAbsent(std::shared_ptr<Tool> tool) {
 }
 
 asio::awaitable<absl::Status> ToolRegistry::AttachMcpServer(
-    proto::McpServerSpec spec) {
+    const proto::McpServerSpec& spec,
+    std::span<const std::string> include_tools,
+    std::span<const std::string> exclude_tools) {
   if (pool_ == nullptr) {
     co_return absl::FailedPreconditionError(
         "AttachMcpServer requires the io_context-aware ToolRegistry ctor");
   }
 
-  // Snapshot policy fields before std::move'ing the spec into the pool.
-  const std::unordered_set<std::string> include_set(
-      spec.include_tools().begin(), spec.include_tools().end());
-  const std::unordered_set<std::string> exclude_set(
-      spec.exclude_tools().begin(), spec.exclude_tools().end());
+  // Snapshot policy fields before the asynchronous client uses `spec`.
+  const std::unordered_set<std::string> include_set = include_tools.empty()
+      ? std::unordered_set<std::string>(spec.include_tools().begin(),
+                                        spec.include_tools().end())
+      : std::unordered_set<std::string>(include_tools.begin(),
+                                        include_tools.end());
+  const std::unordered_set<std::string> exclude_set = exclude_tools.empty()
+      ? std::unordered_set<std::string>(spec.exclude_tools().begin(),
+                                        spec.exclude_tools().end())
+      : std::unordered_set<std::string>(exclude_tools.begin(),
+                                        exclude_tools.end());
   const auto timeout = std::chrono::milliseconds(spec.call_timeout_ms());
   const bool lazy = spec.lazy_start();
 
