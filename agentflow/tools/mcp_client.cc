@@ -76,9 +76,14 @@ ToolSchema ToolSchemaFromMcp(const json& tool) {
 class McpClient::Impl
     : public std::enable_shared_from_this<McpClient::Impl> {
  public:
-  Impl(proto::McpServerSpec spec, asio::io_context& io,
+  Impl(const proto::McpServerSpec& spec, asio::io_context& io,
        std::shared_ptr<net::IHttpClient> http = nullptr)
-      : spec_(std::move(spec)), io_(io), http_(std::move(http)) {}
+      // Copy rather than move: authenticated requests populate the protobuf
+      // map field in `headers`.  Some supported protobuf runtimes fault while
+      // moving that map into a long-lived client.  The client must own a
+      // snapshot anyway, so a copy is both the correct ownership boundary and
+      // avoids that unsafe move path.
+      : spec_(spec), io_(io), http_(std::move(http)) {}
 
   ~Impl() { ShutdownInternal(); }
 
@@ -639,19 +644,19 @@ class McpClient::Impl
 
 // ── McpClient facade ─────────────────────────────────────────────────────────
 
-std::shared_ptr<McpClient> McpClient::Create(proto::McpServerSpec spec,
+std::shared_ptr<McpClient> McpClient::Create(const proto::McpServerSpec& spec,
                                              asio::io_context& io) {
   // Impl must be shared so enable_shared_from_this works (Connect() spawns
   // a detached ReadLoop coroutine and SendRequest registers an OnCancel
   // callback, both of which capture shared_from_this()).
-  auto impl = std::make_shared<Impl>(std::move(spec), io);
+  auto impl = std::make_shared<Impl>(spec, io);
   return std::shared_ptr<McpClient>(new McpClient(std::move(impl)));
 }
 
 std::shared_ptr<McpClient> McpClient::Create(
-    proto::McpServerSpec spec, asio::io_context& io,
+    const proto::McpServerSpec& spec, asio::io_context& io,
     std::shared_ptr<net::IHttpClient> http) {
-  auto impl = std::make_shared<Impl>(std::move(spec), io, std::move(http));
+  auto impl = std::make_shared<Impl>(spec, io, std::move(http));
   return std::shared_ptr<McpClient>(new McpClient(std::move(impl)));
 }
 
