@@ -73,7 +73,8 @@ class FakeMcpClient : public mcp::IMcpClient {
 
   asio::awaitable<absl::StatusOr<std::string>> CallTool(
       std::string_view name, std::string_view args_json,
-      const CancelToken& /*cancel*/) override {
+      const CancelToken& /*cancel*/,
+      const mcp::McpCallContext& /*context*/ = {}) override {
     ++call_calls;
     if (call_delay > std::chrono::milliseconds{0}) {
       asio::steady_timer t(io_, call_delay);

@@ -145,7 +145,7 @@ class McpClient::Impl
 
   asio::awaitable<absl::StatusOr<std::string>> CallTool(
       std::string_view name, std::string_view args_json,
-      const CancelToken& cancel) {
+      const CancelToken& cancel, const McpCallContext& context) {
     if (auto s = co_await EnsureReady(); !s.ok()) co_return s;
 
     json arguments = json::object();
@@ -159,12 +159,17 @@ class McpClient::Impl
     }
     json params = {{"name", std::string(name)}, {"arguments", arguments}};
 
-    auto result = co_await SendRequest("tools/call", std::move(params), cancel);
+    auto result = co_await SendRequest("tools/call", std::move(params), cancel,
+                                       context);
     if (!result.ok()) co_return result.status();
     co_return result->dump();
   }
 
   void Shutdown() { ShutdownInternal(/*permanent=*/true); }
+
+  void SetInboundEventHandler(InboundEventHandler handler) {
+    inbound_event_handler_ = std::move(handler);
+  }
 
  private:
   // ── connection state ──────────────────────────────────────────────────────
@@ -328,7 +333,8 @@ class McpClient::Impl
   // empty 202 body. Captures a newly assigned session id as a side effect.
   asio::awaitable<absl::StatusOr<json>> PostRpc(std::string method, json params,
                                                 bool is_notification,
-                                                const CancelToken& cancel) {
+                                                const CancelToken& cancel,
+                                                const McpCallContext& context = {}) {
     json msg = {{"jsonrpc", kJsonRpc}, {"method", std::move(method)}};
     if (!params.is_null()) msg["params"] = std::move(params);
     int64_t request_id = 0;
@@ -354,6 +360,20 @@ class McpClient::Impl
         it->second = v;
       } else {
         req.headers.emplace_back(k, v);
+      }
+    }
+    // Session metadata is a generic trusted transport capability.  The
+    // invocation view decides whether a call receives it; this MCP transport
+    // deliberately does not know individual tool names.  It never becomes
+    // model-visible arguments or an MCP schema field.
+    if (msg["method"] == "tools/call" && !context.session_id.empty()) {
+      req.headers.emplace_back("X-Zen-Chat-Session-Id", context.session_id);
+      // This credential authenticates the otherwise opaque session id as
+      // gateway metadata.  It is intentionally an environment-only value:
+      // MCP tool schemas and model-visible arguments must never contain it.
+      if (const char* token = std::getenv("ZEN_MCP_METADATA_TOKEN");
+          token != nullptr && *token != '\0') {
+        req.headers.emplace_back("X-Zen-Metadata-Token", token);
       }
     }
 
@@ -442,13 +462,14 @@ class McpClient::Impl
   // ── JSON-RPC framing ──────────────────────────────────────────────────────
 
   asio::awaitable<absl::StatusOr<json>> SendRequest(
-      std::string method, json params, const CancelToken& cancel) {
+      std::string method, json params, const CancelToken& cancel,
+      const McpCallContext& context = {}) {
     if (state_ != State::kReady) {
       co_return absl::FailedPreconditionError("MCP client not connected");
     }
     if (IsHttp()) {
       co_return co_await PostRpc(std::move(method), std::move(params),
-                                 /*is_notification=*/false, cancel);
+                                 /*is_notification=*/false, cancel, context);
     }
     const int64_t id = next_id_++;
     auto ch = std::make_shared<RespChannel>(io_, 1);
@@ -566,7 +587,17 @@ class McpClient::Impl
 
   void DispatchInbound(const json& msg) {
     if (!msg.contains("id") || msg["id"].is_null()) {
-      // Notification — we currently ignore server-initiated notifications.
+      // Forward any bounded, well-formed MCP notification.  The embedding
+      // application decides which event methods it subscribes to; the MCP
+      // transport must not know an application's tool or resource names.
+      if (inbound_event_handler_ && msg.contains("method") &&
+          msg["method"].is_string() && msg.contains("params") &&
+          msg["params"].is_object()) {
+        const std::string method = msg["method"].get<std::string>();
+        const std::string params = msg["params"].dump();
+        if (!method.empty() && method.size() <= 256 && params.size() <= 8192)
+          inbound_event_handler_(method, params);
+      }
       return;
     }
     int64_t id = 0;
@@ -640,6 +671,7 @@ class McpClient::Impl
   std::deque<std::string> write_queue_;
   bool write_active_ = false;
   bool shutdown_ = false;
+  InboundEventHandler inbound_event_handler_;
 };
 
 // ── McpClient facade ─────────────────────────────────────────────────────────
@@ -671,9 +703,12 @@ asio::awaitable<absl::StatusOr<std::vector<ToolSchema>>> McpClient::ListTools() 
 }
 asio::awaitable<absl::StatusOr<std::string>> McpClient::CallTool(
     std::string_view name, std::string_view args_json,
-    const CancelToken& cancel) {
-  return impl_->CallTool(name, args_json, cancel);
+    const CancelToken& cancel, const McpCallContext& context) {
+  return impl_->CallTool(name, args_json, cancel, context);
 }
 void McpClient::Shutdown() { impl_->Shutdown(); }
+void McpClient::SetInboundEventHandler(InboundEventHandler handler) {
+  impl_->SetInboundEventHandler(std::move(handler));
+}
 
 }  // namespace agentflow::mcp

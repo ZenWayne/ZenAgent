@@ -19,6 +19,9 @@ struct ToolInvocationContext {
   std::string root_invocation_id;
   std::string caller;
   uint32_t delegate_depth = 0;
+  // Server-issued callback capability for asynchronous MCP work.  This never
+  // enters the model schema or arguments JSON.
+  std::string session_id;
   // Lifecycle callbacks deliberately contain no result payload.
   std::function<void(std::string_view phase, const ToolInvocationContext&,
                      std::string_view tool_name, std::string_view call_id)> event;

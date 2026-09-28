@@ -1,5 +1,7 @@
 #include "agentflow/tools/invocation_tool_view.h"
 
+#include "agentflow/tools/mcp_tool_adapter.h"
+
 #include <nlohmann/json.hpp>
 
 namespace agentflow {
@@ -10,6 +12,14 @@ InvocationToolView::InvocationToolView(
   for (const auto& name : declared_tools) {
     auto inner = registry.Find(name);
     if (!inner) continue;
+    // MCP adapters in a registry are shared by identity. Clone only the
+    // lightweight adapter when this invocation has callback routing metadata;
+    // mutating the shared adapter would cross-wire simultaneous sessions.
+    if (!context.session_id.empty()) {
+      if (auto mcp = std::dynamic_pointer_cast<mcp::McpToolAdapter>(inner)) {
+        inner = mcp->WithCallContext(mcp::McpCallContext{context.session_id});
+      }
+    }
     const auto it = tiers.find(name);
     const ToolTier tier = it == tiers.end() ? ToolTier::kReadonly : it->second;
     // Blocked tools are absent even from the schema surface.

@@ -3,6 +3,7 @@
 #define AGENTFLOW_TOOLS_MCP_CLIENT_H_
 
 #include <memory>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,6 +20,19 @@
 namespace agentflow::net { class IHttpClient; }
 
 namespace agentflow::mcp {
+
+// Trusted invocation metadata.  It is deliberately separate from the JSON
+// arguments produced by the model: an LLM must never be able to select the
+// session that receives an asynchronous completion callback.
+struct McpCallContext {
+  std::string session_id;
+};
+
+// Normalized server-initiated JSON-RPC notification. The callback runs on the
+// client's io_context; consumers must still authenticate/validate before
+// resuming a session.
+using InboundEventHandler = std::function<void(std::string_view method,
+                                               std::string_view params_json)>;
 
 // Abstract MCP client surface. The seam between the chosen client impl
 // (currently the in-house McpClient below; gopher-mcp or another lib could
@@ -46,7 +60,9 @@ class IMcpClient {
   // connection stays usable for subsequent calls.
   virtual asio::awaitable<absl::StatusOr<std::string>> CallTool(
       std::string_view name, std::string_view args_json,
-      const CancelToken& cancel) = 0;
+      const CancelToken& cancel, const McpCallContext& context = {}) = 0;
+
+  virtual void SetInboundEventHandler(InboundEventHandler) {}
 
   // Tears down the transport. Pending CallTool awaitables resolve with
   // Cancelled. Safe to call multiple times.
@@ -81,8 +97,9 @@ class McpClient : public IMcpClient {
   ListTools() override;
   asio::awaitable<absl::StatusOr<std::string>> CallTool(
       std::string_view name, std::string_view args_json,
-      const CancelToken& cancel) override;
+      const CancelToken& cancel, const McpCallContext& context = {}) override;
   void Shutdown() override;
+  void SetInboundEventHandler(InboundEventHandler handler) override;
 
  private:
   class Impl;

@@ -32,6 +32,10 @@ class McpToolAdapter : public Tool {
                  std::chrono::milliseconds call_timeout =
                      std::chrono::milliseconds{0});
 
+  // Produces a per-session wrapper around the shared transport adapter.
+  // The underlying client remains pooled; only trusted call metadata varies.
+  std::shared_ptr<McpToolAdapter> WithCallContext(McpCallContext context) const;
+
   const ToolSchema& Schema() const override { return schema_; }
 
   asio::awaitable<std::string> Invoke(std::string_view args_json,
@@ -43,6 +47,7 @@ class McpToolAdapter : public Tool {
   std::string remote_name_;
   ToolSchema schema_;
   std::chrono::milliseconds timeout_;
+  McpCallContext context_;
 };
 
 }  // namespace agentflow::mcp
