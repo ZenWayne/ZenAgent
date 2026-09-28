@@ -8,6 +8,8 @@
 #include <asio/io_context.hpp>
 
 #include "agentflow/tools/tool_registry.h"
+#include "agentflow/tools/native_fn_tool.h"
+#include "agentflow/core/errors.h"
 #include "agentflow/workflow/workflow_loader.h"
 #include "tests/support/fake_chat_backend.h"
 
@@ -29,6 +31,13 @@ constexpr char kSoloJson[] = R"({
   "schema_version":1,"name":"t","version":"v1",
   "state":{"kind":"dynamic_json","fields":{}},
   "agents":{"solo":{"system_prompt":"Be brief.","model":{},"tools":[]}},
+  "main":"solo"
+})";
+
+constexpr char kConfirmJson[] = R"({
+  "schema_version":1,"name":"t","version":"v1",
+  "state":{"kind":"dynamic_json","fields":{}},
+  "agents":{"solo":{"system_prompt":"","model":{},"tools":["write"]}},
   "main":"solo"
 })";
 
@@ -100,6 +109,21 @@ TEST(WorkflowRunnerTest, UnknownAgentReturnsEmptyConfig) {
   auto built = BuildAgentNode(spec);
   EXPECT_TRUE(built.cfg.system_prompt.empty());
   EXPECT_TRUE(built.cfg.extra_tools.empty());
+}
+
+TEST(WorkflowRunnerTest, FailClosedRejectsConfirmToolWithoutGate) {
+  asio::io_context io;
+  auto tools = std::make_shared<ToolRegistry>(io);
+  tools->Register(std::make_shared<NativeFnTool>(ToolSchema{"write", "", "{}"},
+      [](auto, auto, auto) -> asio::awaitable<std::string> { co_return "ok"; }));
+  auto wf = *WorkflowLoader::Load(kConfirmJson, *tools);
+  AgentNodeBuildSpec spec;
+  spec.workflow = wf;
+  spec.agent_name = "solo";
+  spec.host_tools = tools;
+  spec.fail_closed_confirm = true;
+  spec.tool_tiers["write"] = ToolTier::kConfirm;
+  EXPECT_THROW((void)BuildAgentNode(spec), AgentflowError);
 }
 
 }  // namespace

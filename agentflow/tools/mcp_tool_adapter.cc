@@ -41,6 +41,13 @@ McpToolAdapter::McpToolAdapter(std::shared_ptr<IMcpClient> client,
       schema_(std::move(cached_schema)),
       timeout_(call_timeout) {}
 
+std::shared_ptr<McpToolAdapter> McpToolAdapter::WithCallContext(
+    McpCallContext context) const {
+  auto out = std::make_shared<McpToolAdapter>(client_, remote_name_, schema_, timeout_);
+  out->context_ = std::move(context);
+  return out;
+}
+
 asio::awaitable<std::string> McpToolAdapter::Invoke(
     std::string_view args_json, std::string_view /*tool_call_id*/,
     const CancelToken& cancel) {
@@ -52,7 +59,7 @@ asio::awaitable<std::string> McpToolAdapter::Invoke(
 
   // No timeout: just delegate.
   if (timeout_ == std::chrono::milliseconds{0}) {
-    auto result = co_await client_->CallTool(remote_name_, args_json, cancel);
+    auto result = co_await client_->CallTool(remote_name_, args_json, cancel, context_);
     if (!result.ok()) {
       co_return McpErrorJson("tool error: " +
                              std::string(result.status().message()));
@@ -64,7 +71,7 @@ asio::awaitable<std::string> McpToolAdapter::Invoke(
   auto exec = co_await asio::this_coro::executor;
   asio::steady_timer timer(exec, timeout_);
   auto outcome = co_await (
-      client_->CallTool(remote_name_, args_json, cancel) ||
+      client_->CallTool(remote_name_, args_json, cancel, context_) ||
       timer.async_wait(asio::use_awaitable));
   if (outcome.index() == 1) {
     // Timer won — best-effort: the in-flight call will be cleaned up when

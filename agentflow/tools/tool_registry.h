@@ -68,7 +68,13 @@ class ToolRegistry {
   //                                 still starts.
   // Collision policy: a remote tool whose name is already registered (native
   // or earlier MCP) is SKIPPED with a warning — the local/earlier tool wins.
-  asio::awaitable<absl::Status> AttachMcpServer(proto::McpServerSpec spec);
+  // The caller must keep `spec` and the optional policy spans alive until this
+  // awaitable completes. The policy spans let callers keep transient filters
+  // outside the protobuf that is retained by an asynchronous MCP client.
+  asio::awaitable<absl::Status> AttachMcpServer(
+      const proto::McpServerSpec& spec,
+      std::span<const std::string> include_tools = {},
+      std::span<const std::string> exclude_tools = {});
 
   // Shuts down every MCP client this registry's pool has created. The MCP
   // adapters registered as tools stay in place but will return
@@ -86,6 +92,11 @@ class ToolRegistry {
 
   // True iff a tool with the given name is currently registered.
   bool Has(std::string_view name) const;
+
+  // Returns the shared underlying tool without decorating it.  Callers that
+  // need per-invocation policy must wrap this result rather than registering a
+  // wrapper back into the registry.
+  std::shared_ptr<Tool> Find(std::string_view name) const;
 
   // OpenAI-compatible tools JSON array. Empty span → all registered tools.
   std::string ExportToolsJson(

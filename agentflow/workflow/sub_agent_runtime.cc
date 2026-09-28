@@ -14,7 +14,9 @@
 #include "agentflow/core/cancel.h"
 #include "agentflow/core/errors.h"
 #include "agentflow/inference/chat_backend.h"
+#include "agentflow/tools/invocation_tool_view.h"
 #include "agentflow/workflow/json_path.h"
+#include "agentflow/tools/native_fn_tool.h"
 #include "agentflow/workflow/template_engine.h"
 #include "workflow_spec.pb.h"
 
@@ -34,6 +36,14 @@ const proto::WorkflowSpec::AgentDef* FindAgent(const Workflow& wf,
   auto it = wf.spec().agents().find(std::string(name));
   if (it == wf.spec().agents().end()) return nullptr;
   return &it->second;
+}
+
+std::string NestedDelegateSchema(const std::vector<std::string>& allowed) {
+  nlohmann::ordered_json agents = nlohmann::ordered_json::array();
+  for (const auto& name : allowed) agents.push_back(name);
+  return nlohmann::ordered_json{{"type", "object"}, {"properties", {
+      {"agent", {{"type", "string"}, {"enum", agents}}},
+      {"goal", {{"type", "string"}}}}}, {"required", {"agent", "goal"}}}.dump();
 }
 
 }  // namespace
@@ -144,8 +154,41 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
   std::vector<std::string> child_tools;
   child_tools.reserve(child.tools_size());
   for (const auto& t : child.tools()) child_tools.push_back(t);
-  std::string tools_json = host_tools_.ExportToolsJson(
-      std::span<const std::string>(child_tools));
+  ToolInvocationContext tool_context;
+  tool_context.root_invocation_id = root_id;
+  tool_context.caller = std::string(child_agent);
+  tool_context.delegate_depth = ctx.depth;
+  tool_context.event = ctx.tool_event;
+  auto tool_view = std::make_shared<InvocationToolView>(
+      host_tools_, child_tools, ctx.tool_tiers, std::move(tool_context), ctx.gate);
+  if (child.has_delegates()) {
+    std::vector<std::string> allowed;
+    allowed.reserve(child.delegates().agents_size());
+    for (const auto& name : child.delegates().agents()) allowed.push_back(name);
+    SubAgentContext nested_ctx = ctx;
+    nested_ctx.depth = ctx.depth + 1;
+    nested_ctx.root_invocation_id = root_id;
+    ToolSchema schema{"delegate", "Hand a sub-task to another agent.",
+                      NestedDelegateSchema(allowed)};
+    tool_view->Add(std::make_shared<NativeFnTool>(schema,
+        [this, parent = std::string(child_agent), nested_ctx](
+            std::string_view args_json, std::string_view,
+            const CancelToken& cancel) -> asio::awaitable<std::string> {
+          auto args = nlohmann::ordered_json::parse(args_json, nullptr, false);
+          if (args.is_discarded()) co_return R"({"error":"bad_args"})";
+          if (!args.is_object() || !args.contains("agent") ||
+              !args["agent"].is_string() || !args.contains("goal") ||
+              !args["goal"].is_string()) {
+            co_return R"({"error":"bad_args"})";
+          }
+          SubAgentContext next = nested_ctx;
+          next.parent_cancel = &cancel;
+          auto result = co_await RunAsync(parent, args["agent"].get<std::string>(),
+                                          args["goal"].get<std::string>(), std::move(next));
+          co_return result.is_string() ? result.get<std::string>() : result.dump();
+        }));
+  }
+  std::string tools_json = tool_view->ExportToolsJson();
   if (tools_json.empty()) tools_json = "[]";
 
   // Build the conversation options. system_message_json must be the BARE
@@ -298,22 +341,11 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
                      ? tc["function"]["arguments"].get<std::string>()
                      : tc["function"]["arguments"].dump();
         }
-        // Sub-agents dispatch tools through the host registry. The host
-        // is responsible for restricting which tools exist; the per-child
-        // tools_json slice scopes what the LLM sees but the dispatcher
-        // can technically call any host tool. We rely on the LLM
-        // respecting the schema; defense-in-depth filtering is a future
-        // improvement.
+        // The invocation-local view is a hard boundary: names outside the
+        // child slice (or blocked by policy) cannot reach host_tools_.
         std::string result;
-        // ToolRegistry::Invoke is not const (its mutex is mutable but the
-        // method signature isn't); we hold a const& as a member. Cast away
-        // const for the dispatch — safe given the registry's internal
-        // locking. Direct co_await — RunAsync runs under the caller's
-        // io_context, so no nested io.run() (that would deadlock a concurrent
-        // token-channel drain).
-        auto& reg = const_cast<ToolRegistry&>(host_tools_);
         try {
-          result = co_await reg.Invoke(name, args, call_id, cancel_ref);
+          result = co_await tool_view->Invoke(name, args, call_id, cancel_ref);
         } catch (const std::exception& e) {
           result = std::string("Tool error: ") + e.what();
         }

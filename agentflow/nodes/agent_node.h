@@ -17,6 +17,7 @@
 #include "agentflow/core/token_channel.h"
 #include "agentflow/inference/chat_backend.h"
 #include "agentflow/tools/tool.h"
+#include "agentflow/tools/invocation_tool_view.h"
 #include "agentflow/tools/tool_registry.h"
 
 namespace agentflow {
@@ -28,6 +29,7 @@ struct AgentNodeConfig {
   asio::io_context* io_ctx = nullptr;  // for LiteRtLmSession creation
   std::string system_prompt;
   std::shared_ptr<ToolRegistry> tool_registry;
+  std::shared_ptr<InvocationToolView> tool_view;
   int max_iter = 8;
   int max_output_tokens = 512;
   bool stream_tokens = true;
