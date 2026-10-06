@@ -11,6 +11,19 @@ using json = nlohmann::json;
 std::string StreamAccumulator::Feed(std::string_view frame_json) {
   json f = json::parse(frame_json, nullptr, /*allow_exceptions=*/false);
   if (f.is_discarded()) return {};
+  // Read usage BEFORE the choices guard: the include_usage frame carries an
+  // empty choices array, which that guard rejects. Type-checked per field so
+  // a null/wrong-typed usage is ignored, not a crash.
+  if (f.is_object() && f.contains("usage") && f["usage"].is_object()) {
+    const json& u = f["usage"];
+    if (u.contains("prompt_tokens") && u["prompt_tokens"].is_number_integer()) {
+      input_tokens_ = u["prompt_tokens"].get<long long>();
+    }
+    if (u.contains("completion_tokens") &&
+        u["completion_tokens"].is_number_integer()) {
+      output_tokens_ = u["completion_tokens"].get<long long>();
+    }
+  }
   if (!f.contains("choices") || !f["choices"].is_array() ||
       f["choices"].empty()) {
     return {};
@@ -87,6 +100,10 @@ std::string StreamAccumulator::Canonical() const {
   out["content"] = json::array({{{"type", "text"}, {"text", text_}}});
   if (!reasoning_.empty()) out["reasoning_content"] = reasoning_;
   if (!finish_reason_.empty()) out["finish_reason"] = finish_reason_;
+  if (input_tokens_ > 0 || output_tokens_ > 0) {
+    out["usage"] = {{"input_tokens", input_tokens_},
+                    {"output_tokens", output_tokens_}};
+  }
 
   if (!calls_.empty()) {
     json arr = json::array();

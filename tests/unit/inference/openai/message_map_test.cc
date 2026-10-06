@@ -375,5 +375,43 @@ TEST(ToOpenAiMessagesTest, FinishReasonIsNotSentBackToTheProvider) {
   EXPECT_EQ((*out)[0]["content"], "hi");
 }
 
+TEST(BuildRequestBodyTest, StreamingRequestAsksForUsage) {
+  // Billing needs per-call token usage; providers only send it on a stream
+  // when stream_options.include_usage is set.
+  ChatConversationOptions opts;
+  std::vector<json> msgs = {{{"role", "user"}, {"content", "hi"}}};
+  json body = json::parse(BuildRequestBody("m", opts, msgs, /*stream=*/true));
+  EXPECT_EQ(body["stream_options"]["include_usage"], true);
+}
+
+TEST(BuildRequestBodyTest, NonStreamingRequestHasNoStreamOptions) {
+  ChatConversationOptions opts;
+  std::vector<json> msgs = {{{"role", "user"}, {"content", "hi"}}};
+  json body = json::parse(BuildRequestBody("m", opts, msgs, /*stream=*/false));
+  EXPECT_FALSE(body.contains("stream_options"));
+}
+
+TEST(ResponseToCanonicalTest, CarriesUsageWhenPresent) {
+  auto r = ResponseToCanonical(
+      R"({"choices":[{"message":{"content":"ok"}}],)"
+      R"("usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}})");
+  ASSERT_TRUE(r.ok());
+  json got = json::parse(*r);
+  EXPECT_EQ(got["usage"]["input_tokens"], 7);
+  EXPECT_EQ(got["usage"]["output_tokens"], 3);
+}
+
+TEST(ToOpenAiMessagesTest, UsageIsNotSentBackToTheProvider) {
+  // usage rides on the canonical assistant message (for billing) and that
+  // message is replayed as history; it is a RESPONSE field and must never be
+  // echoed on a request.
+  auto out = ToOpenAiMessages(
+      R"({"role":"assistant","content":[{"type":"text","text":"hi"}],)"
+      R"("usage":{"input_tokens":5,"output_tokens":2}})");
+  ASSERT_TRUE(out.ok());
+  ASSERT_EQ(out->size(), 1u);
+  EXPECT_FALSE((*out)[0].contains("usage"));
+}
+
 }  // namespace
 }  // namespace agentflow::openai

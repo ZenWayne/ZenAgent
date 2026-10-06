@@ -203,5 +203,37 @@ TEST(StreamAccumulatorTest, FinishReasonIsReadEvenWithNoDeltaAtAll) {
   EXPECT_EQ(got["content"][0]["text"], "x");
 }
 
+TEST(StreamAccumulatorTest, CapturesUsageFromFinalChunk) {
+  StreamAccumulator acc;
+  acc.Feed(R"({"choices":[{"delta":{"content":"hi"},"finish_reason":null}]})");
+  acc.Feed(R"({"choices":[{"delta":{},"finish_reason":"stop"}]})");
+  // With stream_options.include_usage the last frame has an EMPTY choices
+  // array and carries only usage.
+  acc.Feed(
+      R"({"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":300,"total_tokens":1500}})");
+  json out = json::parse(acc.Canonical());
+  EXPECT_EQ(out["usage"]["input_tokens"], 1200);
+  EXPECT_EQ(out["usage"]["output_tokens"], 300);
+  EXPECT_EQ(out["content"][0]["text"], "hi");
+  EXPECT_EQ(out["finish_reason"], "stop");
+}
+
+TEST(StreamAccumulatorTest, NoUsageKeyWhenProviderSendsNone) {
+  StreamAccumulator acc;
+  acc.Feed(R"({"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]})");
+  EXPECT_FALSE(json::parse(acc.Canonical()).contains("usage"));
+}
+
+TEST(StreamAccumulatorTest, MalformedUsageIsIgnoredNotACrash) {
+  // usage: null (some providers on non-final chunks) and wrong-typed counts.
+  StreamAccumulator acc;
+  acc.Feed(R"({"choices":[{"delta":{"content":"x"}}],"usage":null})");
+  acc.Feed(
+      R"({"choices":[],"usage":{"prompt_tokens":"12","completion_tokens":null}})");
+  json out = json::parse(acc.Canonical());
+  EXPECT_FALSE(out.contains("usage"));
+  EXPECT_EQ(out["content"][0]["text"], "x");
+}
+
 }  // namespace
 }  // namespace agentflow::openai

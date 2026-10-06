@@ -48,6 +48,11 @@ class StreamAccumulator {
   std::string reasoning_;
   // Keyed by the stream's `index` so parallel calls stay separate and ordered.
   std::map<int, PartialCall> calls_;
+  // Token usage for billing. With stream_options.include_usage the provider
+  // sends it on the last frame (whose choices array is empty). 0/0 means none
+  // was received, and Canonical() then omits the usage key.
+  long long input_tokens_ = 0;
+  long long output_tokens_ = 0;
 };
 
 }  // namespace agentflow::openai

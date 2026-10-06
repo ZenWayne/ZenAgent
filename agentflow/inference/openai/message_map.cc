@@ -264,6 +264,9 @@ std::string BuildRequestBody(std::string_view model,
   body["model"] = std::string(model);
   body["messages"] = messages;
   body["stream"] = stream;
+  // Billing needs each call's token usage. A non-streaming response always
+  // carries it; a stream only does when asked via include_usage.
+  if (stream) body["stream_options"] = {{"include_usage", true}};
   if (opts.max_output_tokens > 0) body["max_tokens"] = opts.max_output_tokens;
 
   json tools = json::parse(opts.tools_json, nullptr, false);
@@ -320,6 +323,21 @@ absl::StatusOr<std::string> ResponseToCanonical(std::string_view body) {
   if (msg.contains("tool_calls") && msg["tool_calls"].is_array() &&
       !msg["tool_calls"].empty()) {
     out["tool_calls"] = msg["tool_calls"];
+  }
+  // Same canonical usage shape as StreamAccumulator, for billing.
+  if (resp.contains("usage") && resp["usage"].is_object()) {
+    const json& u = resp["usage"];
+    long long in = 0, out_tokens = 0;
+    if (u.contains("prompt_tokens") && u["prompt_tokens"].is_number_integer()) {
+      in = u["prompt_tokens"].get<long long>();
+    }
+    if (u.contains("completion_tokens") &&
+        u["completion_tokens"].is_number_integer()) {
+      out_tokens = u["completion_tokens"].get<long long>();
+    }
+    if (in > 0 || out_tokens > 0) {
+      out["usage"] = {{"input_tokens", in}, {"output_tokens", out_tokens}};
+    }
   }
   return out.dump();
 }
