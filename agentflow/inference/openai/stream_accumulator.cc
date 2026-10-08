@@ -2,10 +2,17 @@
 #include "agentflow/inference/openai/stream_accumulator.h"
 
 #include <nlohmann/json.hpp>
+#include <limits>
 
 namespace agentflow::openai {
 namespace {
 using json = nlohmann::json;
+bool ValidTokenCount(const json& count) {
+  if (count.is_number_unsigned())
+    return count.get<unsigned long long>() <=
+        static_cast<unsigned long long>(std::numeric_limits<long long>::max());
+  return count.is_number_integer() && count.get<long long>() >= 0;
+}
 }  // namespace
 
 std::string StreamAccumulator::Feed(std::string_view frame_json) {
@@ -16,11 +23,11 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
   // a null/wrong-typed usage is ignored, not a crash.
   if (f.is_object() && f.contains("usage") && f["usage"].is_object()) {
     const json& u = f["usage"];
-    if (u.contains("prompt_tokens") && u["prompt_tokens"].is_number_integer()) {
+    if (u.contains("prompt_tokens") && ValidTokenCount(u["prompt_tokens"])) {
       input_tokens_ = u["prompt_tokens"].get<long long>();
     }
     if (u.contains("completion_tokens") &&
-        u["completion_tokens"].is_number_integer()) {
+        ValidTokenCount(u["completion_tokens"])) {
       output_tokens_ = u["completion_tokens"].get<long long>();
     }
   }

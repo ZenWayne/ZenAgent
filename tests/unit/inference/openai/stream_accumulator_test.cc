@@ -224,6 +224,19 @@ TEST(StreamAccumulatorTest, NoUsageKeyWhenProviderSendsNone) {
   EXPECT_FALSE(json::parse(acc.Canonical()).contains("usage"));
 }
 
+TEST(StreamAccumulatorTest, InvalidTokenCountsDoNotOverwriteValidUsage) {
+  StreamAccumulator accumulator;
+  accumulator.Feed(R"({"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":3}})");
+  for (const auto& invalid : {"-5", "9223372036854775808"}) {
+    accumulator.Feed(std::string(R"({"choices":[],"usage":{"prompt_tokens":)") +
+        invalid + R"(,"completion_tokens":-1}})");
+    const auto canonical = json::parse(accumulator.Canonical());
+    ASSERT_TRUE(canonical.contains("usage"));
+    EXPECT_EQ(canonical["usage"]["input_tokens"], 20);
+    EXPECT_EQ(canonical["usage"]["output_tokens"], 3);
+  }
+}
+
 TEST(StreamAccumulatorTest, MalformedUsageIsIgnoredNotACrash) {
   // usage: null (some providers on non-final chunks) and wrong-typed counts.
   StreamAccumulator acc;

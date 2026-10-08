@@ -401,6 +401,19 @@ TEST(ResponseToCanonicalTest, CarriesUsageWhenPresent) {
   EXPECT_EQ(got["usage"]["output_tokens"], 3);
 }
 
+TEST(ResponseToCanonicalTest, InvalidTokenCountDoesNotDiscardTheValidField) {
+  for (const auto& input : {"-5", "9223372036854775808"}) {
+    const auto response = ResponseToCanonical(
+        std::string(R"({"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":)") +
+        input + R"(,"completion_tokens":3}})");
+    ASSERT_TRUE(response.ok());
+    const auto canonical = json::parse(*response);
+    EXPECT_EQ(canonical["usage"]["input_tokens"], 0);
+    EXPECT_EQ(canonical["usage"]["output_tokens"], 3);
+    EXPECT_EQ(canonical["content"][0]["text"], "ok");
+  }
+}
+
 TEST(ToOpenAiMessagesTest, UsageIsNotSentBackToTheProvider) {
   // usage rides on the canonical assistant message (for billing) and that
   // message is replayed as history; it is a RESPONSE field and must never be

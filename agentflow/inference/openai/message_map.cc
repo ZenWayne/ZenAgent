@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -11,6 +12,13 @@ namespace agentflow::openai {
 namespace {
 
 using json = nlohmann::json;
+
+bool ValidTokenCount(const json& count) {
+  if (count.is_number_unsigned())
+    return count.get<unsigned long long>() <=
+        static_cast<unsigned long long>(std::numeric_limits<long long>::max());
+  return count.is_number_integer() && count.get<long long>() >= 0;
+}
 
 // Flattens a canonical content array into a single string. Canonical content
 // is [{"type":"text","text":"..."}]; OpenAI wants a plain string.
@@ -328,11 +336,11 @@ absl::StatusOr<std::string> ResponseToCanonical(std::string_view body) {
   if (resp.contains("usage") && resp["usage"].is_object()) {
     const json& u = resp["usage"];
     long long in = 0, out_tokens = 0;
-    if (u.contains("prompt_tokens") && u["prompt_tokens"].is_number_integer()) {
+    if (u.contains("prompt_tokens") && ValidTokenCount(u["prompt_tokens"])) {
       in = u["prompt_tokens"].get<long long>();
     }
     if (u.contains("completion_tokens") &&
-        u["completion_tokens"].is_number_integer()) {
+        ValidTokenCount(u["completion_tokens"])) {
       out_tokens = u["completion_tokens"].get<long long>();
     }
     if (in > 0 || out_tokens > 0) {
