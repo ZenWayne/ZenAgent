@@ -342,6 +342,14 @@ absl::StatusOr<std::string> ResponseToCanonical(std::string_view body) {
     if (u.contains("completion_tokens") &&
         ValidTokenCount(u["completion_tokens"])) {
       out_tokens = u["completion_tokens"].get<long long>();
+      // Vertex completion_tokens excludes thinking; DeepSeek includes it.
+      // Use the provider total minus prompt when all counts are valid and
+      // consistent. Never add reasoning_tokens blindly (would double count).
+      if (u.contains("prompt_tokens") && ValidTokenCount(u["prompt_tokens"]) &&
+          u.contains("total_tokens") && ValidTokenCount(u["total_tokens"])) {
+        const auto total = u["total_tokens"].get<long long>();
+        if (total >= in && total - in >= out_tokens) out_tokens = total - in;
+      }
     }
     if (in > 0 || out_tokens > 0) {
       out["usage"] = {{"input_tokens", in}, {"output_tokens", out_tokens}};

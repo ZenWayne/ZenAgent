@@ -29,6 +29,15 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
     if (u.contains("completion_tokens") &&
         ValidTokenCount(u["completion_tokens"])) {
       output_tokens_ = u["completion_tokens"].get<long long>();
+      // Vertex reports thinking outside completion_tokens, while DeepSeek
+      // includes it. Reconcile with the valid provider total without double
+      // counting reasoning or decreasing a valid completion count.
+      if (u.contains("prompt_tokens") && ValidTokenCount(u["prompt_tokens"]) &&
+          u.contains("total_tokens") && ValidTokenCount(u["total_tokens"])) {
+        const auto total = u["total_tokens"].get<long long>();
+        if (total >= input_tokens_ && total - input_tokens_ >= output_tokens_)
+          output_tokens_ = total - input_tokens_;
+      }
     }
   }
   if (!f.contains("choices") || !f["choices"].is_array() ||
