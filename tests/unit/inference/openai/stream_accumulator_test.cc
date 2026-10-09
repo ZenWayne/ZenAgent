@@ -219,7 +219,7 @@ TEST(StreamAccumulatorTest, CapturesUsageFromFinalChunk) {
 }
 
 TEST(StreamAccumulatorTest, GoogleThinkingIsIncludedInOutputTotal) {
-  StreamAccumulator acc;
+  StreamAccumulator acc(UsageProvider::kGoogle);
   // Vertex puts usage on its final content chunk, not an empty choices frame.
   acc.Feed(R"({"choices":[{"delta":{"content":"391"},"finish_reason":"stop"}],"usage":{"prompt_tokens":26,"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":84},"total_tokens":113}})");
   const auto out = json::parse(acc.Canonical());
@@ -229,9 +229,23 @@ TEST(StreamAccumulatorTest, GoogleThinkingIsIncludedInOutputTotal) {
 }
 
 TEST(StreamAccumulatorTest, DeepSeekReasoningIsNotCountedTwice) {
-  StreamAccumulator acc;
+  StreamAccumulator acc(UsageProvider::kDeepSeek);
   acc.Feed(R"({"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":11,"completion_tokens_details":{"reasoning_tokens":9},"total_tokens":51}})");
   EXPECT_EQ(json::parse(acc.Canonical())["usage"]["output_tokens"], 11);
+}
+
+TEST(StreamAccumulatorTest, GoogleAddsThinkingWithoutInputOrTotal) {
+  StreamAccumulator acc(UsageProvider::kGoogle);
+  acc.Feed(R"({"choices":[],"usage":{"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":84}}})");
+  EXPECT_EQ(json::parse(acc.Canonical())["usage"]["output_tokens"], 87);
+}
+
+TEST(StreamAccumulatorTest, GoogleInvalidThinkingPreservesCompletion) {
+  for (const auto& thinking : {"-1", "9223372036854775808", "9223372036854775807", "null", "\"84\"", "84.5"}) {
+    StreamAccumulator acc(UsageProvider::kGoogle);
+    acc.Feed(std::string(R"({"choices":[],"usage":{"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":)") + thinking + "}}}");
+    EXPECT_EQ(json::parse(acc.Canonical())["usage"]["output_tokens"], 3);
+  }
 }
 
 TEST(StreamAccumulatorTest, InvalidOrInconsistentTotalPreservesCompletion) {

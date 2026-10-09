@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <functional>
-#include <limits>
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -12,13 +11,6 @@ namespace agentflow::openai {
 namespace {
 
 using json = nlohmann::json;
-
-bool ValidTokenCount(const json& count) {
-  if (count.is_number_unsigned())
-    return count.get<unsigned long long>() <=
-        static_cast<unsigned long long>(std::numeric_limits<long long>::max());
-  return count.is_number_integer() && count.get<long long>() >= 0;
-}
 
 // Flattens a canonical content array into a single string. Canonical content
 // is [{"type":"text","text":"..."}]; OpenAI wants a plain string.
@@ -295,7 +287,8 @@ std::string BuildRequestBody(std::string_view model,
   return body.dump();
 }
 
-absl::StatusOr<std::string> ResponseToCanonical(std::string_view body) {
+absl::StatusOr<std::string> ResponseToCanonical(
+    std::string_view body, UsageProvider provider) {
   json resp = json::parse(body, nullptr, false);
   if (resp.is_discarded()) {
     return absl::InternalError("OpenAI response is not valid JSON");
@@ -339,18 +332,7 @@ absl::StatusOr<std::string> ResponseToCanonical(std::string_view body) {
     if (u.contains("prompt_tokens") && ValidTokenCount(u["prompt_tokens"])) {
       in = u["prompt_tokens"].get<long long>();
     }
-    if (u.contains("completion_tokens") &&
-        ValidTokenCount(u["completion_tokens"])) {
-      out_tokens = u["completion_tokens"].get<long long>();
-      // Vertex completion_tokens excludes thinking; DeepSeek includes it.
-      // Use the provider total minus prompt when all counts are valid and
-      // consistent. Never add reasoning_tokens blindly (would double count).
-      if (u.contains("prompt_tokens") && ValidTokenCount(u["prompt_tokens"]) &&
-          u.contains("total_tokens") && ValidTokenCount(u["total_tokens"])) {
-        const auto total = u["total_tokens"].get<long long>();
-        if (total >= in && total - in >= out_tokens) out_tokens = total - in;
-      }
-    }
+    if (auto output = OutputTokenCount(u, provider)) out_tokens = *output;
     if (in > 0 || out_tokens > 0) {
       out["usage"] = {{"input_tokens", in}, {"output_tokens", out_tokens}};
     }

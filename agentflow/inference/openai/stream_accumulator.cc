@@ -2,17 +2,10 @@
 #include "agentflow/inference/openai/stream_accumulator.h"
 
 #include <nlohmann/json.hpp>
-#include <limits>
 
 namespace agentflow::openai {
 namespace {
 using json = nlohmann::json;
-bool ValidTokenCount(const json& count) {
-  if (count.is_number_unsigned())
-    return count.get<unsigned long long>() <=
-        static_cast<unsigned long long>(std::numeric_limits<long long>::max());
-  return count.is_number_integer() && count.get<long long>() >= 0;
-}
 }  // namespace
 
 std::string StreamAccumulator::Feed(std::string_view frame_json) {
@@ -26,19 +19,7 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
     if (u.contains("prompt_tokens") && ValidTokenCount(u["prompt_tokens"])) {
       input_tokens_ = u["prompt_tokens"].get<long long>();
     }
-    if (u.contains("completion_tokens") &&
-        ValidTokenCount(u["completion_tokens"])) {
-      output_tokens_ = u["completion_tokens"].get<long long>();
-      // Vertex reports thinking outside completion_tokens, while DeepSeek
-      // includes it. Reconcile with the valid provider total without double
-      // counting reasoning or decreasing a valid completion count.
-      if (u.contains("prompt_tokens") && ValidTokenCount(u["prompt_tokens"]) &&
-          u.contains("total_tokens") && ValidTokenCount(u["total_tokens"])) {
-        const auto total = u["total_tokens"].get<long long>();
-        if (total >= input_tokens_ && total - input_tokens_ >= output_tokens_)
-          output_tokens_ = total - input_tokens_;
-      }
-    }
+    if (auto output = OutputTokenCount(u, provider_)) output_tokens_ = *output;
   }
   if (!f.contains("choices") || !f["choices"].is_array() ||
       f["choices"].empty()) {

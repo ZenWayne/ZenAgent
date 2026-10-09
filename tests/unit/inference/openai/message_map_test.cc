@@ -404,16 +404,32 @@ TEST(ResponseToCanonicalTest, CarriesUsageWhenPresent) {
 TEST(ResponseToCanonicalTest, GoogleThinkingIsIncludedInOutputTotal) {
   // Recorded Vertex AI response: completion excludes 84 reasoning tokens.
   const auto r = ResponseToCanonical(
-      R"({"choices":[{"message":{"content":"391"}}],"usage":{"prompt_tokens":26,"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":84},"total_tokens":113}})");
+      R"({"choices":[{"message":{"content":"391"}}],"usage":{"prompt_tokens":26,"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":84},"total_tokens":113}})", UsageProvider::kGoogle);
   ASSERT_TRUE(r.ok());
   EXPECT_EQ(json::parse(*r)["usage"]["output_tokens"], 87);
 }
 
 TEST(ResponseToCanonicalTest, DeepSeekReasoningIsNotCountedTwice) {
   const auto r = ResponseToCanonical(
-      R"({"choices":[{"message":{"content":"OK"}}],"usage":{"prompt_tokens":40,"completion_tokens":11,"completion_tokens_details":{"reasoning_tokens":9},"total_tokens":51}})");
+      R"({"choices":[{"message":{"content":"OK"}}],"usage":{"prompt_tokens":40,"completion_tokens":11,"completion_tokens_details":{"reasoning_tokens":9},"total_tokens":51}})", UsageProvider::kDeepSeek);
   ASSERT_TRUE(r.ok());
   EXPECT_EQ(json::parse(*r)["usage"]["output_tokens"], 11);
+}
+
+TEST(ResponseToCanonicalTest, GoogleAddsThinkingWithoutInputOrTotal) {
+  const auto r = ResponseToCanonical(
+      R"({"choices":[{"message":{"content":"391"}}],"usage":{"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":84}}})", UsageProvider::kGoogle);
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(json::parse(*r)["usage"]["output_tokens"], 87);
+}
+
+TEST(ResponseToCanonicalTest, GoogleInvalidThinkingPreservesCompletion) {
+  for (const auto& thinking : {"-1", "9223372036854775808", "9223372036854775807", "null", "\"84\"", "84.5"}) {
+    const auto r = ResponseToCanonical(
+        std::string(R"({"choices":[{"message":{"content":"391"}}],"usage":{"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":)") + thinking + "}}}", UsageProvider::kGoogle);
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(json::parse(*r)["usage"]["output_tokens"], 3);
+  }
 }
 
 TEST(ResponseToCanonicalTest, InvalidOrInconsistentTotalPreservesCompletion) {

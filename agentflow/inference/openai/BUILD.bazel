@@ -4,10 +4,17 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "token_usage",
+    hdrs = ["token_usage.h"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_library(
     name = "message_map",
     srcs = ["message_map.cc"],
     hdrs = ["message_map.h"],
     deps = [
+        ":token_usage",
         "//agentflow/inference:chat_backend",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
@@ -20,7 +27,7 @@ cc_library(
     name = "stream_accumulator",
     srcs = ["stream_accumulator.cc"],
     hdrs = ["stream_accumulator.h"],
-    deps = ["@nlohmann_json//:json"],
+    deps = [":token_usage", "@nlohmann_json//:json"],
 )
 
 cc_library(
@@ -30,6 +37,7 @@ cc_library(
     deps = [
         ":message_map",
         ":stream_accumulator",
+        ":token_usage",
         "//agentflow/inference:chat_backend",
         "//agentflow/net:http_client",
         "@abseil-cpp//absl/status",
