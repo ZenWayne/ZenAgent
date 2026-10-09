@@ -375,5 +375,96 @@ TEST(ToOpenAiMessagesTest, FinishReasonIsNotSentBackToTheProvider) {
   EXPECT_EQ((*out)[0]["content"], "hi");
 }
 
+TEST(BuildRequestBodyTest, StreamingRequestAsksForUsage) {
+  // Billing needs per-call token usage; providers only send it on a stream
+  // when stream_options.include_usage is set.
+  ChatConversationOptions opts;
+  std::vector<json> msgs = {{{"role", "user"}, {"content", "hi"}}};
+  json body = json::parse(BuildRequestBody("m", opts, msgs, /*stream=*/true));
+  EXPECT_EQ(body["stream_options"]["include_usage"], true);
+}
+
+TEST(BuildRequestBodyTest, NonStreamingRequestHasNoStreamOptions) {
+  ChatConversationOptions opts;
+  std::vector<json> msgs = {{{"role", "user"}, {"content", "hi"}}};
+  json body = json::parse(BuildRequestBody("m", opts, msgs, /*stream=*/false));
+  EXPECT_FALSE(body.contains("stream_options"));
+}
+
+TEST(ResponseToCanonicalTest, CarriesUsageWhenPresent) {
+  auto r = ResponseToCanonical(
+      R"({"choices":[{"message":{"content":"ok"}}],)"
+      R"("usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}})");
+  ASSERT_TRUE(r.ok());
+  json got = json::parse(*r);
+  EXPECT_EQ(got["usage"]["input_tokens"], 7);
+  EXPECT_EQ(got["usage"]["output_tokens"], 3);
+}
+
+TEST(ResponseToCanonicalTest, GoogleThinkingIsIncludedInOutputTotal) {
+  // Recorded Vertex AI response: completion excludes 84 reasoning tokens.
+  const auto r = ResponseToCanonical(
+      R"({"choices":[{"message":{"content":"391"}}],"usage":{"prompt_tokens":26,"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":84},"total_tokens":113}})", UsageProvider::kGoogle);
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(json::parse(*r)["usage"]["output_tokens"], 87);
+}
+
+TEST(ResponseToCanonicalTest, DeepSeekReasoningIsNotCountedTwice) {
+  const auto r = ResponseToCanonical(
+      R"({"choices":[{"message":{"content":"OK"}}],"usage":{"prompt_tokens":40,"completion_tokens":11,"completion_tokens_details":{"reasoning_tokens":9},"total_tokens":51}})", UsageProvider::kDeepSeek);
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(json::parse(*r)["usage"]["output_tokens"], 11);
+}
+
+TEST(ResponseToCanonicalTest, GoogleAddsThinkingWithoutInputOrTotal) {
+  const auto r = ResponseToCanonical(
+      R"({"choices":[{"message":{"content":"391"}}],"usage":{"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":84}}})", UsageProvider::kGoogle);
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(json::parse(*r)["usage"]["output_tokens"], 87);
+}
+
+TEST(ResponseToCanonicalTest, GoogleInvalidThinkingPreservesCompletion) {
+  for (const auto& thinking : {"-1", "9223372036854775808", "9223372036854775807", "null", "\"84\"", "84.5"}) {
+    const auto r = ResponseToCanonical(
+        std::string(R"({"choices":[{"message":{"content":"391"}}],"usage":{"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":)") + thinking + "}}}", UsageProvider::kGoogle);
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(json::parse(*r)["usage"]["output_tokens"], 3);
+  }
+}
+
+TEST(ResponseToCanonicalTest, InvalidOrInconsistentTotalPreservesCompletion) {
+  for (const auto& total : {"-1", "9223372036854775808", "null", "\"20\"", "20.5", "10", "28"}) {
+    const auto r = ResponseToCanonical(
+        std::string(R"({"choices":[{"message":{"content":"391"}}],"usage":{"prompt_tokens":26,"completion_tokens":3,"total_tokens":)") + total + "}}");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(json::parse(*r)["usage"]["output_tokens"], 3);
+  }
+}
+
+TEST(ResponseToCanonicalTest, InvalidTokenCountDoesNotDiscardTheValidField) {
+  for (const auto& input : {"-5", "9223372036854775808"}) {
+    const auto response = ResponseToCanonical(
+        std::string(R"({"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":)") +
+        input + R"(,"completion_tokens":3}})");
+    ASSERT_TRUE(response.ok());
+    const auto canonical = json::parse(*response);
+    EXPECT_EQ(canonical["usage"]["input_tokens"], 0);
+    EXPECT_EQ(canonical["usage"]["output_tokens"], 3);
+    EXPECT_EQ(canonical["content"][0]["text"], "ok");
+  }
+}
+
+TEST(ToOpenAiMessagesTest, UsageIsNotSentBackToTheProvider) {
+  // usage rides on the canonical assistant message (for billing) and that
+  // message is replayed as history; it is a RESPONSE field and must never be
+  // echoed on a request.
+  auto out = ToOpenAiMessages(
+      R"({"role":"assistant","content":[{"type":"text","text":"hi"}],)"
+      R"("usage":{"input_tokens":5,"output_tokens":2}})");
+  ASSERT_TRUE(out.ok());
+  ASSERT_EQ(out->size(), 1u);
+  EXPECT_FALSE((*out)[0].contains("usage"));
+}
+
 }  // namespace
 }  // namespace agentflow::openai

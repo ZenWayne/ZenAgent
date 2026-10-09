@@ -1,0 +1,95 @@
+{
+  "date": "2026-10-09",
+  "transport": "Vertex AI OpenAI-compatible streaming API",
+  "authentication": "Service account OAuth; no API key",
+  "flow": "Real provider SSE -> ZenAgent -> Zen Chat signed callback -> Mirashot FastAPI -> isolated PostgreSQL account",
+  "cases": [
+    {
+      "name": "before_fix",
+      "model": "google/gemini-2.5-flash",
+      "http_status": 200,
+      "stream_include_usage": true,
+      "answer": "391",
+      "provider_usage": {
+        "prompt_tokens": 26,
+        "completion_tokens": 3,
+        "reasoning_tokens": 84,
+        "total_tokens": 113
+      },
+      "ledger": {
+        "input_tokens": 26,
+        "output_tokens": 3,
+        "total_tokens": 29
+      },
+      "matches_provider_total": false,
+      "implementation": "completion_only"
+    },
+    {
+      "name": "after_fix_flash",
+      "model": "google/gemini-2.5-flash",
+      "http_status": 200,
+      "stream_include_usage": true,
+      "answer": "391",
+      "provider_usage": {
+        "prompt_tokens": 26,
+        "completion_tokens": 3,
+        "reasoning_tokens": 241,
+        "total_tokens": 270
+      },
+      "ledger": {
+        "input_tokens": 26,
+        "output_tokens": 244,
+        "total_tokens": 270
+      },
+      "matches_provider_total": true,
+      "implementation": "total_minus_prompt_before_provider_refactor"
+    },
+    {
+      "name": "after_fix_pro",
+      "model": "google/gemini-3.1-pro-preview",
+      "http_status": 200,
+      "stream_include_usage": true,
+      "answer": "391",
+      "provider_usage": {
+        "prompt_tokens": 26,
+        "completion_tokens": 3,
+        "reasoning_tokens": 162,
+        "total_tokens": 191
+      },
+      "ledger": {
+        "input_tokens": 26,
+        "output_tokens": 165,
+        "total_tokens": 191
+      },
+      "matches_provider_total": true,
+      "implementation": "total_minus_prompt_before_provider_refactor"
+    },
+    {
+      "name": "explicit_provider_refactor",
+      "provider": "google",
+      "model": "google/gemini-2.5-flash",
+      "http_status": 200,
+      "stream_include_usage": true,
+      "answer": "391",
+      "provider_usage": {
+        "prompt_tokens": 26,
+        "completion_tokens": 3,
+        "reasoning_tokens": 86,
+        "total_tokens": 115
+      },
+      "ledger": {
+        "input_tokens": 26,
+        "output_tokens": 89,
+        "total_tokens": 115
+      },
+      "matches_provider_total": true,
+      "implementation": "google_completion_plus_thinking"
+    }
+  ],
+  "unit_tests": {
+    "targets": 3,
+    "cases": 74,
+    "passed": true
+  },
+  "scope": "Local isolated stack. Two real streaming models; nonstream mapping covered by regression tests. No production changes."
+}

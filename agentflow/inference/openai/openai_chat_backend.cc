@@ -69,7 +69,7 @@ class OpenAiConversation : public IConversation {
     for (int attempt = 0; attempt < opts_.max_retries; ++attempt) {
       if (cancel.IsCancelled()) co_return absl::CancelledError("cancelled");
 
-      StreamAccumulator acc;
+      StreamAccumulator acc(opts_.provider);
       bool emitted = false;
       auto status = co_await http_.PostSse(
           req,

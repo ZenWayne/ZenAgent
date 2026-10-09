@@ -6,6 +6,8 @@
 #include <string>
 #include <string_view>
 
+#include "agentflow/inference/openai/token_usage.h"
+
 namespace agentflow::openai {
 
 // Accumulates OpenAI streaming frames into one canonical assistant message.
@@ -20,6 +22,9 @@ namespace agentflow::openai {
 // keep-alive must not abort a half-finished answer.
 class StreamAccumulator {
  public:
+  explicit StreamAccumulator(UsageProvider provider = UsageProvider::kOpenAi)
+      : provider_(provider) {}
+
   // Feeds one SSE data payload (already stripped; never "[DONE]").
   // Returns the text delta this frame contained, or "" if it carried none.
   std::string Feed(std::string_view frame_json);
@@ -28,6 +33,8 @@ class StreamAccumulator {
   std::string Canonical() const;
 
  private:
+  UsageProvider provider_;
+
   struct PartialCall {
     std::string id;
     std::string name;
@@ -48,6 +55,11 @@ class StreamAccumulator {
   std::string reasoning_;
   // Keyed by the stream's `index` so parallel calls stay separate and ordered.
   std::map<int, PartialCall> calls_;
+  // Token usage for billing. With stream_options.include_usage the provider
+  // sends it on the last frame (whose choices array is empty). 0/0 means none
+  // was received, and Canonical() then omits the usage key.
+  long long input_tokens_ = 0;
+  long long output_tokens_ = 0;
 };
 
 }  // namespace agentflow::openai

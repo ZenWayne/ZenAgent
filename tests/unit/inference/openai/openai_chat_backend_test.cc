@@ -59,6 +59,23 @@ SendResult Send(IConversation& conv, const std::string& message_json,
   return r;
 }
 
+TEST(OpenAiChatBackendTest, ProviderControlsWhetherReasoningIsAdded) {
+  for (const auto provider : {UsageProvider::kGoogle, UsageProvider::kDeepSeek, UsageProvider::kOpenAi}) {
+    asio::io_context io;
+    testing::FakeHttpClient http({{.frames = {
+        R"({"choices":[],"usage":{"prompt_tokens":26,"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":84}}})"}}});
+    auto options = TestOptions();
+    // Identical model and URL for every provider: no model-name inference.
+    options.provider = provider;
+    auto backend = OpenAiChatBackend::Create(options, http);
+    auto conv = backend->CreateConversation(ChatConversationOptions{});
+    CancelSource cancel;
+    auto result = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"hi"}]})", io, cancel.Token());
+    ASSERT_TRUE(result.response.ok());
+    EXPECT_EQ(json::parse(*result.response)["usage"]["output_tokens"], provider == UsageProvider::kGoogle ? 87 : 3);
+  }
+}
+
 TEST(OpenAiChatBackendTest, DescribeNamesTheModelAndHidesTheKey) {
   asio::io_context io;
   testing::FakeHttpClient http({});

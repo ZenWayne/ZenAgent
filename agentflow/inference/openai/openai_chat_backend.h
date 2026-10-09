@@ -9,6 +9,7 @@
 
 #include "agentflow/inference/chat_backend.h"
 #include "agentflow/net/http_client.h"
+#include "agentflow/inference/openai/token_usage.h"
 
 namespace agentflow::openai {
 
@@ -23,6 +24,7 @@ struct OpenAiOptions {
   // credential.
   std::string api_key;
   std::string model;
+  UsageProvider provider = UsageProvider::kOpenAi;
 
   // Total attempts, not retries-after-the-first. 1 disables retrying.
   int max_retries = 3;

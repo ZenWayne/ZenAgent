@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentflow/inference/chat_backend.h"
+#include "agentflow/inference/openai/token_usage.h"
 
 namespace agentflow::openai {
 
@@ -61,7 +62,8 @@ std::string BuildRequestBody(std::string_view model,
 
 // Converts a NON-streaming /v1/chat/completions response body into canonical
 // assistant JSON. (The streaming path uses StreamAccumulator instead.)
-absl::StatusOr<std::string> ResponseToCanonical(std::string_view body);
+absl::StatusOr<std::string> ResponseToCanonical(
+    std::string_view body, UsageProvider provider = UsageProvider::kOpenAi);
 
 }  // namespace agentflow::openai
 #endif  // AGENTFLOW_INFERENCE_OPENAI_MESSAGE_MAP_H_
