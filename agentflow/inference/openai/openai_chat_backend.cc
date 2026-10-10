@@ -97,9 +97,10 @@ class OpenAiConversation : public IConversation {
               absl::StrCat("attachment_invalid: ", absl::StrJoin(missing, ",")));
         }
         if (!fail.ok()) {
-          // 带图的这条 user 消息不进历史（用户重传后重发）；更早历史里失效的
-          // 图换成文本占位，否则之后每一轮都会因同一张图失败。
-          if (incoming_has_images) messages_ = std::move(previous);
+          // No rejected turn may enter history, including a plain text turn
+          // rejected because an older image expired or resolution failed.
+          // Expire known-invalid refs only after restoring accepted history.
+          messages_ = std::move(previous);
           MarkImageRefsExpired(&messages_, missing);
           co_return fail;
         }

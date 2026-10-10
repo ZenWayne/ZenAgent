@@ -514,8 +514,42 @@ TEST(OpenAiChatBackendTest, ExpiredHistoricalImageBecomesTextForFollowingTurn) {
   ASSERT_TRUE(Send(*conv, kImageMsg, io, cancel.Token()).response.ok());
   EXPECT_FALSE(Send(*conv, R"({"role":"user","content":"second"})", io, cancel.Token()).response.ok());
   ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"third"})", io, cancel.Token()).response.ok());
-  EXPECT_EQ(json::parse(http.requests().back().body)["messages"][0]["content"][1]["text"], "[图片已失效]");
+  const auto messages = json::parse(http.requests().back().body)["messages"];
+  ASSERT_EQ(messages.size(), 3u);  // first user, its answer, accepted third user
+  EXPECT_EQ(messages[0]["content"][1]["text"], "[图片已失效]");
+  EXPECT_EQ(messages.back()["content"], "third");
+  for (const auto& message : messages) {
+    EXPECT_NE(message["content"], "second")
+        << "a rejected text turn must never be replayed to the model";
+  }
   EXPECT_EQ(calls, 2);
+}
+
+TEST(OpenAiChatBackendTest, ResolverTransportFailureDoesNotRetainPlainTurn) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("first")}},
+                                {.frames = {TextFrame("third")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  int calls = 0;
+  ChatConversationOptions options;
+  options.image_ref_resolver = [&calls](std::vector<std::string>)
+      -> asio::awaitable<absl::StatusOr<std::map<std::string, std::string>>> {
+    if (++calls == 2) co_return absl::UnavailableError("backend offline");
+    co_return std::map<std::string, std::string>{{"k1", "https://cos/k1"}};
+  };
+  auto conv = backend->CreateConversation(options);
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*conv, kImageMsg, io, cancel.Token()).response.ok());
+  auto rejected = Send(*conv, R"({"role":"user","content":"second"})",
+                       io, cancel.Token());
+  EXPECT_EQ(rejected.response.status().code(), absl::StatusCode::kUnavailable);
+  ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"third"})",
+                   io, cancel.Token()).response.ok());
+  const auto messages = json::parse(http.requests().back().body)["messages"];
+  ASSERT_EQ(messages.size(), 3u);
+  EXPECT_EQ(messages.back()["content"], "third");
+  EXPECT_EQ(messages[0]["content"][1]["image_url"]["url"], "https://cos/k1");
+  EXPECT_EQ(calls, 3);
 }
 
 TEST(OpenAiChatBackendTest, ResolverTransportFailureDoesNotRetainIncomingImage) {
