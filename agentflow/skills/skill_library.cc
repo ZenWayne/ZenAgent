@@ -70,18 +70,26 @@ absl::StatusOr<std::shared_ptr<const SkillLibrary>> SkillLibrary::Load(
 
     for (const fs::path& dir : subdirs) {
       const fs::path md = dir / "SKILL.md";
-      const bool manifest_exists = fs::exists(md, ec);
+      const fs::file_status manifest_entry = fs::symlink_status(md, ec);
+      if (ec == std::errc::no_such_file_or_directory) {
+        ec.clear();
+        continue;
+      }
       if (ec) {
         return absl::FailedPreconditionError(absl::StrCat(
             root.label, ": cannot inspect ", md.string(), ": ", ec.message()));
       }
-      if (!manifest_exists) continue;
-      const bool has_manifest = fs::is_regular_file(md, ec);
+      if (manifest_entry.type() == fs::file_type::not_found) continue;
+
+      const fs::file_status manifest_target = fs::status(md, ec);
       if (ec) {
         return absl::FailedPreconditionError(absl::StrCat(
             root.label, ": cannot inspect ", md.string(), ": ", ec.message()));
       }
-      if (!has_manifest) continue;
+      if (!fs::is_regular_file(manifest_target)) {
+        return absl::FailedPreconditionError(absl::StrCat(
+            root.label, ": SKILL.md is not a regular file: ", md.string()));
+      }
 
       auto contents = ReadWholeFile(md);
       if (!contents.ok()) {

@@ -91,6 +91,34 @@ TEST(SkillLibrary, BrokenOverrideDoesNotFallBackToLowerRoot) {
   EXPECT_NE(lib.status().message().find("user"), std::string::npos);
 }
 
+TEST(SkillLibrary, DirectoryManifestFailsOverrideWithoutFallback) {
+  auto low = FreshTempDir("low");
+  auto high = FreshTempDir("high");
+  WriteFile(low / "s" / "SKILL.md", SkillMd("s", "fine", ""));
+  std::filesystem::create_directories(high / "s" / "SKILL.md");
+
+  auto lib = SkillLibrary::Load({{low, "builtin"}, {high, "user"}});
+
+  ASSERT_FALSE(lib.ok());
+  EXPECT_NE(lib.status().message().find("user"), std::string::npos);
+  EXPECT_NE(lib.status().message().find("SKILL.md"), std::string::npos);
+}
+
+TEST(SkillLibrary, DanglingManifestSymlinkFailsOverrideWithoutFallback) {
+  auto low = FreshTempDir("low");
+  auto high = FreshTempDir("high");
+  WriteFile(low / "s" / "SKILL.md", SkillMd("s", "fine", ""));
+  std::filesystem::create_directories(high / "s");
+  std::filesystem::create_symlink(high / "missing-target",
+                                  high / "s" / "SKILL.md");
+
+  auto lib = SkillLibrary::Load({{low, "builtin"}, {high, "user"}});
+
+  ASSERT_FALSE(lib.ok());
+  EXPECT_NE(lib.status().message().find("user"), std::string::npos);
+  EXPECT_NE(lib.status().message().find("SKILL.md"), std::string::npos);
+}
+
 TEST(SkillLibrary, SelectKeepsRequestedOrder) {
   auto root = FreshTempDir("lib");
   WriteFile(root / "a" / "SKILL.md", SkillMd("a", "d", ""));
