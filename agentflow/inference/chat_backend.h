@@ -3,6 +3,8 @@
 #define AGENTFLOW_INFERENCE_CHAT_BACKEND_H_
 
 #include <functional>
+#include <map>
+#include <vector>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -22,6 +24,11 @@ namespace agentflow {
 // deltas" — check it before calling.
 using TokenSink =
     std::function<asio::awaitable<void>(std::string_view delta)>;
+
+// 把历史里的 image_ref key 解析成可取回的 URL。每次真正发请求前调用一次
+// （含工具循环的每一轮），返回 key→url；解析不到的 key 不放进结果即可。
+using ImageRefResolver = std::function<asio::awaitable<
+    absl::StatusOr<std::map<std::string, std::string>>>(std::vector<std::string> keys)>;
 
 struct ChatConversationOptions {
   // A bare content ARRAY, not a {role,content} object:
@@ -47,6 +54,10 @@ struct ChatConversationOptions {
   // A remote backend cannot honour this; it emits a trace warning and runs
   // unconstrained rather than degrading silently (design spec §6).
   bool constrained_tool_calls = false;
+  // Remote-only. Empty: any image_ref in history fails the send with
+  // attachment_invalid (an image the model would silently never see is worse).
+  ImageRefResolver image_ref_resolver;
+
 };
 
 // One multi-turn conversation. The implementation OWNS history: locally the
