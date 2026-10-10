@@ -146,6 +146,17 @@ Sanitizer configs are available: `bazel test --config=asan //tests/...` (also `-
 > **Note (proxy):** Bazel downloads may need JVM proxy args, e.g.
 > `--host_jvm_args=-Dhttps.proxyHost=127.0.0.1 --host_jvm_args=-Dhttps.proxyPort=10808`.
 
+### Using the Agent Skills parser from a host module
+
+The `//agentflow/skills` target depends on yaml-cpp 0.8.0. This repository's
+root `MODULE.bazel` applies `yaml-cpp-include-cstdint.patch` with a
+`single_version_override`, because the BCR source uses `uint16_t` without
+including `<cstdint>`. Bazel module overrides are root-only and do not propagate
+to consumers. A host such as `zen_chat_service` that consumes
+`@agentflow//agentflow/skills` must add yaml-cpp as a direct dependency and
+repeat the override in its own root `MODULE.bazel`, with the patch available in
+the host repository. Depending on `@agentflow` alone does not apply this fix.
+
 ## Examples
 
 | Demo | What it shows |
