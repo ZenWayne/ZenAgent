@@ -1,0 +1,12 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "skill_test",
+    size = "small",
+    srcs = ["skill_test.cc"],
+    deps = [
+        "//agentflow/skills",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
