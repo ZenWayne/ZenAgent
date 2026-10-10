@@ -10,3 +10,18 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "skill_library_test",
+    size = "small",
+    srcs = [
+        "skill_library_test.cc",
+        "skill_test_util.h",
+    ],
+    deps = [
+        "//agentflow/skills",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
