@@ -466,5 +466,48 @@ TEST(ToOpenAiMessagesTest, UsageIsNotSentBackToTheProvider) {
   EXPECT_FALSE((*out)[0].contains("usage"));
 }
 
+TEST(ImageRefTest, UserImageRefsSurviveAsContentArray) {
+  auto out = ToOpenAiMessages(R"({"role":"user","content":[
+      {"type":"text","text":"看图"},{"type":"image_ref","key":"chat-tmp/u/s/a.png"}]})");
+  ASSERT_TRUE(out.ok());
+  ASSERT_EQ(out->size(), 1u);
+  EXPECT_EQ((*out)[0]["content"], json::parse(R"([
+      {"type":"text","text":"看图"},{"type":"image_ref","key":"chat-tmp/u/s/a.png"}])"));
+}
+
+TEST(ImageRefTest, TextOnlyUserStillFlattensToString) {
+  auto out = ToOpenAiMessages(R"({"role":"user","content":[{"type":"text","text":"hi"}]})");
+  ASSERT_TRUE(out.ok());
+  EXPECT_EQ((*out)[0]["content"], "hi");
+}
+
+TEST(ImageRefTest, CollectDedupesInOrder) {
+  std::vector<json> msgs = {
+      json::parse(R"({"role":"user","content":[{"type":"image_ref","key":"k1"},{"type":"image_ref","key":"k2"}]})"),
+      json::parse(R"({"role":"assistant","content":"ok"})"),
+      json::parse(R"({"role":"user","content":[{"type":"image_ref","key":"k1"}]})")};
+  EXPECT_EQ(CollectImageRefKeys(msgs), (std::vector<std::string>{"k1", "k2"}));
+}
+
+TEST(ImageRefTest, SubstituteBuildsWireCopyAndReportsMissing) {
+  std::vector<json> msgs = {json::parse(
+      R"({"role":"user","content":[{"type":"text","text":"x"},{"type":"image_ref","key":"k1"},{"type":"image_ref","key":"k2"}]})")};
+  std::vector<std::string> missing;
+  auto wire = SubstituteImageRefs(msgs, {{"k1", "https://cos/k1?sig"}}, &missing);
+  EXPECT_EQ(wire[0]["content"][1],
+            json::parse(R"({"type":"image_url","image_url":{"url":"https://cos/k1?sig"}})"));
+  EXPECT_EQ(missing, (std::vector<std::string>{"k2"}));
+  // 原历史不被修改：只存 key
+  EXPECT_EQ(msgs[0]["content"][1]["type"], "image_ref");
+}
+
+TEST(ImageRefTest, MarkExpiredReplacesOnlyNamedKeys) {
+  std::vector<json> msgs = {json::parse(
+      R"({"role":"user","content":[{"type":"image_ref","key":"k1"},{"type":"image_ref","key":"k2"}]})")};
+  MarkImageRefsExpired(&msgs, {"k2"});
+  EXPECT_EQ(msgs[0]["content"][0]["type"], "image_ref");
+  EXPECT_EQ(msgs[0]["content"][1], json::parse(R"({"type":"text","text":"[图片已失效]"})"));
+}
+
 }  // namespace
 }  // namespace agentflow::openai
