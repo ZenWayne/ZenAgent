@@ -25,3 +25,17 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "skill_tools_test",
+    size = "small",
+    srcs = ["skill_tools_test.cc", "skill_test_util.h"],
+    deps = [
+        "//agentflow/skills",
+        "//agentflow/tools",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
