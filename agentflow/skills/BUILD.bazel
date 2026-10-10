@@ -1,0 +1,16 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Kept separate from //agentflow/core so clients without skills do not link yaml-cpp.
+cc_library(
+    name = "skills",
+    srcs = ["skill.cc"],
+    hdrs = ["skill.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@yaml-cpp//:yaml-cpp",
+    ],
+)
