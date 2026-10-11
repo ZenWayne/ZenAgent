@@ -393,5 +393,205 @@ TEST(OpenAiChatBackendTest, AbandonedToolCallTurnDoesNotPoisonNextRequest) {
   }
 }
 
+constexpr char kImageMsg[] =
+    R"({"role":"user","content":[{"type":"text","text":"看图"},{"type":"image_ref","key":"k1"}]})";
+
+ChatConversationOptions WithResolver(int* calls, std::map<std::string, std::string> urls) {
+  ChatConversationOptions o;
+  o.image_ref_resolver = [calls, urls](std::vector<std::string> keys)
+      -> asio::awaitable<absl::StatusOr<std::map<std::string, std::string>>> {
+    ++*calls;
+    std::map<std::string, std::string> out;
+    for (const auto& k : keys) {
+      if (auto it = urls.find(k); it != urls.end()) out[k] = it->second + "#" + std::to_string(*calls);
+    }
+    co_return out;
+  };
+  return o;
+}
+
+TEST(OpenAiChatBackendTest, ImageRefIsResolvedFreshOnEveryCall) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("a")}}, {.frames = {TextFrame("b")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  int calls = 0;
+  auto conv = backend->CreateConversation(WithResolver(&calls, {{"k1", "https://cos/k1"}}));
+  CancelSource cancel;
+
+  ASSERT_TRUE(Send(*conv, kImageMsg, io, cancel.Token()).response.ok());
+  ASSERT_TRUE(Send(*conv, R"({"role":"user","content":[{"type":"text","text":"再说说"}]})",
+                   io, cancel.Token()).response.ok());
+
+  ASSERT_EQ(http.requests().size(), 2u);
+  json first = json::parse(http.requests()[0].body)["messages"].back()["content"][1];
+  json second = json::parse(http.requests()[1].body)["messages"][0]["content"][1];
+  EXPECT_EQ(first["image_url"]["url"], "https://cos/k1#1");
+  EXPECT_EQ(second["image_url"]["url"], "https://cos/k1#2");  // 第二次调用重新签
+  EXPECT_EQ(calls, 2);
+}
+
+TEST(OpenAiChatBackendTest, MissingImageFailsWithoutPoisoningHistory) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("ok")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  int calls = 0;
+  auto conv = backend->CreateConversation(WithResolver(&calls, {}));  // k1 解析不到
+  CancelSource cancel;
+
+  auto r1 = Send(*conv, kImageMsg, io, cancel.Token());
+  ASSERT_FALSE(r1.response.ok());
+  EXPECT_EQ(r1.response.status().code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_NE(r1.response.status().message().find("attachment_invalid: k1"), std::string::npos);
+  EXPECT_TRUE(http.requests().empty());  // 没有发给模型
+
+  // 下一轮纯文本必须正常发出，且历史里没有那条失败的带图消息
+  auto r2 = Send(*conv, R"({"role":"user","content":[{"type":"text","text":"hi"}]})",
+                 io, cancel.Token());
+  ASSERT_TRUE(r2.response.ok());
+  json msgs = json::parse(http.requests()[0].body)["messages"];
+  ASSERT_EQ(msgs.size(), 1u);
+  EXPECT_EQ(msgs[0]["content"], "hi");
+}
+
+TEST(OpenAiChatBackendTest, ImageWithoutResolverIsRejected) {
+  asio::io_context io;
+  testing::FakeHttpClient http({});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+  CancelSource cancel;
+  auto r = Send(*conv, kImageMsg, io, cancel.Token());
+  ASSERT_FALSE(r.response.ok());
+  EXPECT_NE(r.response.status().message().find("attachment_invalid"), std::string::npos);
+}
+
+
+TEST(OpenAiChatBackendTest, ImageUrlsAreRefreshedForToolResultRound) {
+  asio::io_context io;
+  testing::FakeHttpClient http({
+      {.frames = {ToolCallFrame("call_1", "inspect")}},
+      {.frames = {TextFrame("done")}},
+  });
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  int calls = 0;
+  auto conv = backend->CreateConversation(
+      WithResolver(&calls, {{"k1", "https://cos/k1"}}));
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*conv, kImageMsg, io, cancel.Token()).response.ok());
+  ASSERT_TRUE(Send(*conv,
+      R"({"role":"tool","content":[{"id":"call_1","name":"inspect","response":{"value":"ok"}}]})",
+      io, cancel.Token()).response.ok());
+  ASSERT_EQ(http.requests().size(), 2u);
+  EXPECT_EQ(calls, 2);
+  EXPECT_EQ(json::parse(http.requests()[1].body)["messages"][0]
+                ["content"][1]["image_url"]["url"],
+            "https://cos/k1#2");
+}
+
+TEST(OpenAiChatBackendTest, ImageUrlsAreRefreshedOnRetry) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.status = absl::UnavailableError("retry")}, {.frames = {TextFrame("ok")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  int calls = 0;
+  auto conv = backend->CreateConversation(WithResolver(&calls, {{"k1", "https://cos/k1"}}));
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*conv, kImageMsg, io, cancel.Token()).response.ok());
+  ASSERT_EQ(http.requests().size(), 2u);
+  EXPECT_EQ(json::parse(http.requests()[1].body)["messages"][0]["content"][1]["image_url"]["url"], "https://cos/k1#2");
+}
+
+TEST(OpenAiChatBackendTest, ExpiredHistoricalImageBecomesTextForFollowingTurn) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("ok")}}, {.frames = {TextFrame("next")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  int calls = 0;
+  ChatConversationOptions options;
+  options.image_ref_resolver = [&calls](std::vector<std::string>) -> asio::awaitable<absl::StatusOr<std::map<std::string, std::string>>> {
+    if (++calls == 1) co_return std::map<std::string, std::string>{{"k1", "https://cos/k1"}};
+    co_return std::map<std::string, std::string>{};
+  };
+  auto conv = backend->CreateConversation(options);
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*conv, kImageMsg, io, cancel.Token()).response.ok());
+  EXPECT_FALSE(Send(*conv, R"({"role":"user","content":"second"})", io, cancel.Token()).response.ok());
+  ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"third"})", io, cancel.Token()).response.ok());
+  const auto messages = json::parse(http.requests().back().body)["messages"];
+  ASSERT_EQ(messages.size(), 3u);  // first user, its answer, accepted third user
+  EXPECT_EQ(messages[0]["content"][1]["text"], "[图片已失效]");
+  EXPECT_EQ(messages.back()["content"], "third");
+  for (const auto& message : messages) {
+    EXPECT_NE(message["content"], "second")
+        << "a rejected text turn must never be replayed to the model";
+  }
+  EXPECT_EQ(calls, 2);
+}
+
+TEST(OpenAiChatBackendTest, ResolverTransportFailureDoesNotRetainPlainTurn) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("first")}},
+                                {.frames = {TextFrame("third")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  int calls = 0;
+  ChatConversationOptions options;
+  options.image_ref_resolver = [&calls](std::vector<std::string>)
+      -> asio::awaitable<absl::StatusOr<std::map<std::string, std::string>>> {
+    if (++calls == 2) co_return absl::UnavailableError("backend offline");
+    co_return std::map<std::string, std::string>{{"k1", "https://cos/k1"}};
+  };
+  auto conv = backend->CreateConversation(options);
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*conv, kImageMsg, io, cancel.Token()).response.ok());
+  auto rejected = Send(*conv, R"({"role":"user","content":"second"})",
+                       io, cancel.Token());
+  EXPECT_EQ(rejected.response.status().code(), absl::StatusCode::kUnavailable);
+  ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"third"})",
+                   io, cancel.Token()).response.ok());
+  const auto messages = json::parse(http.requests().back().body)["messages"];
+  ASSERT_EQ(messages.size(), 3u);
+  EXPECT_EQ(messages.back()["content"], "third");
+  EXPECT_EQ(messages[0]["content"][1]["image_url"]["url"], "https://cos/k1");
+  EXPECT_EQ(calls, 3);
+}
+
+TEST(OpenAiChatBackendTest, ResolverTransportFailureDoesNotRetainIncomingImage) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("ok")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  ChatConversationOptions options;
+  options.image_ref_resolver = [](std::vector<std::string>) -> asio::awaitable<absl::StatusOr<std::map<std::string, std::string>>> {
+    co_return absl::UnavailableError("backend offline");
+  };
+  auto conv = backend->CreateConversation(options);
+  CancelSource cancel;
+  auto first = Send(*conv, kImageMsg, io, cancel.Token());
+  EXPECT_EQ(first.response.status().code(), absl::StatusCode::kUnavailable);
+  ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"retry text"})", io, cancel.Token()).response.ok());
+  EXPECT_EQ(json::parse(http.requests()[0].body)["messages"].size(), 1u);
+}
+
+TEST(OpenAiChatBackendTest, SessionImageLimitRejectsTwentyFirstAndRollsBack) {
+  asio::io_context io;
+  std::vector<testing::FakeHttpTurn> turns(22);
+  testing::FakeHttpClient http(turns);
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  int calls = 0;
+  ChatConversationOptions options;
+  options.image_ref_resolver = [&calls](std::vector<std::string> keys) -> asio::awaitable<absl::StatusOr<std::map<std::string, std::string>>> {
+    ++calls;
+    std::map<std::string, std::string> urls;
+    for (const auto& key : keys) urls[key] = "https://cos/" + key;
+    co_return urls;
+  };
+  auto conv = backend->CreateConversation(options);
+  CancelSource cancel;
+  for (int i = 0; i < 20; ++i) {
+    auto message = json{{"role", "user"}, {"content", json::array({{{"type", "image_ref"}, {"key", std::to_string(i)}}})}}.dump();
+    ASSERT_TRUE(Send(*conv, message, io, cancel.Token()).response.ok());
+  }
+  auto overflow = Send(*conv, kImageMsg, io, cancel.Token());
+  EXPECT_FALSE(overflow.response.ok());
+  EXPECT_EQ(calls, 20);
+  ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"still works"})", io, cancel.Token()).response.ok());
+  EXPECT_EQ(http.requests().size(), 21u);
+}
 }  // namespace
 }  // namespace agentflow::openai

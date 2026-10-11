@@ -37,6 +37,32 @@ std::string FlattenContent(const json& content) {
   return out;
 }
 
+bool IsImageRef(const json& item) {
+  return item.is_object() && item.contains("type") && item["type"].is_string() &&
+         item["type"].get<std::string>() == "image_ref" && item.contains("key") &&
+         item["key"].is_string() && !item["key"].get<std::string>().empty();
+}
+
+bool HasImageRef(const json& content) {
+  if (!content.is_array()) return false;
+  return std::any_of(content.begin(), content.end(), IsImageRef);
+}
+
+// text + image_ref 保序输出；其它类型丢弃（与 FlattenContent 同样的防御）。
+json UserContentWithImages(const json& content) {
+  json out = json::array();
+  for (const auto& item : content) {
+    if (IsImageRef(item)) {
+      out.push_back({{"type", "image_ref"}, {"key", item["key"]}});
+    } else if (item.is_object() && item.contains("type") && item["type"].is_string() &&
+               item["type"].get<std::string>() == "text" && item.contains("text") &&
+               item["text"].is_string()) {
+      out.push_back({{"type", "text"}, {"text", item["text"]}});
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 std::optional<nlohmann::json> SystemMessage(
@@ -96,8 +122,12 @@ absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
   }
 
   json msg = {{"role", role.empty() ? "user" : role}};
-  msg["content"] = m.contains("content") ? FlattenContent(m["content"])
-                                          : std::string{};
+  if (msg["role"] == "user" && m.contains("content") && HasImageRef(m["content"])) {
+    msg["content"] = UserContentWithImages(m["content"]);
+  } else {
+    msg["content"] = m.contains("content") ? FlattenContent(m["content"])
+                                            : std::string{};
+  }
   // Thinking-mode round-trip: DeepSeek v4 requires the previous turn's
   // reasoning_content to be passed back when that turn emitted tool_calls.
   if (m.contains("reasoning_content") && m["reasoning_content"].is_string()) {
@@ -338,6 +368,54 @@ absl::StatusOr<std::string> ResponseToCanonical(
     }
   }
   return out.dump();
+}
+
+std::vector<std::string> CollectImageRefKeys(const std::vector<json>& messages) {
+  std::vector<std::string> keys;
+  for (const auto& m : messages) {
+    if (!m.is_object() || !m.contains("content") || !m["content"].is_array()) continue;
+    for (const auto& item : m["content"]) {
+      if (!IsImageRef(item)) continue;
+      std::string k = item["key"].get<std::string>();
+      if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(std::move(k));
+    }
+  }
+  return keys;
+}
+
+std::vector<json> SubstituteImageRefs(const std::vector<json>& messages,
+                                      const std::map<std::string, std::string>& urls,
+                                      std::vector<std::string>* missing) {
+  std::vector<json> wire = messages;
+  for (auto& m : wire) {
+    if (!m.is_object() || !m.contains("content") || !m["content"].is_array()) continue;
+    for (auto& item : m["content"]) {
+      if (!IsImageRef(item)) continue;
+      const std::string k = item["key"].get<std::string>();
+      auto it = urls.find(k);
+      if (it == urls.end()) {
+        if (missing && std::find(missing->begin(), missing->end(), k) == missing->end()) {
+          missing->push_back(k);
+        }
+        continue;
+      }
+      item = {{"type", "image_url"}, {"image_url", {{"url", it->second}}}};
+    }
+  }
+  return wire;
+}
+
+void MarkImageRefsExpired(std::vector<json>* messages, const std::vector<std::string>& keys) {
+  if (messages == nullptr) return;
+  for (auto& m : *messages) {
+    if (!m.is_object() || !m.contains("content") || !m["content"].is_array()) continue;
+    for (auto& item : m["content"]) {
+      if (IsImageRef(item) &&
+          std::find(keys.begin(), keys.end(), item["key"].get<std::string>()) != keys.end()) {
+        item = {{"type", "text"}, {"text", "[图片已失效]"}};
+      }
+    }
+  }
 }
 
 }  // namespace agentflow::openai

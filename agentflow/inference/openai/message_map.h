@@ -5,6 +5,7 @@
 #ifndef AGENTFLOW_INFERENCE_OPENAI_MESSAGE_MAP_H_
 #define AGENTFLOW_INFERENCE_OPENAI_MESSAGE_MAP_H_
 
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -64,6 +65,17 @@ std::string BuildRequestBody(std::string_view model,
 // assistant JSON. (The streaming path uses StreamAccumulator instead.)
 absl::StatusOr<std::string> ResponseToCanonical(
     std::string_view body, UsageProvider provider = UsageProvider::kOpenAi);
+
+// image_ref = {"type":"image_ref","key":"<object key>"}：历史里只存对象 key，
+// 每次真正发请求前由调用方解析成 URL（见 ChatConversationOptions::image_ref_resolver）。
+std::vector<std::string> CollectImageRefKeys(
+    const std::vector<nlohmann::json>& messages);
+std::vector<nlohmann::json> SubstituteImageRefs(
+    const std::vector<nlohmann::json>& messages,
+    const std::map<std::string, std::string>& urls,
+    std::vector<std::string>* missing);
+void MarkImageRefsExpired(std::vector<nlohmann::json>* messages,
+                          const std::vector<std::string>& keys);
 
 }  // namespace agentflow::openai
 #endif  // AGENTFLOW_INFERENCE_OPENAI_MESSAGE_MAP_H_

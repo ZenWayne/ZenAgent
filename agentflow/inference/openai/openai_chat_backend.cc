@@ -6,6 +6,7 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include <asio/as_tuple.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
@@ -44,12 +45,19 @@ class OpenAiConversation : public IConversation {
       const CancelToken& cancel) override {
     auto incoming = ToOpenAiMessages(message_json);
     if (!incoming.ok()) co_return incoming.status();
+    auto previous = messages_;
+    const bool incoming_has_images = !CollectImageRefKeys(*incoming).empty();
     for (auto& m : *incoming) messages_.push_back(std::move(m));
     // AFTER appending, never before: when `incoming` IS the tool results for
     // the previous turn's tool_calls, appending first is what lets the repair
     // see them as answered. Repairing first would insert placeholders ahead of
     // the real results and answer every call twice.
     RepairToolCallPairing(&messages_);
+
+    if (CollectImageRefKeys(messages_).size() > 20) {
+      if (incoming_has_images) messages_ = std::move(previous);
+      co_return absl::InvalidArgumentError("too many images in session (max 20)");
+    }
 
     net::HttpRequest req;
     req.url = absl::StrCat(opts_.base_url, "/chat/completions");
@@ -62,12 +70,44 @@ class OpenAiConversation : public IConversation {
       req.headers.push_back(
           {"Authorization", absl::StrCat("Bearer ", opts_.api_key)});
     }
-    req.body = BuildRequestBody(opts_.model, conv_opts_, messages_,
-                                 /*stream=*/true, opts_.strict_tools);
 
     absl::Status last = absl::UnknownError("no attempt made");
     for (int attempt = 0; attempt < opts_.max_retries; ++attempt) {
       if (cancel.IsCancelled()) co_return absl::CancelledError("cancelled");
+
+      // image_ref 只存 key；每次发请求前现解析成 URL，只改发出去的副本。
+      std::vector<json> wire_storage;
+      const std::vector<json>* wire = &messages_;
+      if (auto keys = CollectImageRefKeys(messages_); !keys.empty()) {
+        absl::Status fail;
+        std::vector<std::string> missing;
+        if (!conv_opts_.image_ref_resolver) {
+          missing = keys;
+        } else {
+          auto urls = co_await conv_opts_.image_ref_resolver(keys);
+          if (!urls.ok()) {
+            fail = urls.status();
+          } else {
+            wire_storage = SubstituteImageRefs(messages_, *urls, &missing);
+            wire = &wire_storage;
+          }
+        }
+        if (fail.ok() && !missing.empty()) {
+          fail = absl::FailedPreconditionError(
+              absl::StrCat("attachment_invalid: ", absl::StrJoin(missing, ",")));
+        }
+        if (!fail.ok()) {
+          // No rejected turn may enter history, including a plain text turn
+          // rejected because an older image expired or resolution failed.
+          // Expire known-invalid refs only after restoring accepted history.
+          messages_ = std::move(previous);
+          MarkImageRefsExpired(&messages_, missing);
+          co_return fail;
+        }
+      }
+
+      req.body = BuildRequestBody(opts_.model, conv_opts_, *wire,
+                                  /*stream=*/true, opts_.strict_tools);
 
       StreamAccumulator acc(opts_.provider);
       bool emitted = false;
