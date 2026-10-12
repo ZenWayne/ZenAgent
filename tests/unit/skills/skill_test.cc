@@ -129,6 +129,33 @@ TEST(ParseSkillMd, RejectsInvalidUtf8InLimitedFields) {
   EXPECT_FALSE(invalid_compatibility.ok());
 }
 
+TEST(ParseSkillMd, RejectsMalformedUtf8Body) {
+  const std::vector<std::string> malformed = {
+      "\xFF",          // Invalid leading byte.
+      "\x80",          // Stray continuation byte.
+      "\xC0\xAF",      // Overlong encoding.
+      "\xE2\x82",      // Truncated sequence.
+      "\xE2\x28\xA1",  // Invalid continuation byte.
+      "\xED\xA0\x80",  // UTF-16 surrogate.
+      "\xF4\x90\x80\x80",  // Above U+10FFFF.
+  };
+  for (const auto& bytes : malformed) {
+    auto s = ParseSkillMd(
+        "---\nname: x\ndescription: d\n---\nvalid prefix\n" + bytes, "x");
+    ASSERT_FALSE(s.ok());
+    EXPECT_NE(s.status().message().find("body"), std::string::npos);
+    EXPECT_NE(s.status().message().find("UTF-8"), std::string::npos);
+  }
+}
+
+TEST(ParseSkillMd, PreservesUnicodeBodyAfterNormalization) {
+  auto s = ParseSkillMd(
+      "\xEF\xBB\xBF---\r\nname: x\r\ndescription: d\r\n---\r\n\r\n"
+      "# 台词 café 😀\r\n正文 {{state.x}}\r\n", "x");
+  ASSERT_TRUE(s.ok()) << s.status();
+  EXPECT_EQ(s->body, "# 台词 café 😀\n正文 {{state.x}}\n");
+}
+
 TEST(ParseSkillMd, RejectsMissingOrBrokenFrontmatter) {
   EXPECT_FALSE(ParseSkillMd("# no frontmatter\n", "x").ok());
   EXPECT_FALSE(ParseSkillMd("---\nname: x\ndescription: d\n", "x").ok());

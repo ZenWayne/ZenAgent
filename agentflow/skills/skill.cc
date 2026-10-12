@@ -31,7 +31,7 @@ absl::StatusOr<std::string> Scalar(const YAML::Node& node, std::string_view key)
 }
 
 absl::StatusOr<size_t> Utf8CharacterCount(std::string_view value,
-                                         std::string_view field_name) {
+                                         std::string_view value_name) {
   size_t count = 0;
   for (size_t i = 0; i < value.size();) {
     const auto first = static_cast<unsigned char>(value[i]);
@@ -55,25 +55,21 @@ absl::StatusOr<size_t> Utf8CharacterCount(std::string_view value,
       sequence_length = 4;
       minimum = 0x10000;
     } else {
-      return Invalid(absl::StrCat("frontmatter '", field_name,
-                                  "' must contain valid UTF-8"));
+      return Invalid(absl::StrCat(value_name, " must contain valid UTF-8"));
     }
     if (i + sequence_length > value.size()) {
-      return Invalid(absl::StrCat("frontmatter '", field_name,
-                                  "' must contain valid UTF-8"));
+      return Invalid(absl::StrCat(value_name, " must contain valid UTF-8"));
     }
     for (size_t j = 1; j < sequence_length; ++j) {
       const auto continuation = static_cast<unsigned char>(value[i + j]);
       if ((continuation & 0xC0) != 0x80) {
-        return Invalid(absl::StrCat("frontmatter '", field_name,
-                                    "' must contain valid UTF-8"));
+        return Invalid(absl::StrCat(value_name, " must contain valid UTF-8"));
       }
       code_point = (code_point << 6) | (continuation & 0x3F);
     }
     if (code_point < minimum || code_point > 0x10FFFF ||
         (code_point >= 0xD800 && code_point <= 0xDFFF)) {
-      return Invalid(absl::StrCat("frontmatter '", field_name,
-                                  "' must contain valid UTF-8"));
+      return Invalid(absl::StrCat(value_name, " must contain valid UTF-8"));
     }
     i += sequence_length;
     ++count;
@@ -174,6 +170,8 @@ absl::StatusOr<Skill> ParseSkillMd(std::string_view raw, std::string_view dir_na
   if (absl::Status status = SplitFrontmatter(text, &front, &body); !status.ok()) {
     return status;
   }
+  auto body_length = Utf8CharacterCount(body, "SKILL.md body");
+  if (!body_length.ok()) return body_length.status();
 
   Skill skill;
   skill.body = std::move(body);
@@ -204,13 +202,14 @@ absl::StatusOr<Skill> ParseSkillMd(std::string_view raw, std::string_view dir_na
   if (absl::StripAsciiWhitespace(skill.description).empty()) {
     return Invalid("frontmatter is missing required non-empty 'description'");
   }
-  auto description_length = Utf8CharacterCount(skill.description, "description");
+  auto description_length =
+      Utf8CharacterCount(skill.description, "frontmatter 'description'");
   if (!description_length.ok()) return description_length.status();
   if (*description_length > kMaxDescriptionLen) {
     return Invalid("frontmatter 'description' exceeds 1024 characters");
   }
   auto compatibility_length =
-      Utf8CharacterCount(skill.compatibility, "compatibility");
+      Utf8CharacterCount(skill.compatibility, "frontmatter 'compatibility'");
   if (!compatibility_length.ok()) return compatibility_length.status();
   if (*compatibility_length > kMaxCompatibilityLen) {
     return Invalid("frontmatter 'compatibility' exceeds 500 characters");
