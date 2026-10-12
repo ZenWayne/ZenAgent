@@ -91,6 +91,23 @@ TEST(SkillLibrary, BrokenOverrideDoesNotFallBackToLowerRoot) {
   EXPECT_NE(lib.status().message().find("user"), std::string::npos);
 }
 
+TEST(SkillLibrary, MalformedUtf8BodyFailsOverrideWithoutFallback) {
+  auto low = FreshTempDir("low");
+  auto high = FreshTempDir("high");
+  WriteFile(low / "s" / "SKILL.md", SkillMd("s", "fine", "valid body"));
+  const auto malformed_path = high / "s" / "SKILL.md";
+  WriteFile(malformed_path, SkillMd("s", "fine", "invalid body\n\xFF"));
+
+  auto lib = SkillLibrary::Load({{low, "builtin"}, {high, "user"}});
+
+  ASSERT_FALSE(lib.ok());
+  EXPECT_EQ(lib.status().code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_NE(lib.status().message().find("user"), std::string::npos);
+  EXPECT_NE(lib.status().message().find(malformed_path.string()), std::string::npos);
+  EXPECT_NE(lib.status().message().find("body"), std::string::npos);
+  EXPECT_NE(lib.status().message().find("UTF-8"), std::string::npos);
+}
+
 TEST(SkillLibrary, DirectoryManifestFailsOverrideWithoutFallback) {
   auto low = FreshTempDir("low");
   auto high = FreshTempDir("high");

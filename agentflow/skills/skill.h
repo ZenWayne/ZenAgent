@@ -21,7 +21,7 @@ struct Skill {
   std::vector<std::string> allowed_tools;
   // Filled by SkillLibrary; empty when returned directly by ParseSkillMd.
   std::filesystem::path dir;
-  // SKILL.md body, preserved verbatim after line-ending normalization.
+  // UTF-8 SKILL.md body after CRLF normalization and leading blank-line removal.
   std::string body;
   // Filled by SkillLibrary; scripts are not executed by the parser.
   bool has_scripts = false;
