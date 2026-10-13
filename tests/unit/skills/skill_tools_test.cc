@@ -52,7 +52,9 @@ class SkillToolsTest : public ::testing::Test {
     auto lib = SkillLibrary::Load({{root_, "builtin"}});
     ASSERT_TRUE(lib.ok()) << lib.status();
     lib_ = *lib;
-    tools_ = MakeSkillTools(lib_, {"alpha", "beta"});
+    auto tools = MakeSkillTools(lib_, {"alpha", "beta"});
+    ASSERT_TRUE(tools.ok()) << tools.status();
+    tools_ = *tools;
     ASSERT_EQ(tools_.size(), 2u);
   }
   Tool& load() { return *tools_[0]; }
@@ -153,12 +155,26 @@ TEST(MakeSkillTools, EmptyVisibilityMeansNoTools) {
   auto root = FreshTempDir("tools");
   auto lib = SkillLibrary::Load({{root, "builtin"}});
   ASSERT_TRUE(lib.ok());
-  EXPECT_TRUE(MakeSkillTools(*lib, {}).empty());
+  auto tools = MakeSkillTools(*lib, {});
+  ASSERT_TRUE(tools.ok()) << tools.status();
+  EXPECT_TRUE(tools->empty());
+  auto no_library = MakeSkillTools(nullptr, {});
+  ASSERT_TRUE(no_library.ok()) << no_library.status();
+  EXPECT_TRUE(no_library->empty());
 }
 
 TEST_F(SkillToolsTest, RejectsUnknownVisibleNamesBeforeCreatingTools) {
-  EXPECT_THROW(MakeSkillTools(lib_, {"alpha", "missing"}), std::invalid_argument);
-  EXPECT_THROW(MakeSkillTools(lib_, {"alpha", "alpha"}), std::invalid_argument);
+  auto missing = MakeSkillTools(lib_, {"alpha", "missing"});
+  EXPECT_EQ(missing.status().code(), absl::StatusCode::kNotFound);
+  EXPECT_NE(missing.status().message().find("missing"), std::string::npos);
+  auto duplicate = MakeSkillTools(lib_, {"alpha", "alpha"});
+  EXPECT_EQ(duplicate.status().code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_NE(duplicate.status().message().find("alpha"), std::string::npos);
+}
+
+TEST(MakeSkillTools, NullLibraryReturnsAnErrorWithoutThrowing) {
+  auto tools = MakeSkillTools(nullptr, {"alpha"});
+  EXPECT_EQ(tools.status().code(), absl::StatusCode::kInvalidArgument);
 }
 
 TEST(RenderSkillCatalog, EmptyForNoSkills) {

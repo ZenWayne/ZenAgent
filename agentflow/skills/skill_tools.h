@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "agentflow/skills/skill_library.h"
 #include "agentflow/tools/tool.h"
 
@@ -18,9 +19,9 @@ inline constexpr std::string_view kLoadSkillToolName = "load_skill";
 inline constexpr std::string_view kReadSkillFileToolName = "read_skill_file";
 inline constexpr std::size_t kMaxSkillFileBytes = 262144;
 
-// Returns no tools for an empty subset. Invalid names or duplicate names
-// cause std::invalid_argument rather than exposing a broken schema.
-std::vector<std::shared_ptr<agentflow::Tool>> MakeSkillTools(
+// Returns no tools for an empty subset (even without a library). A nonempty
+// subset requires a library and valid, unique names; errors return a status.
+absl::StatusOr<std::vector<std::shared_ptr<agentflow::Tool>>> MakeSkillTools(
     std::shared_ptr<const SkillLibrary> library,
     std::vector<std::string> visible_names);
 
