@@ -110,7 +110,8 @@ an agent to a remote endpoint end to end.
 `//agentflow/skills` loads [Agent Skills](https://agentskills.io): directories with a
 `SKILL.md` containing YAML frontmatter and a Markdown body. `SkillLibrary::Load`
 loads prioritized roots. A host chooses the skills visible to each agent, registers
-the read-only `load_skill` and `read_skill_file` tools from `MakeSkillTools`, and
+the read-only `load_skill` and `read_skill_file` tools from `MakeSkillTools`
+(checking its `StatusOr` before registering), and
 appends `RenderSkillCatalog(...)` after its rendered system prompt. `allowed-tools`
 is parsed but not enforced. Bundled `scripts/` files can be read, but are never
 executed; `SkillScriptRunner` is an interface reserved for future local hosts.
@@ -168,6 +169,8 @@ to consumers. A host such as `zen_chat_service` that consumes
 `@agentflow//agentflow/skills` must add yaml-cpp as a direct dependency and
 repeat the override in its own root `MODULE.bazel`, with the patch available in
 the host repository. Depending on `@agentflow` alone does not apply this fix.
+This framework's patch is the canonical source; consuming hosts must compare
+their copy against it whenever updating the framework pin.
 
 ## Examples
 

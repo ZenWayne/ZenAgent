@@ -3,12 +3,12 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <stdexcept>
 #include <system_error>
 #include <utility>
 
 #include <nlohmann/json.hpp>
 
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
@@ -155,13 +155,13 @@ std::string ReadSkillFile(const SkillLibrary& library,
 
 }  // namespace
 
-std::vector<std::shared_ptr<agentflow::Tool>> MakeSkillTools(
+absl::StatusOr<std::vector<std::shared_ptr<agentflow::Tool>>> MakeSkillTools(
     std::shared_ptr<const SkillLibrary> library,
     std::vector<std::string> visible_names) {
-  if (visible_names.empty()) return {};
-  if (library == nullptr) throw std::invalid_argument("skill library is null");
+  if (visible_names.empty()) return std::vector<std::shared_ptr<agentflow::Tool>>{};
+  if (library == nullptr) return absl::InvalidArgumentError("skill library is null");
   const auto selected = library->Select(visible_names);
-  if (!selected.ok()) throw std::invalid_argument(std::string(selected.status().message()));
+  if (!selected.ok()) return selected.status();
 
   const json name_enum = visible_names;
   const json load_schema = {
