@@ -1,0 +1,41 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "skill_test",
+    size = "small",
+    srcs = ["skill_test.cc"],
+    deps = [
+        "//agentflow/skills",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "skill_library_test",
+    size = "small",
+    srcs = [
+        "skill_library_test.cc",
+        "skill_test_util.h",
+    ],
+    deps = [
+        "//agentflow/skills",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "skill_tools_test",
+    size = "small",
+    srcs = ["skill_tools_test.cc", "skill_test_util.h"],
+    deps = [
+        "//agentflow/skills",
+        "//agentflow/tools",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
