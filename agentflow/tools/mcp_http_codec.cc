@@ -83,4 +83,25 @@ absl::StatusOr<std::optional<nlohmann::json>> DecodeMcpHttpResponse(
   return std::optional<nlohmann::json>{std::move(parsed)};
 }
 
+absl::StatusOr<std::vector<nlohmann::json>> DecodeMcpHttpMessages(
+    int status_code, const std::vector<std::pair<std::string, std::string>>& headers,
+    std::string_view body) {
+  if (status_code < 200 || status_code >= 300)
+    return absl::InternalError(absl::StrCat("MCP HTTP ", status_code));
+  if (body.empty()) return std::vector<nlohmann::json>{};
+  std::vector<std::string> payloads;
+  if (ToLower(HeaderValue(headers, "content-type")).find("text/event-stream") != std::string::npos) {
+    net::SseFramer framer;
+    payloads = framer.Feed(body);
+  } else payloads.emplace_back(body);
+  if (payloads.empty()) return absl::InvalidArgumentError("MCP HTTP: no complete JSON-RPC message");
+  std::vector<nlohmann::json> messages;
+  for (const auto& payload : payloads) {
+    auto parsed = nlohmann::json::parse(payload, nullptr, false);
+    if (!parsed.is_object()) return absl::InvalidArgumentError("MCP HTTP: JSON-RPC payload is not an object");
+    messages.push_back(std::move(parsed));
+  }
+  return messages;
+}
+
 }  // namespace agentflow::mcp

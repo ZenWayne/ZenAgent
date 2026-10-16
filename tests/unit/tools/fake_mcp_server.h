@@ -56,6 +56,10 @@ class FakeMcpClient : public mcp::IMcpClient {
   std::atomic<int> call_calls{0};
   std::atomic<int> shutdown_calls{0};
   std::atomic<bool> connected{false};
+  mcp::InboundEventHandler inbound_event_handler;
+  void SetInboundEventHandler(mcp::InboundEventHandler handler) override {
+    inbound_event_handler = std::move(handler);
+  }
 
   asio::awaitable<absl::Status> Connect() override {
     ++connect_calls;

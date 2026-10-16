@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <filesystem>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -26,6 +27,7 @@
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
 #include <asio/use_future.hpp>
+#include <asio/steady_timer.hpp>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -48,6 +50,11 @@ std::string EchoHttpServerPath() {
         "/_main/tests/integration/tools/echo_mcp_http_server.py";
     struct stat st;
     if (::stat(candidate.c_str(), &st) == 0) return candidate;
+    // Also works when this SDK is tested as another workspace's module.
+    for (const auto& entry : std::filesystem::directory_iterator(srcdir)) {
+      auto nested = entry.path() / "tests/integration/tools/echo_mcp_http_server.py";
+      if (std::filesystem::exists(nested)) return nested.string();
+    }
   }
   return "tests/integration/tools/echo_mcp_http_server.py";
 }
@@ -205,6 +212,48 @@ TEST(HttpMcpSmokeTest, AttachAndInvokeEcho) {
   ASSERT_TRUE(parsed["content"].is_array());
   ASSERT_FALSE(parsed["content"].empty());
   EXPECT_EQ(parsed["content"][0]["text"], "hi over http");
+}
+
+TEST(HttpMcpSmokeTest, NotificationsArriveAfterToolReturnAndResumeOverGetSse) {
+  EchoServer server;
+  ASSERT_TRUE(server.Start());
+  proto::McpServerSpec spec;
+  spec.set_transport(proto::McpServerSpec::HTTP_SSE);
+  spec.set_command_or_url("http://127.0.0.1:" + std::to_string(server.port()) + "/mcp");
+  (*spec.mutable_headers())["Authorization"] = "Bearer test-identity";
+  asio::io_context io;
+  ToolRegistry reg(io);
+  asio::steady_timer deadline(io);
+  deadline.expires_after(std::chrono::seconds(5));
+  bool returned = false;
+  bool timed_out = false;
+  std::vector<json> notifications;
+  deadline.async_wait([&](const asio::error_code& error) {
+    if (!error) { timed_out = true; reg.ShutdownMcp(); }
+  });
+  auto done = asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    auto attached = co_await reg.AttachMcpServer(spec);
+    EXPECT_TRUE(attached.ok()) << attached.message();
+    if (!attached.ok()) co_return;
+    // Exercise installation after the registry already connected/listed.
+    reg.SetMcpInboundEventHandler([&](std::string_view method, std::string_view params) {
+      EXPECT_TRUE(returned);
+      EXPECT_EQ(method, "notifications/message");
+      notifications.push_back(json::parse(params));
+      if (notifications.size() == 2) { reg.ShutdownMcp(); deadline.cancel(); }
+    });
+    auto result = co_await reg.Invoke("echo", R"({"text":"notify me"})", "call", CancelToken{});
+    EXPECT_EQ(json::parse(result)["content"][0]["text"], "notify me");
+    returned = true;
+  }, asio::use_future);
+  io.run();
+  done.get();
+  ASSERT_FALSE(timed_out);
+  ASSERT_EQ(notifications.size(), 2u);
+  EXPECT_EQ(notifications[0]["data"]["event_id"], "event-1");
+  EXPECT_EQ(notifications[1]["data"]["event_id"], "event-2");
+  EXPECT_EQ(notifications[1]["data"]["resume_header"], "event-1");
+  EXPECT_EQ(notifications[1]["data"]["authorization"], "Bearer test-identity");
 }
 
 // Closes the gap Task 2 left unverified at the execution level: IHttpClient

@@ -111,6 +111,7 @@ cc_test(
     deps = [
         "//agentflow/core",
         "//agentflow/net:http_client",
+        "//agentflow/net:http_parse",
         "//agentflow/tools",
         "//proto:agentflow_proto",
         "@abseil-cpp//absl/status",

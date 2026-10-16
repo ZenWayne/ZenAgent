@@ -161,5 +161,23 @@ TEST(McpClientPoolTest, ClearShutsDownAll) {
   EXPECT_EQ(pool.size(), 0u);
 }
 
+TEST(McpClientPool, InboundHandlerReachesExistingAndFutureClients) {
+  asio::io_context io;
+  auto tape = std::make_shared<std::vector<std::shared_ptr<FakeMcpClient>>>();
+  McpClientPool pool(io, FakeFactory(tape));
+  pool.GetOrCreate(MakeSpec(proto::McpServerSpec::HTTP_SSE, "http://first/mcp"));
+  int notifications = 0;
+  pool.SetInboundEventHandler([&](std::string_view, std::string_view) { ++notifications; });
+  pool.GetOrCreate(MakeSpec(proto::McpServerSpec::HTTP_SSE, "http://second/mcp"));
+  ASSERT_EQ(tape->size(), 2u);
+  for (const auto& client : *tape) {
+    ASSERT_TRUE(client->inbound_event_handler);
+    client->inbound_event_handler("notifications/message", "{}");
+  }
+  EXPECT_EQ(notifications, 2);
+  pool.SetInboundEventHandler({});
+  for (const auto& client : *tape) EXPECT_FALSE(client->inbound_event_handler);
+}
+
 }  // namespace
 }  // namespace agentflow::mcp

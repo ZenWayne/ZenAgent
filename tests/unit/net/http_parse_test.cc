@@ -9,6 +9,33 @@
 namespace agentflow::net {
 namespace {
 
+TEST(SseEventFramerTest, PreservesFragmentedMetadataAndMultilineData) {
+  SseEventFramer f;
+  EXPECT_TRUE(f.Feed(": heartbeat\r\nid: ev-1\r\nevent: message\r\nretry: 500\r\ndata: first\r\n").empty());
+  auto frames = f.Feed("data: second\r\n\r\n");
+  ASSERT_EQ(frames.size(), 1u);
+  EXPECT_EQ(frames[0].id, "ev-1");
+  EXPECT_EQ(frames[0].event, "message");
+  EXPECT_EQ(frames[0].retry_ms, 500u);
+  EXPECT_EQ(frames[0].data, "first\nsecond");
+}
+
+TEST(SseEventFramerTest, PreservesEmptyIdResetAndIgnoresInvalidFields) {
+  SseEventFramer f;
+  auto frames = f.Feed("id:\nretry: invalid\ndata: x\n\n");
+  ASSERT_EQ(frames.size(), 1u);
+  ASSERT_TRUE(frames[0].id);
+  EXPECT_TRUE(frames[0].id->empty());
+  EXPECT_FALSE(frames[0].retry_ms);
+  EXPECT_TRUE(f.Feed(": comment\n\n").empty());
+}
+
+TEST(SseEventFramerTest, BoundsUnterminatedEvents) {
+  SseEventFramer f;
+  EXPECT_TRUE(f.Feed(std::string(65537, 'x')).empty());
+  EXPECT_TRUE(f.exceeded_limit());
+}
+
 TEST(ParseUrlTest, HttpsDefaultsToPort443) {
   auto u = ParseUrl("https://api.openai.com/v1/chat/completions");
   ASSERT_TRUE(u.ok()) << u.status().message();

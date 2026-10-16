@@ -25,9 +25,20 @@ import json
 import signal
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SESSION = "testsession0123456789abcdef0123"
+EVENTS = []
+EVENTS_READY = threading.Condition()
+
+
+def notify(event_id):
+    with EVENTS_READY:
+        EVENTS.append((event_id, {
+            "jsonrpc": "2.0", "method": "notifications/message",
+            "params": {"level": "info", "data": {"event_id": event_id}},
+        }))
+        EVENTS_READY.notify_all()
 
 TOOLS = [{
     "name": "echo",
@@ -66,6 +77,29 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/notfound":
             self._not_found_probe()
             return
+        if self.path == "/mcp" and self.headers.get("Mcp-Session-Id") == SESSION:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            cursor = self.headers.get("Last-Event-ID", "")
+            self.wfile.write(b": connected\n\n")
+            self.wfile.flush()
+            while True:
+                with EVENTS_READY:
+                    pending = [(eid, msg) for eid, msg in EVENTS if eid > cursor]
+                    if not pending:
+                        EVENTS_READY.wait(timeout=1)
+                        continue
+                for eid, message in pending:
+                    message = json.loads(json.dumps(message))
+                    message["params"]["data"]["resume_header"] = cursor
+                    message["params"]["data"]["authorization"] = self.headers.get("Authorization")
+                    frame = f"id: {eid}\nevent: message\ndata: {json.dumps(message)}\n\n".encode()
+                    self.wfile.write(frame)
+                    self.wfile.flush()
+                    # Force a genuine reconnect between completion messages.
+                    self.close_connection = True
+                    return
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -101,13 +135,17 @@ class Handler(BaseHTTPRequestHandler):
             self._sse({"jsonrpc": "2.0", "id": rid,
                        "result": {"content": [{"type": "text", "text": text}],
                                   "isError": False}})
+            self.wfile.flush()
+            if text == "notify me":
+                threading.Timer(0.1, notify, args=("event-1",)).start()
+                threading.Timer(0.6, notify, args=("event-2",)).start()
         else:
             self._sse({"jsonrpc": "2.0", "id": rid,
                        "error": {"code": -32601, "message": "no such method"}})
 
 
 def main():
-    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     print(f"PORT {srv.server_address[1]}", flush=True)
 
     def _stop(signum, frame):
