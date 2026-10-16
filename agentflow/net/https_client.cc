@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -34,8 +35,8 @@ namespace {
 // the server closing the socket is our end-of-body signal for non-chunked
 // responses.
 std::string BuildRequestBytes(const ParsedUrl& url, const HttpRequest& req,
-                               bool sse) {
-  std::string out = absl::StrCat("POST ", url.target, " HTTP/1.1\r\n",
+                               bool sse, std::string_view method = "POST") {
+  std::string out = absl::StrCat(method, " ", url.target, " HTTP/1.1\r\n",
                                   "Host: ", url.host, "\r\n",
                                   "Connection: close\r\n",
                                   "Content-Length: ", req.body.size(), "\r\n");
@@ -238,7 +239,8 @@ class HttpsClient::Impl {
   asio::awaitable<absl::Status> Run(HttpRequest req, const SseHandler* on_event,
                                      std::string* out_body,
                                      const CancelToken& cancel,
-                                     HttpResponseHead* out_head = nullptr) {
+                                     HttpResponseHead* out_head = nullptr,
+                                     const SseEventHandler* inbound = nullptr) {
     auto url = ParseUrl(req.url);
     if (!url.ok()) co_return url.status();
 
@@ -262,7 +264,8 @@ class HttpsClient::Impl {
       co_return cancel.IsCancelled() ? absl::CancelledError("cancelled") : s;
     }
     if (auto s = co_await conn->WriteAll(
-            BuildRequestBytes(*url, req, /*sse=*/on_event != nullptr));
+            BuildRequestBytes(*url, req, /*sse=*/on_event != nullptr || inbound != nullptr,
+                              inbound ? "GET" : "POST"));
         !s.ok()) {
       co_return cancel.IsCancelled() ? absl::CancelledError("cancelled") : s;
     }
@@ -322,6 +325,13 @@ class HttpsClient::Impl {
 
     ChunkedDecoder chunked;
     SseFramer framer;
+    SseEventFramer inbound_framer;
+    if (inbound) {
+      auto it = std::find_if(head.headers.begin(), head.headers.end(), [](const auto& h) {
+        return h.first == "content-type" && h.second.find("text/event-stream") != std::string::npos;
+      });
+      if (it == head.headers.end()) co_return absl::InvalidArgumentError("GET stream is not text/event-stream");
+    }
 
     // Feeds one slab of raw body bytes onward. Returns false to stop reading.
     auto consume = [&](std::string_view slab) -> asio::awaitable<absl::Status> {
@@ -335,6 +345,11 @@ class HttpsClient::Impl {
       }
       if (out_body) {
         out_body->append(decoded);
+        co_return absl::OkStatus();
+      }
+      if (inbound) {
+        for (const auto& event : inbound_framer.Feed(decoded)) co_await (*inbound)(event);
+        if (inbound_framer.exceeded_limit()) co_return absl::ResourceExhaustedError("SSE event exceeds 64 KiB");
         co_return absl::OkStatus();
       }
       for (const auto& payload : framer.Feed(decoded)) {
@@ -391,6 +406,12 @@ HttpsClient::HttpsClient(asio::io_context& io, HttpsClientOptions opts)
     : impl_(std::make_unique<Impl>(io, std::move(opts))) {}
 
 HttpsClient::~HttpsClient() = default;
+
+asio::awaitable<absl::Status> HttpsClient::GetSse(HttpRequest req,
+    const SseEventHandler& on_event, const CancelToken& cancel,
+    HttpResponseHead* out_head) {
+  co_return co_await impl_->Run(std::move(req), nullptr, nullptr, cancel, out_head, &on_event);
+}
 
 asio::awaitable<absl::Status> HttpsClient::PostSse(HttpRequest req,
                                                     const SseHandler& on_event,

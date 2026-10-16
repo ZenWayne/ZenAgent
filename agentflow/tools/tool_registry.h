@@ -83,6 +83,9 @@ class ToolRegistry {
   // each McpClient owns a detached ReadLoop coroutine that holds the io_context
   // alive until the transport is closed.
   void ShutdownMcp();
+  // May be installed before attachment or after connection. Shared MCP
+  // clients deliver generic inbound notifications through this handler.
+  void SetMcpInboundEventHandler(std::function<void(std::string_view, std::string_view)> handler);
 
   asio::awaitable<std::string> Invoke(
       std::string_view name,

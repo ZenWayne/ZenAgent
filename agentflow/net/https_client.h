@@ -34,6 +34,9 @@ class HttpsClient : public IHttpClient {
  public:
   HttpsClient(asio::io_context& io, HttpsClientOptions opts);
   ~HttpsClient() override;
+  asio::awaitable<absl::Status> GetSse(HttpRequest req,
+      const SseEventHandler& on_event, const CancelToken& cancel,
+      HttpResponseHead* out_head = nullptr) override;
 
   asio::awaitable<absl::Status> PostSse(HttpRequest req,
                                          const SseHandler& on_event,

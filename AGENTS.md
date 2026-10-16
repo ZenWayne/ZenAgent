@@ -14,6 +14,11 @@
   generic authenticated event envelope and must not branch on application
   tool names, resource types, or product-specific payload fields. Application
   adapters own any domain-specific rendering or state projection.
-- An automatically delivered external event resumes the model only as a
-  text-only notification turn. It must never execute tools or acquire new
-  side-effect authority; a subsequent user turn is required for actions.
+- MCP notifications, including asynchronous tool completion events, are
+  appended to their originating conversation and resume its LLM. Use the
+  existing MCP inbound notification handler and conversation queue; do not
+  introduce a separate HTTP completion callback or LLM scheduler.
+- Continuation may use tools only under the agent's explicit continuation
+  policy and the user's existing authorized goal. It must preserve tool
+  confirmation, event deduplication, caller/session isolation and cancellation;
+  late notifications must not restart work after the user stops it.

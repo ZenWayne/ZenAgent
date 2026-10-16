@@ -6,10 +6,13 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/as_tuple.hpp>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
 #include "agentflow/net/http_client.h"
+#include "agentflow/net/http_parse.h"
 #include "agentflow/tools/mcp_client.h"
 #include "mcp_spec.pb.h"
 
@@ -30,6 +33,16 @@ class FakeHttpClient : public net::IHttpClient {
   std::vector<net::HttpRequest> seen;
   std::vector<Canned> canned;
   std::size_t next = 0;
+  std::vector<net::HttpRequest> gets;
+  std::function<asio::awaitable<absl::Status>(const net::SseEventHandler&,
+      const CancelToken&, net::HttpResponseHead*)> on_get;
+  asio::awaitable<absl::Status> GetSse(net::HttpRequest req,
+      const net::SseEventHandler& handler, const CancelToken& cancel,
+      net::HttpResponseHead* head) override {
+    gets.push_back(std::move(req));
+    if (on_get) co_return co_await on_get(handler, cancel, head);
+    co_return absl::UnimplementedError("no stream configured");
+  }
 
   asio::awaitable<absl::Status> PostSse(net::HttpRequest, const net::SseHandler&,
                                         const CancelToken&) override {
@@ -37,9 +50,10 @@ class FakeHttpClient : public net::IHttpClient {
   }
 
   asio::awaitable<absl::StatusOr<std::string>> Post(
-      net::HttpRequest req, const CancelToken&,
+      net::HttpRequest req, const CancelToken& cancel,
       net::HttpResponseHead* out_head) override {
     seen.push_back(req);
+    if (cancel.IsCancelled()) co_return absl::CancelledError("cancelled");
     if (next >= canned.size()) {
       co_return absl::InternalError("fake: no canned response left");
     }
@@ -75,6 +89,133 @@ std::string HeaderOf(const net::HttpRequest& req, std::string_view name) {
     if (k == name) return v;
   }
   return {};
+}
+
+TEST(McpHttpClient, PostSseCorrelatesResponseAndDeliversTrailingNotification) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  fake->canned = {
+      {200, {{"mcp-session-id", "S1"}}, json{{"jsonrpc", "2.0"}, {"id", 1}, {"result", json::object()}}.dump()},
+      {202, {}, ""},
+      {200, {{"content-type", "text/event-stream"}},
+       SseFrame({{"jsonrpc", "2.0"}, {"id", 2}, {"result", {{"ok", true}}}}) +
+       SseFrame({{"jsonrpc", "2.0"}, {"method", "notifications/message"},
+                 {"params", {{"level", "info"}, {"data", {{"event_id", "late"}}}}}})},
+  };
+  auto client = McpClient::Create(HttpSpec(), io, fake);
+  std::vector<std::string> messages;
+  client->SetInboundEventHandler([&](std::string_view method, std::string_view params) {
+    messages.push_back(std::string(method) + std::string(params));
+  });
+  absl::Status status;
+  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    auto result = co_await client->CallTool("echo", "{}", CancelToken{});
+    status = result.status();
+    if (result.ok()) EXPECT_TRUE(json::parse(*result)["ok"].get<bool>());
+    client->Shutdown();
+  }, asio::detached);
+  io.run();
+  EXPECT_TRUE(status.ok()) << status.message();
+  ASSERT_EQ(messages.size(), 1u);
+  EXPECT_NE(messages[0].find("late"), std::string::npos);
+}
+
+TEST(McpHttpClient, GetReaderReconnectsWithoutRetryingCancelledToolRpc) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  fake->canned = {
+      {200, {{"mcp-session-id", "S1"}}, json{{"id", 1}, {"result", json::object()}}.dump()},
+      {202, {}, ""},
+  };
+  auto client = McpClient::Create(HttpSpec(), io, fake);
+  int messages = 0;
+  fake->on_get = [&](const net::SseEventHandler& receive, const CancelToken& cancel,
+                     net::HttpResponseHead* head) -> asio::awaitable<absl::Status> {
+    head->status_code = 200;
+    EXPECT_FALSE(cancel.IsCancelled());
+    net::SseEvent event;
+    event.id = "one";
+    event.data = R"({"jsonrpc":"2.0","method":"notifications/message","params":{"data":{"event_id":"one"}}})";
+    co_await receive(event);
+    if (fake->gets.size() == 1) co_return absl::UnavailableError("disconnect");
+    EXPECT_EQ(HeaderOf(fake->gets.back(), "Last-Event-ID"), "one");
+    event.id = "two";
+    event.data = R"({"jsonrpc":"2.0","method":"notifications/message","params":{"data":{"event_id":"two"}}})";
+    co_await receive(event);
+    co_return absl::OkStatus();
+  };
+  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    EXPECT_TRUE((co_await client->Connect()).ok());
+    EXPECT_TRUE(fake->gets.empty());
+    client->SetInboundEventHandler([&](std::string_view, std::string_view) {
+      if (++messages == 2) client->Shutdown();
+    });
+    CancelSource tool_cancel; tool_cancel.Cancel();
+    auto result = co_await client->CallTool("echo", "{}", tool_cancel.Token());
+    EXPECT_TRUE(absl::IsCancelled(result.status()));
+  }, asio::detached);
+  io.run();
+  EXPECT_EQ(messages, 2);  // replay of id=one was deduplicated
+  EXPECT_EQ(fake->gets.size(), 2u);
+  EXPECT_EQ(fake->seen.size(), 3u);  // initialize, initialized, one cancelled call
+}
+
+TEST(McpHttpClient, UnsupportedGetDoesNotRetryOrBreakOrdinaryCalls) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  fake->canned = {
+      {200, {{"mcp-session-id", "S1"}}, json{{"id", 1}, {"result", json::object()}}.dump()},
+      {202, {}, ""},
+  };
+  fake->on_get = [](const net::SseEventHandler&, const CancelToken&,
+                    net::HttpResponseHead* head) -> asio::awaitable<absl::Status> {
+    head->status_code = 405;
+    co_return absl::InvalidArgumentError("HTTP 405");
+  };
+  auto client = McpClient::Create(HttpSpec(), io, fake);
+  client->SetInboundEventHandler([](std::string_view, std::string_view) {});
+  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    EXPECT_TRUE((co_await client->Connect()).ok());
+  }, asio::detached);
+  io.run();
+  ASSERT_EQ(fake->gets.size(), 1u);
+  io.restart();
+  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    EXPECT_TRUE((co_await client->Connect()).ok());
+    client->Shutdown();
+  }, asio::detached);
+  io.run();
+  EXPECT_EQ(fake->seen.size(), 2u);
+}
+
+TEST(McpHttpClient, RemovingHandlerCancelsLiveGet) {
+  asio::io_context io;
+  auto fake = std::make_shared<FakeHttpClient>();
+  fake->canned = {
+      {200, {{"mcp-session-id", "S1"}}, json{{"id", 1}, {"result", json::object()}}.dump()},
+      {202, {}, ""},
+  };
+  bool cancelled = false;
+  fake->on_get = [&](const net::SseEventHandler&, const CancelToken& cancel,
+                    net::HttpResponseHead*) -> asio::awaitable<absl::Status> {
+    auto timer = std::make_shared<asio::steady_timer>(io);
+    timer->expires_after(std::chrono::seconds(5));
+    cancel.OnCancel([timer] { timer->cancel(); });
+    co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
+    cancelled = cancel.IsCancelled();
+    co_return absl::CancelledError("stopped");
+  };
+  auto client = McpClient::Create(HttpSpec(), io, fake);
+  client->SetInboundEventHandler([](std::string_view, std::string_view) {});
+  asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    EXPECT_TRUE((co_await client->Connect()).ok());
+  }, asio::detached);
+  io.run_for(std::chrono::milliseconds(10));
+  client->SetInboundEventHandler({});
+  io.restart(); io.run();
+  EXPECT_TRUE(cancelled);
+  EXPECT_EQ(fake->gets.size(), 1u);
+  client->Shutdown();
 }
 
 TEST(McpHttpClient, HandshakeThenListTools) {
