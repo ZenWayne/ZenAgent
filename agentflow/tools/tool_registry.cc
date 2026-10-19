@@ -14,6 +14,10 @@
 #include "agentflow/tools/mcp_tool_adapter.h"
 
 namespace agentflow {
+void ToolRegistry::SetMcpInboundEventHandler(
+    std::function<void(std::string_view, std::string_view)> handler) {
+  if (pool_) pool_->SetInboundEventHandler(std::move(handler));
+}
 namespace {
 
 nlohmann::json SchemaToJson(const ToolSchema& schema) {

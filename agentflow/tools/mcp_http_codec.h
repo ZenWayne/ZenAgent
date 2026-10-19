@@ -41,6 +41,10 @@ absl::StatusOr<std::optional<nlohmann::json>> DecodeMcpHttpResponse(
     int status_code,
     const std::vector<std::pair<std::string, std::string>>& headers,
     std::string_view body);
+// All JSON-RPC messages, including notifications before/after the response.
+absl::StatusOr<std::vector<nlohmann::json>> DecodeMcpHttpMessages(
+    int status_code, const std::vector<std::pair<std::string, std::string>>& headers,
+    std::string_view body);
 
 }  // namespace agentflow::mcp
 

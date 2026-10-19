@@ -226,6 +226,52 @@ std::vector<std::string> SseFramer::Feed(std::string_view bytes) {
   return out;
 }
 
+std::vector<SseEvent> SseEventFramer::Feed(std::string_view bytes) {
+  if (exceeded_limit_) return {};
+  buf_.append(bytes);
+  std::vector<SseEvent> out;
+  for (;;) {
+    auto end = buf_.find("\n\n");
+    std::size_t sep = 2;
+    auto crlf = buf_.find("\r\n\r\n");
+    if (crlf != std::string::npos && (end == std::string::npos || crlf < end)) {
+      end = crlf; sep = 4;
+    }
+    if ((end == std::string::npos ? buf_.size() : end) > 65536) {
+      exceeded_limit_ = true; buf_.clear(); break;
+    }
+    if (end == std::string::npos) break;
+    SseEvent event;
+    std::string_view frame(buf_.data(), end);
+    bool has_data = false;
+    while (!frame.empty()) {
+      auto [line, tail] = SplitOnce(frame, "\n"); frame = tail;
+      if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+      if (line.empty() || line.front() == ':') continue;
+      auto [name, value] = SplitOnce(line, ":");
+      if (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+      if (name == "data") {
+        if (has_data) event.data.push_back('\n');
+        event.data.append(value); has_data = true;
+      } else if (name == "id" && value.find('\0') == std::string_view::npos) {
+        event.id = std::string(value);
+      } else if (name == "event") event.event = std::string(value);
+      else if (name == "retry" && !value.empty()) {
+        unsigned retry = 0;
+        bool valid = true;
+        for (char ch : value) {
+          if (ch < '0' || ch > '9' || retry > 300000) { valid = false; break; }
+          retry = retry * 10 + static_cast<unsigned>(ch - '0');
+        }
+        if (valid) event.retry_ms = retry;
+      }
+    }
+    if (has_data || event.id || event.retry_ms) out.push_back(std::move(event));
+    buf_.erase(0, end + sep);
+  }
+  return out;
+}
+
 std::vector<std::string> SseFramer::Flush() {
   std::vector<std::string> out;
   // EOF stands in for the frame-terminating blank line. Parsed through the

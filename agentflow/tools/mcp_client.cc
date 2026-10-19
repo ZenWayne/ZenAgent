@@ -27,12 +27,14 @@
 #include <asio/posix/stream_descriptor.hpp>
 #include <asio/read_until.hpp>
 #include <asio/streambuf.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/write.hpp>
 #include <nlohmann/json.hpp>
 
 #include "agentflow/net/http_client.h"
 #include "agentflow/net/https_client.h"
+#include "agentflow/net/http_parse.h"
 #include "agentflow/tools/mcp_http_codec.h"
 
 namespace agentflow::mcp {
@@ -123,6 +125,7 @@ class McpClient::Impl
         break;
     }
     state_ = status.ok() ? State::kReady : State::kBroken;
+    if (status.ok()) MaybeStartHttpReader();
     NotifyConnectWaiters();
     co_return status;
   }
@@ -169,10 +172,86 @@ class McpClient::Impl
 
   void SetInboundEventHandler(InboundEventHandler handler) {
     inbound_event_handler_ = std::move(handler);
+    if (!inbound_event_handler_) StopHttpReader();
+    else MaybeStartHttpReader();
   }
 
  private:
   // ── connection state ──────────────────────────────────────────────────────
+  void StopHttpReader() {
+    ++http_reader_generation_;
+    if (http_reader_cancel_) http_reader_cancel_->Cancel();
+    http_reader_cancel_.reset();
+    http_reader_active_ = false;
+  }
+
+  void MaybeStartHttpReader() {
+    if (!IsHttp() || state_ != State::kReady || shutdown_ ||
+        !inbound_event_handler_ || http_reader_active_) return;
+    http_reader_active_ = true;
+    auto generation = ++http_reader_generation_;
+    auto cancel = std::make_shared<CancelSource>();
+    http_reader_cancel_ = cancel;
+    auto self = shared_from_this();
+    asio::co_spawn(io_, [self, cancel, generation]() -> asio::awaitable<void> {
+      co_await self->ReadHttpNotifications(cancel->Token(), generation);
+      if (self->http_reader_generation_ == generation) self->http_reader_active_ = false;
+    }, asio::detached);
+  }
+
+  asio::awaitable<void> ReadHttpNotifications(const CancelToken& cancel, uint64_t generation) {
+    auto timer = std::make_shared<asio::steady_timer>(io_);
+    cancel.OnCancel([weak = std::weak_ptr<asio::steady_timer>(timer)] {
+      if (auto t = weak.lock()) t->cancel();
+    });
+    unsigned delay = 250;
+    while (!cancel.IsCancelled() && !shutdown_ && generation == http_reader_generation_ &&
+           state_ == State::kReady && inbound_event_handler_) {
+      net::HttpRequest req;
+      req.url = spec_.command_or_url();
+      req.headers = BuildMcpHttpHeaders(http_session_id_);
+      for (const auto& [name, value] : spec_.headers()) {
+        auto it = std::find_if(req.headers.begin(), req.headers.end(), [&](const auto& h) {
+          return ToLowerAscii(h.first) == ToLowerAscii(name);
+        });
+        if (it == req.headers.end()) req.headers.emplace_back(name, value);
+        else it->second = value;
+      }
+      for (auto& [name, value] : req.headers) {
+        if (ToLowerAscii(name) == "accept") value = "text/event-stream";
+        if (ToLowerAscii(name) == "mcp-session-id") value = http_session_id_;
+      }
+      if (!http_last_event_id_.empty()) req.headers.emplace_back("Last-Event-ID", http_last_event_id_);
+      net::HttpResponseHead head;
+      net::SseEventHandler receive = [self = shared_from_this(), generation, &delay](const net::SseEvent& event)
+          -> asio::awaitable<void> {
+        if (generation != self->http_reader_generation_ || self->shutdown_) co_return;
+        if (event.retry_ms) delay = std::clamp(*event.retry_ms, 250u, 30000u);
+        if (event.id && !event.id->empty() && *event.id == self->http_last_event_id_) co_return;
+        if (!event.data.empty()) {
+          auto message = json::parse(event.data, nullptr, false);
+          if (message.is_object()) self->DispatchInbound(message);
+        }
+        if (event.id && event.id->size() <= 1024 && event.id->find_first_of("\r\n") == std::string::npos)
+          self->http_last_event_id_ = *event.id;
+      };
+      absl::Status status;
+      try {
+        status = co_await http_->GetSse(std::move(req), receive, cancel, &head);
+      } catch (const std::exception&) {
+        status = absl::UnavailableError("MCP notification stream failed");
+      }
+      if (cancel.IsCancelled() || generation != http_reader_generation_) co_return;
+      // Unsupported, unauthenticated, and expired sessions need explicit
+      // configuration/handshake repair; never spin or retry a tool RPC.
+      if (head.status_code == 404) { state_ = State::kBroken; co_return; }
+      if (head.status_code == 405 || head.status_code == 501 ||
+          absl::IsUnimplemented(status) || absl::IsPermissionDenied(status)) co_return;
+      timer->expires_after(std::chrono::milliseconds(delay));
+      co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
+      delay = std::min(delay * 2, 30000u);
+    }
+  }
 
   enum class State { kIdle, kConnecting, kReady, kBroken };
 
@@ -410,19 +489,25 @@ class McpClient::Impl
       co_return body.status();
     }
 
-    auto decoded = DecodeMcpHttpResponse(head.status_code, head.headers, *body);
+    auto decoded = DecodeMcpHttpMessages(head.status_code, head.headers, *body);
     if (!decoded.ok()) co_return decoded.status();
-    if (!decoded->has_value()) {
+    std::optional<json> response;
+    for (const auto& message : *decoded) {
+      if (!message.contains("id") || message["id"].is_null()) DispatchInbound(message);
+      else if (!is_notification && message["id"] == request_id) response = message;
+    }
+    if (is_notification) co_return json::object();
+    if (!response) {
       // Empty 2xx body. Legitimate only for a notification ack; for a real
       // request this is a swallowed protocol violation -- the caller must not
       // see it as an empty-but-successful tool result.
-      if (is_notification) co_return json::object();
       co_return absl::InternalError(
-          "MCP HTTP: empty body for request id " +
+          std::string(decoded->empty() ? "MCP HTTP: empty body for request id " :
+                                       "MCP HTTP: response does not match request id ") +
           std::to_string(request_id));
     }
 
-    const json& payload = **decoded;
+    const json& payload = *response;
     if (!payload.is_object()) {
       // `payload` is only guaranteed to be valid JSON, not an object --
       // `.value("id", ...)` etc. below would throw nlohmann::json::type_error
@@ -624,6 +709,8 @@ class McpClient::Impl
   void ShutdownInternal(bool permanent = true) {
     if (permanent) shutdown_ = true;
     if (IsHttp()) {
+      StopHttpReader();
+      http_last_event_id_.clear();
       // No long-lived connection to tear down for HTTP — just drop the
       // session so the next Connect() re-handshakes. permanent=false is the
       // reconnect-from-kBroken path; permanent=true is a real Shutdown().
@@ -659,6 +746,10 @@ class McpClient::Impl
 
   std::shared_ptr<net::IHttpClient> http_;  // HTTP transports only
   std::string http_session_id_;             // assigned by initialize
+  std::string http_last_event_id_;
+  std::shared_ptr<CancelSource> http_reader_cancel_;
+  uint64_t http_reader_generation_ = 0;
+  bool http_reader_active_ = false;
 
   pid_t child_pid_ = -1;
   std::unique_ptr<asio::posix::stream_descriptor> child_in_;
@@ -693,7 +784,7 @@ std::shared_ptr<McpClient> McpClient::Create(
 }
 
 McpClient::McpClient(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
-McpClient::~McpClient() = default;
+McpClient::~McpClient() { impl_->Shutdown(); }
 
 asio::awaitable<absl::Status> McpClient::Connect() {
   return impl_->Connect();

@@ -46,6 +46,7 @@ class McpClientPool {
 
   // Returns the existing client for `spec` or creates one via the factory.
   std::shared_ptr<IMcpClient> GetOrCreate(const proto::McpServerSpec& spec);
+  void SetInboundEventHandler(InboundEventHandler handler);
 
   // Shuts down every client (cancels in-flight calls). Safe to call repeatedly.
   void Clear();
@@ -60,6 +61,7 @@ class McpClientPool {
   ClientFactory factory_;
   mutable std::mutex mu_;
   std::unordered_map<std::string, std::shared_ptr<IMcpClient>> clients_;
+  InboundEventHandler inbound_event_handler_;
 };
 
 }  // namespace agentflow::mcp

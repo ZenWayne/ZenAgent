@@ -83,8 +83,19 @@ std::shared_ptr<IMcpClient> McpClientPool::GetOrCreate(
     return it->second;
   }
   auto client = factory_(spec, io_);
+  client->SetInboundEventHandler(inbound_event_handler_);
   clients_.emplace(key, client);
   return client;
+}
+
+void McpClientPool::SetInboundEventHandler(InboundEventHandler handler) {
+  std::vector<std::shared_ptr<IMcpClient>> clients;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    inbound_event_handler_ = handler;
+    for (const auto& [_, client] : clients_) clients.push_back(client);
+  }
+  for (const auto& client : clients) client->SetInboundEventHandler(handler);
 }
 
 void McpClientPool::Clear() {

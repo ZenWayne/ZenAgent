@@ -19,6 +19,7 @@
 #include "agentflow/core/cancel.h"
 
 namespace agentflow::net {
+struct SseEvent;
 
 struct HttpRequest {
   std::string url;  // http(s)://host[:port]/path
@@ -39,6 +40,7 @@ struct HttpResponseHead {
 // a slow consumer back-pressures the socket read rather than losing frames.
 using SseHandler =
     std::function<asio::awaitable<void>(std::string_view data)>;
+using SseEventHandler = std::function<asio::awaitable<void>(const SseEvent&)>;
 
 class IHttpClient {
  public:
@@ -58,6 +60,14 @@ class IHttpClient {
   virtual asio::awaitable<absl::StatusOr<std::string>> Post(
       HttpRequest req, const CancelToken& cancel,
       HttpResponseHead* out_head = nullptr) = 0;
+
+  // Independent long-lived server stream; implementations without GET
+  // streaming may leave this unsupported without breaking ordinary RPCs.
+  virtual asio::awaitable<absl::Status> GetSse(
+      HttpRequest, const SseEventHandler&, const CancelToken&,
+      HttpResponseHead* = nullptr) {
+    co_return absl::UnimplementedError("HTTP GET SSE is unsupported");
+  }
 };
 
 }  // namespace agentflow::net

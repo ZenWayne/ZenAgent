@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -63,6 +64,24 @@ class ChunkedDecoder {
 // Comments (": ..."), `event:` lines and other field names are ignored — the
 // OpenAI stream only uses `data:`. The literal payload "[DONE]" is consumed
 // and reported through saw_done() rather than delivered.
+struct SseEvent {
+  std::string data;
+  std::optional<std::string> id;
+  std::string event;
+  std::optional<unsigned> retry_ms;
+};
+
+// Metadata-preserving SSE framing for long-lived MCP notification streams.
+// Incomplete events are discarded at EOF; create a new framer on reconnect.
+class SseEventFramer {
+ public:
+  std::vector<SseEvent> Feed(std::string_view bytes);
+  bool exceeded_limit() const { return exceeded_limit_; }
+ private:
+  std::string buf_;
+  bool exceeded_limit_ = false;
+};
+
 class SseFramer {
  public:
   std::vector<std::string> Feed(std::string_view bytes);
