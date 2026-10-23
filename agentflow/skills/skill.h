@@ -27,6 +27,9 @@ struct Skill {
   bool has_scripts = false;
 };
 
+// Strict UTF-8: rejects overlong forms, surrogates, and code points above U+10FFFF.
+bool IsValidUtf8(std::string_view text);
+
 // Names use 1-64 lowercase ASCII letters, digits, and single hyphens.
 bool IsValidSkillName(std::string_view name);
 

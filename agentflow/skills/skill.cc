@@ -32,47 +32,13 @@ absl::StatusOr<std::string> Scalar(const YAML::Node& node, std::string_view key)
 
 absl::StatusOr<size_t> Utf8CharacterCount(std::string_view value,
                                          std::string_view value_name) {
+  if (!IsValidUtf8(value)) {
+    return Invalid(absl::StrCat(value_name, " must contain valid UTF-8"));
+  }
+  // Each code point starts with exactly one non-continuation byte.
   size_t count = 0;
-  for (size_t i = 0; i < value.size();) {
-    const auto first = static_cast<unsigned char>(value[i]);
-    uint32_t code_point;
-    size_t sequence_length;
-    uint32_t minimum;
-    if (first <= 0x7F) {
-      code_point = first;
-      sequence_length = 1;
-      minimum = 0;
-    } else if (first >= 0xC2 && first <= 0xDF) {
-      code_point = first & 0x1F;
-      sequence_length = 2;
-      minimum = 0x80;
-    } else if (first >= 0xE0 && first <= 0xEF) {
-      code_point = first & 0x0F;
-      sequence_length = 3;
-      minimum = 0x800;
-    } else if (first >= 0xF0 && first <= 0xF4) {
-      code_point = first & 0x07;
-      sequence_length = 4;
-      minimum = 0x10000;
-    } else {
-      return Invalid(absl::StrCat(value_name, " must contain valid UTF-8"));
-    }
-    if (i + sequence_length > value.size()) {
-      return Invalid(absl::StrCat(value_name, " must contain valid UTF-8"));
-    }
-    for (size_t j = 1; j < sequence_length; ++j) {
-      const auto continuation = static_cast<unsigned char>(value[i + j]);
-      if ((continuation & 0xC0) != 0x80) {
-        return Invalid(absl::StrCat(value_name, " must contain valid UTF-8"));
-      }
-      code_point = (code_point << 6) | (continuation & 0x3F);
-    }
-    if (code_point < minimum || code_point > 0x10FFFF ||
-        (code_point >= 0xD800 && code_point <= 0xDFFF)) {
-      return Invalid(absl::StrCat(value_name, " must contain valid UTF-8"));
-    }
-    i += sequence_length;
-    ++count;
+  for (char c : value) {
+    if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++count;
   }
   return count;
 }
@@ -145,6 +111,38 @@ absl::Status ApplyField(const std::string& key, const YAML::Node& value,
 }
 
 }  // namespace
+
+bool IsValidUtf8(std::string_view text) {
+  for (size_t i = 0; i < text.size();) {
+    const auto lead = static_cast<unsigned char>(text[i]);
+    if (lead < 0x80) {
+      ++i;
+      continue;
+    }
+    size_t trailing = 0;
+    unsigned int point = 0;
+    unsigned int minimum = 0;
+    if (lead >= 0xC2 && lead <= 0xDF) {
+      trailing = 1; point = lead & 0x1F; minimum = 0x80;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+      trailing = 2; point = lead & 0x0F; minimum = 0x800;
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+      trailing = 3; point = lead & 0x07; minimum = 0x10000;
+    } else {
+      return false;
+    }
+    if (trailing > text.size() - i - 1) return false;
+    for (size_t k = 1; k <= trailing; ++k) {
+      const auto byte = static_cast<unsigned char>(text[i + k]);
+      if ((byte & 0xC0) != 0x80) return false;
+      point = (point << 6) | (byte & 0x3F);
+    }
+    if (point < minimum || point > 0x10FFFF ||
+        (point >= 0xD800 && point <= 0xDFFF)) return false;
+    i += trailing + 1;
+  }
+  return true;
+}
 
 bool IsValidSkillName(std::string_view name) {
   if (name.empty() || name.size() > kMaxNameLen || name.front() == '-' ||

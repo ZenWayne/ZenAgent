@@ -189,8 +189,9 @@ TEST(RenderSkillCatalog, ListsNameAndSingleLineDescription) {
   b.name = "beta";
   b.description = "Beta\nspans  lines.\n";
   EXPECT_EQ(RenderSkillCatalog({&a, &b}),
-            "## 技能\n"
-            "以下技能按需加载：判断当前任务用得上时，先调用 load_skill(name) 读完全文再动手。\n"
+            "## Skills\n"
+            "Load a skill on demand: when it applies to the task, call load_skill(name) "
+            "and read its full instructions before acting.\n"
             "- alpha: Alpha does A.\n"
             "- beta: Beta spans lines.\n");
 }

@@ -6,7 +6,7 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "skills",
     srcs = ["skill.cc", "skill_library.cc", "skill_tools.cc"],
-    hdrs = ["skill.h", "skill_library.h", "skill_script_runner.h", "skill_tools.h"],
+    hdrs = ["skill.h", "skill_library.h", "skill_tools.h"],
     deps = [
         "//agentflow/core",
         "//agentflow/tools",
