@@ -158,8 +158,6 @@ Sanitizer configs are available: `bazel test --config=asan //tests/...` (also `-
 > **Note (proxy):** Bazel downloads may need JVM proxy args, e.g.
 > `--host_jvm_args=-Dhttps.proxyHost=127.0.0.1 --host_jvm_args=-Dhttps.proxyPort=10808`.
 
-### Using the Agent Skills parser from a host module
-
 ## Examples
 
 | Demo | What it shows |

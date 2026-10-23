@@ -5,7 +5,7 @@ package(default_visibility = ["//visibility:public"])
 # Kept separate from //agentflow/core so clients without skills do not link yaml-cpp.
 cc_library(
     name = "skills",
-    srcs = ["skill.cc", "skill_library.cc", "skill_tools.cc"],
+    srcs = ["skill.cc", "skill_library.cc", "skill_tools.cc", "skill_utf8.cc", "skill_utf8.h"],
     hdrs = ["skill.h", "skill_library.h", "skill_tools.h"],
     deps = [
         "//agentflow/core",

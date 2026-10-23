@@ -12,6 +12,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
+#include "agentflow/skills/skill_utf8.h"
 #include "agentflow/tools/native_fn_tool.h"
 
 namespace agentflow::skills {

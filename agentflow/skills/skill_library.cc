@@ -70,6 +70,7 @@ absl::StatusOr<std::vector<fs::path>> ListSkillDirs(const SkillRoot& root) {
 
 struct LoadedSkill {
   Skill skill;
+  fs::path manifest;
   std::vector<std::string> unknown_fields;
 };
 
@@ -105,6 +106,7 @@ absl::StatusOr<std::optional<LoadedSkill>> LoadSkillDir(const SkillRoot& root,
     return RootFailure(root, contents.status().message());
   }
   LoadedSkill loaded;
+  loaded.manifest = md;
   auto skill = ParseSkillMd(*contents, dir.filename().string(),
                             &loaded.unknown_fields);
   if (!skill.ok()) {
@@ -147,10 +149,9 @@ absl::StatusOr<std::shared_ptr<const SkillLibrary>> SkillLibrary::Load(
       LoadedSkill& entry = **loaded;
 
       if (warnings != nullptr) {
-        const fs::path md = dir / "SKILL.md";
         for (const std::string& field : entry.unknown_fields) {
           warnings->push_back(absl::StrCat(
-              root.label, ": ", md.string(),
+              root.label, ": ", entry.manifest.string(),
               ": ignored unknown frontmatter field '", field, "'"));
         }
         if (library->skills_.contains(entry.skill.name)) {
