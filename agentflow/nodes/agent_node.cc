@@ -12,6 +12,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include "agentflow/core/errors.h"
+#include "agentflow/core/json_text.h"
 #include "agentflow/inference/canonical_message.h"
 
 namespace agentflow {
@@ -240,7 +241,7 @@ asio::awaitable<State> AgentNode::Run(
         tool_content.push_back(std::move(entry));
       }
       json tool_message = {{"role", "tool"}, {"content", tool_content}};
-      message_json = tool_message.dump();
+      message_json = DumpJsonLenient(tool_message);
       continue;
     }
 

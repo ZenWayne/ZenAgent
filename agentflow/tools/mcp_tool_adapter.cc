@@ -13,6 +13,8 @@
 #include <asio/use_awaitable.hpp>
 #include <nlohmann/json.hpp>
 
+#include "agentflow/core/json_text.h"
+
 namespace agentflow::mcp {
 
 namespace {
@@ -27,7 +29,7 @@ std::string McpErrorJson(std::string_view message) {
                        {"text", std::string(message)},
                    })})},
   };
-  return err.dump();
+  return DumpJsonLenient(err);
 }
 
 }  // namespace

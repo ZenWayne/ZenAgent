@@ -88,6 +88,7 @@ cc_library(
     hdrs = ["delegate_tool.h"],
     deps = [
         ":sub_agent_runtime",
+        "//agentflow/core",
         "//agentflow/tools",
         "@nlohmann_json//:json",
     ],

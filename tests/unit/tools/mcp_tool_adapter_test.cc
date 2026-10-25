@@ -72,6 +72,54 @@ TEST(McpToolAdapterTest, InvokeServerErrorWrapsMcpErrorJson) {
             std::string::npos);
 }
 
+// Regression: nlohmann's parse_error::what() can cut a multi-byte UTF-8
+// character in half (its "last read" context is sliced by bytes). Wrapping
+// such a message with strict dump() used to throw type_error.316 and hide the
+// original error. The adapter must still return a valid error JSON.
+TEST(McpToolAdapterTest, InvokeErrorWithInvalidUtf8StillYieldsValidJson) {
+  asio::io_context io;
+  auto client = std::make_shared<FakeMcpClient>(io);
+  client->on_call_tool = [](std::string_view, std::string_view) {
+    return absl::InvalidArgumentError(
+        std::string("args_json parse error: [json.exception.parse_error.101] "
+                    "parse error: \"query\": \xE5' tail"));
+  };
+  McpToolAdapter adapter(client, "search", MakeSchema("search"));
+
+  auto fut = asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<std::string> {
+        co_return co_await adapter.Invoke("{}", "", CancelToken{});
+      },
+      asio::use_future);
+  io.run();
+  auto out = json::parse(fut.get());
+  EXPECT_TRUE(out.value("isError", false));
+  ASSERT_TRUE(out["content"].is_array());
+  EXPECT_NE(std::string(out["content"][0]["text"]).find("args_json parse error"),
+            std::string::npos);
+}
+
+TEST(McpToolAdapterTest, InvokeErrorKeepsValidUtf8Text) {
+  asio::io_context io;
+  auto client = std::make_shared<FakeMcpClient>(io);
+  client->on_call_tool = [](std::string_view, std::string_view) {
+    return absl::InternalError("搜索失败：尾帧");
+  };
+  McpToolAdapter adapter(client, "search", MakeSchema("search"));
+
+  auto fut = asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<std::string> {
+        co_return co_await adapter.Invoke("{}", "", CancelToken{});
+      },
+      asio::use_future);
+  io.run();
+  auto out = json::parse(fut.get());
+  EXPECT_NE(std::string(out["content"][0]["text"]).find("尾帧"),
+            std::string::npos);
+}
+
 TEST(McpToolAdapterTest, InvokeTimeoutWrapsMcpErrorJson) {
   asio::io_context io;
   auto client = std::make_shared<FakeMcpClient>(io);
