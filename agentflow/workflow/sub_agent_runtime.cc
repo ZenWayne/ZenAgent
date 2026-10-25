@@ -186,7 +186,7 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
           next.parent_cancel = &cancel;
           auto result = co_await RunAsync(parent, args["agent"].get<std::string>(),
                                           args["goal"].get<std::string>(), std::move(next));
-          co_return result.is_string() ? result.get<std::string>() : result.dump();
+          co_return result.is_string() ? result.get<std::string>() : DumpJsonLenient(result);
         }));
   }
   std::string tools_json = tool_view->ExportToolsJson();

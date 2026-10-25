@@ -11,6 +11,7 @@
 #include <asio/io_context.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include "agentflow/core/json_text.h"
 #include "agentflow/tools/native_fn_tool.h"
 #include "agentflow/workflow/sub_agent_runtime.h"
 
@@ -108,7 +109,7 @@ std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
     }
 
     if (result.is_string()) co_return result.get<std::string>();
-    co_return result.dump();
+    co_return DumpJsonLenient(result);
   };
   return std::make_shared<::agentflow::NativeFnTool>(schema, std::move(fn));
 }
