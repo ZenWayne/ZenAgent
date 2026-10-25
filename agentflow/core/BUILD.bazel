@@ -18,6 +18,7 @@ cc_library(
         "edge.h",
         "errors.h",
         "event.h",
+        "json_text.h",
         "graph.h",
         "node.h",
         "runner.h",

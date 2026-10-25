@@ -13,6 +13,7 @@
 
 #include "agentflow/core/cancel.h"
 #include "agentflow/core/errors.h"
+#include "agentflow/core/json_text.h"
 #include "agentflow/inference/chat_backend.h"
 #include "agentflow/tools/invocation_tool_view.h"
 #include "agentflow/workflow/json_path.h"
@@ -356,7 +357,7 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
       }
       nlohmann::ordered_json tool_msg = {{"role", "tool"},
                                            {"content", tool_content}};
-      message_json = tool_msg.dump();
+      message_json = DumpJsonLenient(tool_msg);
       continue;
     }
     break;  // No tool calls — done.

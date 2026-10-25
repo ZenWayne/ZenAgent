@@ -13,6 +13,8 @@
 #include <asio/use_awaitable.hpp>
 #include <nlohmann/json.hpp>
 
+#include "agentflow/core/json_text.h"
+
 namespace agentflow::mcp {
 
 namespace {
@@ -27,11 +29,7 @@ std::string McpErrorJson(std::string_view message) {
                        {"text", std::string(message)},
                    })})},
   };
-  // The message may come from a library's error text (e.g. nlohmann's
-  // parse_error context, which can split a UTF-8 sequence). Replace invalid
-  // bytes instead of throwing, so the original error still reaches the model.
-  return err.dump(/*indent=*/-1, /*indent_char=*/' ', /*ensure_ascii=*/false,
-                  json::error_handler_t::replace);
+  return DumpJsonLenient(err);
 }
 
 }  // namespace
