@@ -60,6 +60,9 @@ class StreamAccumulator {
   // was received, and Canonical() then omits the usage key.
   long long input_tokens_ = 0;
   long long output_tokens_ = 0;
+  // The model the provider says it served (top-level "model" of the frames),
+  // which can differ from the requested one; empty when none was sent.
+  std::string model_;
 };
 
 }  // namespace agentflow::openai

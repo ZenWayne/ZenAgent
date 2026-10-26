@@ -27,6 +27,16 @@ TEST(StreamAccumulatorTest, JoinsTextDeltasAndReportsEachOne) {
                 R"({"role":"assistant","content":[{"type":"text","text":"Hello"}]})"));
 }
 
+TEST(StreamAccumulatorTest, KeepsTheModelTheProviderServed) {
+  StreamAccumulator a;
+  a.Feed(R"({"model":"deepseek-flash","choices":[{"delta":{"content":"Hi"}}]})");
+  a.Feed(R"({"model":"deepseek-flash","choices":[],)"
+         R"("usage":{"prompt_tokens":3,"completion_tokens":1}})");
+  json got = json::parse(a.Canonical());
+  EXPECT_EQ(got["model"], "deepseek-flash");
+  EXPECT_EQ(got["usage"]["input_tokens"], 3);
+}
+
 TEST(StreamAccumulatorTest, RejoinsToolCallArgumentsSplitAcrossFrames) {
   // id and function.name appear ONLY in the first frame for an index; later
   // frames carry bare argument fragments.

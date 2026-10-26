@@ -167,6 +167,14 @@ TEST(ResponseToCanonicalTest, PlainTextAnswer) {
                 R"({"role":"assistant","content":[{"type":"text","text":"42"}]})"));
 }
 
+TEST(ResponseToCanonicalTest, KeepsTheModelTheProviderServed) {
+  auto c = ResponseToCanonical(
+      R"({"model":"deepseek-v4-flash",)"
+      R"("choices":[{"message":{"role":"assistant","content":"42"}}]})");
+  ASSERT_TRUE(c.ok());
+  EXPECT_EQ(json::parse(*c)["model"], "deepseek-v4-flash");
+}
+
 TEST(ResponseToCanonicalTest, ToolCallsArePassedThroughVerbatim) {
   auto c = ResponseToCanonical(
       R"({"choices":[{"message":{"role":"assistant","content":null,)"

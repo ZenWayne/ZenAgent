@@ -14,6 +14,9 @@ std::string StreamAccumulator::Feed(std::string_view frame_json) {
   // Read usage BEFORE the choices guard: the include_usage frame carries an
   // empty choices array, which that guard rejects. Type-checked per field so
   // a null/wrong-typed usage is ignored, not a crash.
+  if (f.is_object() && model_.empty() && f.contains("model") && f["model"].is_string()) {
+    model_ = f["model"].get<std::string>();
+  }
   if (f.is_object() && f.contains("usage") && f["usage"].is_object()) {
     const json& u = f["usage"];
     if (u.contains("prompt_tokens") && ValidTokenCount(u["prompt_tokens"])) {
@@ -101,6 +104,7 @@ std::string StreamAccumulator::Canonical() const {
     out["usage"] = {{"input_tokens", input_tokens_},
                     {"output_tokens", output_tokens_}};
   }
+  if (!model_.empty()) out["model"] = model_;
 
   if (!calls_.empty()) {
     json arr = json::array();
