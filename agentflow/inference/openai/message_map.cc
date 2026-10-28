@@ -340,6 +340,8 @@ absl::StatusOr<std::string> ResponseToCanonical(
   const json& msg = choice["message"];
 
   json out = {{"role", "assistant"}};
+  // The model the provider says it served, as StreamAccumulator records it.
+  if (resp.contains("model") && resp["model"].is_string()) out["model"] = resp["model"];
   std::string text;
   if (msg.contains("content") && msg["content"].is_string()) {
     text = msg["content"].get<std::string>();
