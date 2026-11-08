@@ -77,6 +77,18 @@ cc_test(
 )
 
 cc_test(
+    name = "agent_report_test",
+    size = "small",
+    srcs = ["agent_report_test.cc"],
+    deps = [
+        "//agentflow/workflow:agent_report",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
     name = "workflow_runner_test",
     size = "small",
     srcs = ["workflow_runner_test.cc"],
