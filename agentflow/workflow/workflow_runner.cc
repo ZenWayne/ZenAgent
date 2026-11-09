@@ -106,16 +106,32 @@ BuiltAgentNode BuildAgentNode(const AgentNodeBuildSpec& spec) {
     for (const auto& a : agent_def.delegates().agents()) {
       allowed.push_back(a);
     }
+    std::vector<std::string> fork_agents;
+    fork_agents.reserve(agent_def.delegates().fork_agents_size());
+    for (const auto& a : agent_def.delegates().fork_agents()) {
+      fork_agents.push_back(a);
+    }
+
+    // A fork child inherits this agent's settled history; the provider is
+    // pointed at this run's conversation by AgentNode::Run. An agent with no
+    // fork_agents keeps the pre-fork path exactly: no provider, no export.
+    std::shared_ptr<ConversationHistoryProvider> history;
+    if (!fork_agents.empty()) {
+      history = std::make_shared<ConversationHistoryProvider>();
+    }
 
     SubAgentContext sub_ctx;  // depth 0 at top level
     sub_ctx.root_invocation_id.clear();
     sub_ctx.gate = spec.tool_gate;
     sub_ctx.tool_tiers = spec.tool_tiers;
     sub_ctx.tool_event = spec.tool_event;
+    sub_ctx.parent_history = history;
 
     auto delegate = MakeDelegateTool(runtime, spec.agent_name,
                                        std::move(allowed), sub_ctx,
-                                       spec.io_ctx, spec.token_channel);
+                                       spec.io_ctx, spec.token_channel,
+                                       std::move(fork_agents));
+    cfg.history = std::move(history);
     cfg.extra_tools.push_back(delegate);
     out.keepalive.push_back(runtime);
     out.keepalive.push_back(delegate);

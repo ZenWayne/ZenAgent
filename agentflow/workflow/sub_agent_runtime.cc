@@ -1,5 +1,6 @@
 #include "agentflow/workflow/sub_agent_runtime.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <random>
@@ -31,6 +32,10 @@ std::string GenUuidLike() {
   s << std::hex << rng() << "-" << rng();
   return s.str();
 }
+
+// Safety cap on an exported fork history when the spec leaves
+// max_fork_history_bytes at 0. Mirrors zen_chat_service's default.
+constexpr size_t kDefaultMaxForkHistoryBytes = 524288;
 
 const proto::WorkflowSpec::AgentDef* FindAgent(const Workflow& wf,
                                                   std::string_view name) {
@@ -83,8 +88,28 @@ SubAgentRuntime::DefaultConversationFactory(
              ::agentflow::ChatConversationOptions opts) -> SendFn {
     auto backend = ResolveNamedBackend(backend_name, requesting_agent,
                                         default_backend, backends);
+    // Seed history (fork delegation) must be imported before the first send.
+    const std::string seed = opts.initial_history_json;
     auto conv = backend->CreateConversation(std::move(opts));
     if (!conv) return SendFn{};
+    if (!seed.empty()) {
+      if (!conv->SupportsHistoryFork()) {
+        // Fail loudly instead of running the child with a clean context: a
+        // fork that silently dropped its history would answer from scratch.
+        return [](const std::string&, const TokenSink&,
+                   const ::agentflow::CancelToken&)
+                   -> asio::awaitable<absl::StatusOr<std::string>> {
+          co_return absl::UnimplementedError("history import unsupported");
+        };
+      }
+      if (auto status = conv->ImportHistory(seed); !status.ok()) {
+        return [status](const std::string&, const TokenSink&,
+                        const ::agentflow::CancelToken&)
+                   -> asio::awaitable<absl::StatusOr<std::string>> {
+          co_return status;
+        };
+      }
+    }
     return [conv](const std::string& message_json, const TokenSink& on_token,
                    const ::agentflow::CancelToken& cancel)
                -> asio::awaitable<absl::StatusOr<std::string>> {
@@ -169,6 +194,10 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
     SubAgentContext nested_ctx = ctx;
     nested_ctx.depth = ctx.depth + 1;
     nested_ctx.root_invocation_id = root_id;
+    // Forking is one level: a forked child's own delegate tool never inherits
+    // a fork capability, even though it inherits the rest of the context.
+    nested_ctx.fork = false;
+    nested_ctx.parent_history = nullptr;
     ToolSchema schema{"delegate", "Hand a sub-task to another agent.",
                       NestedDelegateSchema(allowed)};
     tool_view->Add(std::make_shared<NativeFnTool>(schema,
@@ -230,6 +259,33 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
   // trace span, and {"error":"unknown_backend",...} reaches the parent LLM
   // as loudly as engine_error does — it must NOT be swallowed into a silent
   // fallback to the parent's or host's default backend (design spec §5).
+  // Fork: export the parent's settled history, enforce the byte cap, and
+  // seed the child's conversation before its first send. Any failure is a
+  // structured tool result the parent can act on.
+  if (ctx.fork) {
+    if (!ctx.parent_history) {
+      emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false,
+                              "fork_unavailable", 0);
+      co_return nlohmann::ordered_json{{"error", "fork_unavailable"}};
+    }
+    auto history = ctx.parent_history->Export();
+    if (!history.ok()) {
+      emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false,
+                              "fork_unavailable", 0);
+      co_return nlohmann::ordered_json{{"error", "fork_unavailable"}};
+    }
+    const size_t max_bytes =
+        parent_def->delegates().max_fork_history_bytes() > 0
+            ? parent_def->delegates().max_fork_history_bytes()
+            : kDefaultMaxForkHistoryBytes;
+    if (history->size() > max_bytes) {
+      emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false,
+                              "fork_history_too_large", 0);
+      co_return nlohmann::ordered_json{{"error", "fork_history_too_large"}};
+    }
+    opts.initial_history_json = std::move(*history);
+  }
+
   SendFn send;
   try {
     send = conv_factory_
@@ -290,6 +346,22 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
     }
     auto resp_or = co_await send(message_json, on_token, cancel_ref);
     if (!resp_or.ok()) {
+      // A fork's first send can fail because the child backend cannot accept
+      // inherited history or the import was rejected. Report that as a fork
+      // error the parent can act on, not as a generic engine error.
+      if (ctx.fork && iter == 0) {
+        if (absl::IsUnimplemented(resp_or.status())) {
+          emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false,
+                                  "fork_unsupported", 0);
+          co_return nlohmann::ordered_json{{"error", "fork_unsupported"}};
+        }
+        if (absl::IsInvalidArgument(resp_or.status()) ||
+            absl::IsFailedPrecondition(resp_or.status())) {
+          emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "fork_failed",
+                                  0);
+          co_return nlohmann::ordered_json{{"error", "fork_failed"}};
+        }
+      }
       emit_.EmitSubAgentEnd(invocation_id, ctx.depth, false, "engine_error", 0);
       co_return nlohmann::ordered_json{{"error", "engine_error"}};
     }

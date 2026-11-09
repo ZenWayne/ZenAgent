@@ -1,5 +1,6 @@
 #include "agentflow/workflow/delegate_tool.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -18,7 +19,8 @@
 namespace agentflow::workflow {
 namespace {
 
-std::string BuildSchema(const std::vector<std::string>& allowed) {
+std::string BuildSchema(const std::vector<std::string>& allowed,
+                        const std::vector<std::string>& fork_agents) {
   nlohmann::ordered_json agent_prop = {{"type", "string"}};
   nlohmann::ordered_json enum_arr = nlohmann::ordered_json::array();
   for (const auto& a : allowed) enum_arr.push_back(a);
@@ -26,6 +28,19 @@ std::string BuildSchema(const std::vector<std::string>& allowed) {
   nlohmann::ordered_json props;
   props["agent"] = agent_prop;
   props["goal"]  = nlohmann::ordered_json{{"type", "string"}};
+  if (!fork_agents.empty()) {
+    std::string names;
+    for (const auto& a : fork_agents) {
+      if (!names.empty()) names.append(", ");
+      names.append(a);
+    }
+    props["fork"] = nlohmann::ordered_json{
+        {"type", "boolean"},
+        {"description",
+         "Set true to give the sub-agent your settled conversation history "
+         "(including tool results) so it does not repeat reads. Only valid "
+         "for: " + names + "."}};
+  }
   nlohmann::ordered_json required = nlohmann::ordered_json::array();
   required.push_back("agent");
   required.push_back("goal");
@@ -44,14 +59,16 @@ std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
     std::vector<std::string> allowed_children,
     SubAgentContext ctx,
     ::asio::io_context* io,
-    TokenChannel* top_channel) {
+    TokenChannel* top_channel,
+    std::vector<std::string> fork_agents) {
   ::agentflow::ToolSchema schema{
       "delegate",
       "Hand a sub-task to another agent. The chosen agent runs with clean "
       "context and returns a result string.",
-      BuildSchema(allowed_children)};
+      BuildSchema(allowed_children, fork_agents)};
   auto fn = [runtime, parent_agent = std::move(parent_agent), ctx, io,
-             top_channel](std::string_view args_json,
+             top_channel, fork_agents = std::move(fork_agents)](
+                std::string_view args_json,
                           std::string_view /*tool_call_id*/,
                           const ::agentflow::CancelToken& cancel)
                 -> asio::awaitable<std::string> {
@@ -61,6 +78,19 @@ std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
     }
     std::string agent = args.value("agent", "");
     std::string goal = args.value("goal", "");
+    bool fork = false;
+    if (args.contains("fork")) {
+      if (!args["fork"].is_boolean()) {
+        co_return std::string(R"({"error":"bad_args"})");
+      }
+      fork = args["fork"].get<bool>();
+    }
+    if (fork && std::find(fork_agents.begin(), fork_agents.end(), agent) ==
+                    fork_agents.end()) {
+      // The schema only advertises fork for these targets; a model can still
+      // forge the argument, so the runtime enforces the same roster.
+      co_return std::string(R"({"error":"fork_not_allowed"})");
+    }
     if (cancel.IsCancelled()) {
       co_return std::string(R"({"error":"cancelled"})");
     }
@@ -72,6 +102,7 @@ std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
     // The gate and policy in ctx are inherited, while cancellation belongs to
     // this concrete delegate invocation and must also cancel a pending gate.
     sub_ctx.parent_cancel = &cancel;
+    sub_ctx.fork = fork;
 
     // Per-invocation token stream: one fresh channel per delegate call (so
     // concurrent/sequential sub-agents never share a channel). A drain

@@ -14,6 +14,7 @@
 #include "agentflow/core/errors.h"
 #include "agentflow/core/json_text.h"
 #include "agentflow/inference/canonical_message.h"
+#include "agentflow/workflow/sub_agent_context.h"
 
 namespace agentflow {
 
@@ -93,6 +94,9 @@ asio::awaitable<State> AgentNode::Run(
         "AgentNode: failed to create conversation on backend " +
         std::string(cfg_.backend->Describe()));
   }
+  // Runtime-only wiring: the conversation lives for this Run, and a fork
+  // delegation during this run exports from it.
+  if (cfg_.history) cfg_.history->conversation = conv;
 
   // Cooperative cancellation: break the in-flight request so a streaming turn
   // stops mid-decode, not only at the next turn boundary. Safe from any

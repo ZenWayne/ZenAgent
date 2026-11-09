@@ -51,6 +51,15 @@ message WorkflowSpec {
     map<string, string> input_template = 4;  // each value is a template
     string goal_template   = 5;   // optional override; default "{{tool.goal}}"
     string output_extract  = 6;   // JSONPath; default "$.assistant_reply"
+
+    // Subset of `agents` whose conversation may be forked: a delegate call to
+    // one of them may inherit this agent's settled message history instead of
+    // starting clean. Empty means the delegate tool has no `fork` argument at
+    // all and behaviour is unchanged.
+    repeated string fork_agents = 7;
+    // Safety cap on the exported history in bytes; 0 selects the runtime
+    // default (512 KiB). Exceeding it is an error, never a silent truncation.
+    uint32 max_fork_history_bytes = 8;
   }
 
   message AgentDef {

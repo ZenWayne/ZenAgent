@@ -65,7 +65,10 @@ class SubAgentRuntime {
       const ::agentflow::CancelToken& cancel)>;
 
   // Builds a conversation for a child agent from the prepared options and
-  // returns its bound SendFn. `backend_name` is the child's own
+  // returns its bound SendFn. When `opts.initial_history_json` is non-empty
+  // (a fork delegation), the conversation must accept it; a backend without
+  // history-fork support yields a SendFn that fails with Unimplemented, and
+  // RunAsync maps that to fork_unsupported rather than a clean-context run. `backend_name` is the child's own
   // ModelSpec.backend (empty means "use the host default"); `requesting_agent`
   // is the child agent's name, used only for error messages. An empty
   // (falsy) SendFn means the conversation could not be created and is

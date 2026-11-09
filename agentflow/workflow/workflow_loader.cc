@@ -1,8 +1,12 @@
 #include "agentflow/workflow/workflow_loader.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -127,6 +131,38 @@ absl::Status ParseDelegateSpec(const ordered_json& j,
   if (auto it = j.find("output_extract");
       it != j.end() && it->is_string()) {
     out->set_output_extract(it->get<std::string>());
+  }
+  if (auto it = j.find("fork_agents"); it != j.end()) {
+    if (!it->is_array()) {
+      return absl::InvalidArgumentError(
+          "delegates.fork_agents must be an array");
+    }
+    std::set<std::string> seen;
+    for (const auto& a : *it) {
+      if (!a.is_string() || a.get<std::string>().empty()) {
+        return absl::InvalidArgumentError(
+            "delegates.fork_agents entries must be non-empty strings");
+      }
+      const std::string target = a.get<std::string>();
+      if (!seen.insert(target).second) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "delegates.fork_agents contains duplicate '", target, "'"));
+      }
+      out->add_fork_agents(target);
+    }
+  }
+  if (auto it = j.find("max_fork_history_bytes"); it != j.end()) {
+    if (!it->is_number_integer()) {
+      return absl::InvalidArgumentError(
+          "delegates.max_fork_history_bytes must be a positive integer");
+    }
+    const int64_t bytes = it->get<int64_t>();
+    if (bytes < 0 ||
+        bytes > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+      return absl::InvalidArgumentError(
+          "delegates.max_fork_history_bytes must be a positive integer");
+    }
+    out->set_max_fork_history_bytes(static_cast<uint32_t>(bytes));
   }
   return absl::OkStatus();
 }
@@ -308,6 +344,17 @@ absl::Status CheckReferences(const proto::WorkflowSpec& spec,
           return absl::InvalidArgumentError(absl::StrCat(
               "agent '", agent_name,
               "' delegates to unknown agent '", target, "'"));
+        }
+      }
+      for (const auto& fork_target : def.delegates().fork_agents()) {
+        if (std::find(def.delegates().agents().begin(),
+                      def.delegates().agents().end(),
+                      fork_target) == def.delegates().agents().end()) {
+          return absl::InvalidArgumentError(absl::StrCat(
+              "agent '", agent_name, "' delegates.fork_agents contains '",
+              fork_target,
+              "' which is not in delegates.agents; a fork target must be a "
+              "declared delegate"));
         }
       }
     }
