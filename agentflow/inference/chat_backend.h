@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include <asio/awaitable.hpp>
 
@@ -58,6 +59,11 @@ struct ChatConversationOptions {
   // attachment_invalid (an image the model would silently never see is worse).
   ImageRefResolver image_ref_resolver;
 
+  // Optional seed history (an OpenAI wire message array) imported before the
+  // first SendAsync, used by fork delegation. Empty means none. A backend that
+  // cannot fork its history ignores this; SubAgentRuntime rejects a fork onto
+  // such a backend instead of silently falling back to a clean context.
+  std::string initial_history_json;
 };
 
 // One multi-turn conversation. The implementation OWNS history: locally the
@@ -91,6 +97,23 @@ class IConversation {
   // SOME code must register on the token the caller passes to SendAsync, or
   // cancellation silently does nothing.
   virtual void Cancel() = 0;
+
+  // Whether this backend can export a forkable message history and import it
+  // into another conversation. Default false; LiteRT-LM keeps its history in
+  // the engine and is not forkable in this phase.
+  virtual bool SupportsHistoryFork() const { return false; }
+
+  // Returns the settled message array as JSON. Implementations must exclude
+  // their own system message and any dangling tool_calls batch.
+  virtual absl::StatusOr<std::string> ExportHistory() const {
+    return absl::UnimplementedError("history export unsupported");
+  }
+
+  // Imports a message array before the first SendAsync. The implementation
+  // keeps its own system message and inserts the history after it.
+  virtual absl::Status ImportHistory(std::string_view /*messages_json*/) {
+    return absl::UnimplementedError("history import unsupported");
+  }
 };
 
 class IChatBackend {

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
 #include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
 #include <asio/use_future.hpp>
@@ -593,5 +594,136 @@ TEST(OpenAiChatBackendTest, SessionImageLimitRejectsTwentyFirstAndRollsBack) {
   ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"still works"})", io, cancel.Token()).response.ok());
   EXPECT_EQ(http.requests().size(), 21u);
 }
+ChatConversationOptions WithSystem(std::string_view text) {
+  ChatConversationOptions o;
+  o.system_message_json =
+      std::string(R"([{"type":"text","text":")") + std::string(text) + R"("}])";
+  return o;
+}
+
+constexpr char kUserMessage[] =
+    R"({"role":"user","content":[{"type":"text","text":"hi"}]})";
+
+TEST(OpenAiForkHistoryTest, SupportsHistoryFork) {
+  asio::io_context io;
+  testing::FakeHttpClient http({});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+  EXPECT_TRUE(conv->SupportsHistoryFork());
+}
+
+TEST(OpenAiForkHistoryTest, ExportHistoryOmitsTheSystemMessage) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("Hello")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(WithSystem("be brief"));
+  CancelSource cancel;
+  ASSERT_TRUE(
+      Send(*conv, kUserMessage, io, cancel.Token()).response.ok());
+
+  auto history = conv->ExportHistory();
+  ASSERT_TRUE(history.ok()) << history.status();
+  auto msgs = json::parse(*history);
+  ASSERT_TRUE(msgs.is_array());
+  ASSERT_EQ(msgs.size(), 2u);
+  EXPECT_EQ(msgs[0]["role"], "user");
+  EXPECT_EQ(msgs[1]["role"], "assistant");
+}
+
+TEST(OpenAiForkHistoryTest, ImportHistoryInsertsAfterTheSystemMessage) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("next")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(WithSystem("be brief"));
+  ASSERT_TRUE(conv->ImportHistory(
+      R"([{"role":"user","content":"old"},)"
+      R"({"role":"assistant","content":"yes"}])")
+                  .ok());
+
+  CancelSource cancel;
+  ASSERT_TRUE(
+      Send(*conv, kUserMessage, io, cancel.Token()).response.ok());
+
+  ASSERT_EQ(http.requests().size(), 1u);
+  const auto body = json::parse(http.requests()[0].body);
+  const auto& msgs = body["messages"];
+  ASSERT_EQ(msgs.size(), 4u);
+  EXPECT_EQ(msgs[0]["role"], "system");
+  EXPECT_EQ(msgs[1]["content"], "old");
+  EXPECT_EQ(msgs[2]["role"], "assistant");
+  EXPECT_EQ(msgs[3]["content"], "hi");
+}
+
+TEST(OpenAiForkHistoryTest, ExportThenImportRoundTripsTheSettledTurns) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("one")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto parent = backend->CreateConversation(WithSystem("be brief"));
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*parent, kUserMessage, io, cancel.Token()).response.ok());
+
+  auto exported = parent->ExportHistory();
+  ASSERT_TRUE(exported.ok()) << exported.status();
+
+  testing::FakeHttpClient child_http({{.frames = {TextFrame("two")}}});
+  auto child_backend = OpenAiChatBackend::Create(TestOptions(), child_http);
+  auto child = child_backend->CreateConversation(WithSystem("be brief"));
+  ASSERT_TRUE(child->ImportHistory(*exported).ok());
+  ASSERT_TRUE(Send(*child, kUserMessage, io, cancel.Token()).response.ok());
+
+  const auto body = json::parse(child_http.requests()[0].body);
+  const auto& msgs = body["messages"];
+  ASSERT_EQ(msgs.size(), 4u);
+  EXPECT_EQ(msgs[0]["role"], "system");
+  EXPECT_EQ(msgs[1]["content"], "hi");
+  EXPECT_EQ(msgs[2]["content"], "one");
+  EXPECT_EQ(msgs[3]["content"], "hi");
+}
+
+TEST(OpenAiForkHistoryTest, ImportHistoryRejectsNonArraysAndIllegalMessages) {
+  asio::io_context io;
+  testing::FakeHttpClient http({});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+
+  auto object = conv->ImportHistory(R"({"role":"user","content":"x"})");
+  EXPECT_TRUE(absl::IsInvalidArgument(object));
+  auto no_role = conv->ImportHistory(R"([{"content":"x"}])");
+  EXPECT_TRUE(absl::IsInvalidArgument(no_role));
+  auto not_object = conv->ImportHistory(R"(["x"])");
+  EXPECT_TRUE(absl::IsInvalidArgument(not_object));
+  // An empty array is a no-op, not an error.
+  EXPECT_TRUE(conv->ImportHistory("[]").ok());
+}
+
+TEST(OpenAiForkHistoryTest, ImportHistoryIsRejectedAfterTheFirstSend) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("Hello")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*conv, kUserMessage, io, cancel.Token()).response.ok());
+
+  auto late =
+      conv->ImportHistory(R"([{"role":"user","content":"old"}])");
+  EXPECT_TRUE(absl::IsFailedPrecondition(late));
+}
+
+TEST(OpenAiForkHistoryTest, ExportRejectsAnUnpairedHistoryItCannotClean) {
+  asio::io_context io;
+  testing::FakeHttpClient http({});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+  // An orphan tool result in the middle of the history is not a dangling
+  // tail, so it must be reported rather than silently exported.
+  ASSERT_TRUE(conv->ImportHistory(
+      R"([{"role":"user","content":"hi"},)"
+      R"({"role":"tool","tool_call_id":"ghost","content":"{}"},)"
+      R"({"role":"assistant","content":"x"}])")
+                  .ok());
+  auto history = conv->ExportHistory();
+  EXPECT_TRUE(absl::IsInvalidArgument(history.status()));
+}
+
 }  // namespace
 }  // namespace agentflow::openai

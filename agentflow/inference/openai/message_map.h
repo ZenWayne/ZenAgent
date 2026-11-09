@@ -53,6 +53,11 @@ absl::StatusOr<std::vector<nlohmann::json>> ToOpenAiMessages(
 // An already-paired history is left untouched, so this is idempotent.
 void RepairToolCallPairing(std::vector<nlohmann::json>* messages);
 
+// Drops a trailing assistant tool_calls message whose results have not all
+// arrived, plus any trailing tool messages that answer no call of that
+// message. Earlier complete pairs are kept.
+void DropDanglingToolCalls(std::vector<nlohmann::json>* messages);
+
 // Builds the request body. `opts.tools_json` is already the OpenAI tools shape
 // (AgentNode::BuildToolsJson emits it), so it is passed through verbatim; an
 // empty array is omitted entirely.

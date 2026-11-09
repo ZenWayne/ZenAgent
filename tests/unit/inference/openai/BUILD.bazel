@@ -33,6 +33,7 @@ cc_test(
         "//agentflow/core",
         "//agentflow/inference/openai:openai_chat_backend",
         "//tests/support:fake_http_client",
+        "@abseil-cpp//absl/status",
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",

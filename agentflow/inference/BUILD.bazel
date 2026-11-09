@@ -9,6 +9,7 @@ cc_library(
     hdrs = ["chat_backend.h"],
     deps = [
         "//agentflow/core",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@asio",
     ],
