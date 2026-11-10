@@ -171,3 +171,136 @@ TEST(SkillLibrary, SelectDuplicateIsInvalidArgument) {
 
 }  // namespace
 }  // namespace agentflow::skills
+namespace agentflow::skills {
+namespace {
+
+TEST(SkillLibrary, IndexesFlatReferenceFilesOnly) {
+  auto root = FreshTempDir("lib");
+  WriteFile(root / "s" / "SKILL.md", SkillMd("s", "d", ""));
+  WriteFile(root / "s" / "b-ref.md", "b");
+  WriteFile(root / "s" / "a-ref.md", "a");
+  WriteFile(root / "s" / "scripts" / "run.sh", "echo hi");
+  WriteFile(root / "s" / "nested" / "deep.md", "deep");
+  auto lib = SkillLibrary::Load({{root, "builtin"}});
+  ASSERT_TRUE(lib.ok()) << lib.status();
+  const Skill* skill = (*lib)->Find("s");
+  ASSERT_NE(skill, nullptr);
+
+  const auto& files = (*lib)->Files(*skill);
+  ASSERT_EQ(files.size(), 2u);
+  EXPECT_EQ(files[0], "a-ref.md");
+  EXPECT_EQ(files[1], "b-ref.md");
+
+  const std::string* found = (*lib)->FindFile(*skill, "a-ref.md");
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(*found, "a-ref.md");
+  EXPECT_EQ((*lib)->FindFile(*skill, "nope.md"), nullptr);
+  EXPECT_EQ((*lib)->FindFile(*skill, "nested/deep.md"), nullptr);
+  // A skill this library does not know has no files.
+  Skill unknown;
+  unknown.name = "not-loaded";
+  EXPECT_TRUE((*lib)->Files(unknown).empty());
+}
+
+TEST(SkillLibrary, IndexCapsAtTwoHundredFilesPerSkill) {
+  auto root = FreshTempDir("lib");
+  WriteFile(root / "s" / "SKILL.md", SkillMd("s", "d", ""));
+  for (int i = 0; i < 205; ++i) {
+    WriteFile(root / "s" / ("f" + std::to_string(1000 + i).substr(1) + ".txt"),
+              "x");
+  }
+  auto lib = SkillLibrary::Load({{root, "builtin"}});
+  ASSERT_TRUE(lib.ok()) << lib.status();
+  const Skill* skill = (*lib)->Find("s");
+  ASSERT_NE(skill, nullptr);
+  const auto& files = (*lib)->Files(*skill);
+  ASSERT_EQ(files.size(), 200u);
+  EXPECT_EQ(files.front(), "f000.txt");
+  EXPECT_EQ(files.back(), "f199.txt");
+  EXPECT_NE((*lib)->FindFile(*skill, "f199.txt"), nullptr);
+  EXPECT_EQ((*lib)->FindFile(*skill, "f204.txt"), nullptr);
+}
+
+TEST(SkillLibrary, SearchRanksNameThenDescriptionThenFileHits) {
+  auto root = FreshTempDir("lib");
+  WriteFile(root / "lighting" / "SKILL.md", SkillMd("lighting", "Lighting design", ""));
+  WriteFile(root / "lighting-pro" / "SKILL.md", SkillMd("lighting-pro", "Advanced", ""));
+  WriteFile(root / "advanced-lighting" / "SKILL.md", SkillMd("advanced-lighting", "More", ""));
+  WriteFile(root / "mood-board" / "SKILL.md",
+            SkillMd("mood-board", "Use lighting references for mood", ""));
+  WriteFile(root / "file-only" / "SKILL.md", SkillMd("file-only", "unrelated", ""));
+  WriteFile(root / "file-only" / "lighting-notes.md", "notes");
+  auto lib = SkillLibrary::Load({{root, "builtin"}});
+  ASSERT_TRUE(lib.ok()) << lib.status();
+
+  auto results = (*lib)->Search("lighting", 10);
+  ASSERT_EQ(results.size(), 5u);
+  EXPECT_EQ(results[0].name, "lighting");
+  EXPECT_EQ(results[1].name, "lighting-pro");
+  EXPECT_EQ(results[2].name, "advanced-lighting");
+  EXPECT_EQ(results[3].name, "mood-board");
+  EXPECT_EQ(results[4].name, "file-only");
+  EXPECT_TRUE(results[0].matched.empty());
+  EXPECT_TRUE(results[3].matched.empty());
+  EXPECT_EQ(results[4].matched, "lighting-notes.md");
+
+  auto limited = (*lib)->Search("lighting", 3);
+  ASSERT_EQ(limited.size(), 3u);
+  EXPECT_EQ(limited[2].name, "advanced-lighting");
+  EXPECT_TRUE((*lib)->Search("lighting", 0).empty());
+  EXPECT_TRUE((*lib)->Search("  ", 5).empty());
+}
+
+TEST(SkillLibrary, SearchBreaksTiesByName) {
+  auto root = FreshTempDir("lib");
+  WriteFile(root / "aa-x" / "SKILL.md", SkillMd("aa-x", "unrelated", ""));
+  WriteFile(root / "zz-x" / "SKILL.md", SkillMd("zz-x", "unrelated", ""));
+  auto lib = SkillLibrary::Load({{root, "builtin"}});
+  ASSERT_TRUE(lib.ok()) << lib.status();
+  auto results = (*lib)->Search("x", 10);
+  ASSERT_EQ(results.size(), 2u);
+  EXPECT_EQ(results[0].name, "aa-x");
+  EXPECT_EQ(results[1].name, "zz-x");
+}
+
+TEST(SkillLibrary, SearchOnlyLooksAtVisibleSkills) {
+  auto root = FreshTempDir("lib");
+  WriteFile(root / "visible" / "SKILL.md", SkillMd("visible", "lighting", ""));
+  WriteFile(root / "hidden" / "SKILL.md", SkillMd("hidden", "lighting", ""));
+  auto lib = SkillLibrary::Load({{root, "builtin"}});
+  ASSERT_TRUE(lib.ok()) << lib.status();
+  auto results = (*lib)->Search("lighting", 10, {"visible"});
+  ASSERT_EQ(results.size(), 1u);
+  EXPECT_EQ(results[0].name, "visible");
+}
+
+TEST(SkillLibrary, SearchDescriptionNeedsEveryTerm) {
+  auto root = FreshTempDir("lib");
+  WriteFile(root / "terms" / "SKILL.md", SkillMd("terms", "灯光 情绪 参考", ""));
+  auto lib = SkillLibrary::Load({{root, "builtin"}});
+  ASSERT_TRUE(lib.ok()) << lib.status();
+  auto hit = (*lib)->Search("灯光 情绪", 5);
+  ASSERT_EQ(hit.size(), 1u);
+  EXPECT_EQ(hit[0].name, "terms");
+  EXPECT_TRUE((*lib)->Search("灯光 舞台", 5).empty());
+}
+
+TEST(SkillLibrary, AllowedToolsAliasEmitsAMigrationWarning) {
+  auto root = FreshTempDir("lib");
+  WriteFile(root / "s" / "SKILL.md",
+            "---\nname: s\ndescription: d\nallowed-tools: get_shot\n---\n");
+  std::vector<std::string> warnings;
+  auto lib = SkillLibrary::Load({{root, "builtin"}}, &warnings);
+  ASSERT_TRUE(lib.ok()) << lib.status();
+  const Skill* skill = (*lib)->Find("s");
+  ASSERT_NE(skill, nullptr);
+  EXPECT_EQ(skill->tools, (std::vector<std::string>{"get_shot"}));
+  EXPECT_TRUE(skill->tools_from_allowed_tools);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("allowed-tools"), std::string::npos);
+  EXPECT_NE(warnings[0].find("alias"), std::string::npos);
+  EXPECT_NE(warnings[0].find("tools"), std::string::npos);
+}
+
+}  // namespace
+}  // namespace agentflow::skills

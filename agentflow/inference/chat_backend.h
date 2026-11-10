@@ -114,6 +114,16 @@ class IConversation {
   virtual absl::Status ImportHistory(std::string_view /*messages_json*/) {
     return absl::UnimplementedError("history import unsupported");
   }
+
+  // Replaces the tools this conversation advertises. The next SendAsync (for
+  // example the next round of the same turn's tool loop) requests the new
+  // OpenAI tools array. A backend that cannot change tools mid-conversation
+  // returns Unimplemented("tool update unsupported"), and a skill load that
+  // needs new tools then fails instead of returning a body the model cannot
+  // act on.
+  virtual absl::Status UpdateTools(std::string_view /*tools_json*/) {
+    return absl::UnimplementedError("tool update unsupported");
+  }
 };
 
 class IChatBackend {

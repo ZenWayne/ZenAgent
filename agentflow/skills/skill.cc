@@ -1,6 +1,8 @@
 #include "agentflow/skills/skill.h"
 #include "agentflow/skills/skill_utf8.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <string>
 #include <utility>
 
@@ -18,6 +20,7 @@ namespace {
 constexpr size_t kMaxNameLen = 64;
 constexpr size_t kMaxDescriptionLen = 1024;
 constexpr size_t kMaxCompatibilityLen = 500;
+constexpr size_t kMaxTools = 64;
 
 absl::Status Invalid(std::string_view message) {
   return absl::InvalidArgumentError(std::string(message));
@@ -43,11 +46,11 @@ absl::StatusOr<size_t> Utf8CharacterCount(std::string_view value,
   return count;
 }
 
-absl::Status SplitFrontmatter(const std::string& text, std::string* front,
+// Splits an optional frontmatter block. Returns false when the text does not
+// start with a closed '---' block; the caller then treats it as plain text.
+bool SplitOptionalFrontmatter(const std::string& text, std::string* front,
                               std::string* body) {
-  if (!absl::StartsWith(text, "---\n")) {
-    return Invalid("SKILL.md must start with a '---' YAML frontmatter line");
-  }
+  if (!absl::StartsWith(text, "---\n")) return false;
   size_t pos = 4;
   while (pos <= text.size()) {
     const size_t eol = text.find('\n', pos);
@@ -57,16 +60,54 @@ absl::Status SplitFrontmatter(const std::string& text, std::string* front,
       size_t body_start = eol == std::string::npos ? text.size() : eol + 1;
       while (body_start < text.size() && text[body_start] == '\n') ++body_start;
       *body = text.substr(body_start);
-      return absl::OkStatus();
+      return true;
     }
     if (eol == std::string::npos) break;
     pos = eol + 1;
   }
-  return Invalid("SKILL.md frontmatter is not closed by a '---' line");
+  return false;
+}
+
+absl::Status SplitFrontmatter(const std::string& text, std::string* front,
+                              std::string* body) {
+  if (!absl::StartsWith(text, "---\n")) {
+    return Invalid("SKILL.md must start with a '---' YAML frontmatter line");
+  }
+  if (!SplitOptionalFrontmatter(text, front, body)) {
+    return Invalid("SKILL.md frontmatter is not closed by a '---' line");
+  }
+  return absl::OkStatus();
+}
+
+// A string list of tool names: entries must be non-empty strings, duplicates
+// are dropped (first occurrence wins), and at most 64 distinct names survive.
+absl::StatusOr<std::vector<std::string>> ParseToolList(const YAML::Node& value,
+                                                       std::string_view key) {
+  if (!value.IsSequence()) {
+    return Invalid(absl::StrCat("frontmatter '", key,
+                                "' must be a list of tool names"));
+  }
+  std::vector<std::string> tools;
+  for (const auto& item : value) {
+    auto parsed = Scalar(item, absl::StrCat(key, "[]"));
+    if (!parsed.ok()) return parsed.status();
+    if (parsed->empty()) {
+      return Invalid(absl::StrCat("frontmatter '", key,
+                                  "' contains an empty tool name"));
+    }
+    if (std::find(tools.begin(), tools.end(), *parsed) != tools.end()) continue;
+    if (tools.size() >= kMaxTools) {
+      return Invalid(absl::StrCat("frontmatter '", key,
+                                  "' exceeds 64 distinct tool names"));
+    }
+    tools.push_back(std::move(*parsed));
+  }
+  return tools;
 }
 
 absl::Status ApplyField(const std::string& key, const YAML::Node& value,
-                        Skill* skill, std::vector<std::string>* unknown) {
+                        Skill* skill, bool* has_tools_field,
+                        std::vector<std::string>* unknown) {
   if (key == "name" || key == "description" || key == "license" ||
       key == "compatibility") {
     auto parsed = Scalar(value, key);
@@ -85,6 +126,13 @@ absl::Status ApplyField(const std::string& key, const YAML::Node& value,
       if (!parsed.ok()) return parsed.status();
       skill->metadata[metadata_key] = std::move(*parsed);
     }
+    return absl::OkStatus();
+  }
+  if (key == "tools") {
+    auto parsed = ParseToolList(value, "tools");
+    if (!parsed.ok()) return parsed.status();
+    skill->tools = std::move(*parsed);
+    if (has_tools_field != nullptr) *has_tools_field = true;
     return absl::OkStatus();
   }
   if (key == "allowed-tools") {
@@ -141,13 +189,14 @@ absl::StatusOr<Skill> ParseSkillMd(std::string_view raw, std::string_view dir_na
 
   Skill skill;
   skill.body = std::move(body);
+  bool has_tools_field = false;
   try {
     const YAML::Node root = YAML::Load(front);
     if (!root.IsMap()) return Invalid("SKILL.md frontmatter must be a YAML mapping");
     for (const auto& field : root) {
       const std::string key = field.first.as<std::string>();
       if (absl::Status status = ApplyField(key, field.second, &skill,
-                                          unknown_fields_out);
+                                          &has_tools_field, unknown_fields_out);
           !status.ok()) {
         return status;
       }
@@ -180,7 +229,66 @@ absl::StatusOr<Skill> ParseSkillMd(std::string_view raw, std::string_view dir_na
   if (*compatibility_length > kMaxCompatibilityLen) {
     return Invalid("frontmatter 'compatibility' exceeds 500 characters");
   }
+  // Migration: `allowed-tools` stays permission pre-authorization, but a skill
+  // that only wrote `allowed-tools` still gets those names as its `tools`.
+  if (!has_tools_field && !skill.allowed_tools.empty()) {
+    skill.tools = skill.allowed_tools;
+    skill.tools_from_allowed_tools = true;
+  }
   return skill;
+}
+
+absl::StatusOr<ReferenceFile> ParseReferenceMd(std::string_view raw,
+                                               std::string_view filename) {
+  std::string text(raw);
+  if (absl::StartsWith(text, "\xEF\xBB\xBF")) text.erase(0, 3);
+  absl::StrReplaceAll({{"\r\n", "\n"}}, &text);
+
+  ReferenceFile ref;
+  std::string stem = std::filesystem::path(std::string(filename)).filename().string();
+  if (absl::EndsWith(stem, ".md")) stem.resize(stem.size() - 3);
+  if (stem.empty()) return Invalid("reference file name must not be empty");
+  ref.name = std::move(stem);
+
+  std::string front;
+  std::string body;
+  if (!SplitOptionalFrontmatter(text, &front, &body)) {
+    ref.body = std::move(text);
+    return ref;
+  }
+  if (!front.empty()) {
+    try {
+      const YAML::Node root = YAML::Load(front);
+      if (!root.IsMap()) {
+        return Invalid(absl::StrCat("reference '", filename,
+                                    "' frontmatter must be a YAML mapping"));
+      }
+      for (const auto& field : root) {
+        const std::string key = field.first.as<std::string>();
+        if (key == "name") {
+          auto parsed = Scalar(field.second, "name");
+          if (!parsed.ok()) return parsed.status();
+          if (parsed->empty()) {
+            return Invalid("reference frontmatter 'name' must not be empty");
+          }
+          ref.name = std::move(*parsed);
+        } else if (key == "description") {
+          auto parsed = Scalar(field.second, "description");
+          if (!parsed.ok()) return parsed.status();
+          ref.description = std::move(*parsed);
+        } else if (key == "tools") {
+          auto parsed = ParseToolList(field.second, "tools");
+          if (!parsed.ok()) return parsed.status();
+          ref.tools = std::move(*parsed);
+        }
+        // References are data, not a manifest: unknown fields are ignored.
+      }
+    } catch (const YAML::Exception& error) {
+      return Invalid(absl::StrCat("invalid reference frontmatter: ", error.what()));
+    }
+  }
+  ref.body = std::move(body);
+  return ref;
 }
 
 }  // namespace agentflow::skills

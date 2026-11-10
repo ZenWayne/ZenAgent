@@ -727,3 +727,91 @@ TEST(OpenAiForkHistoryTest, ExportRejectsAnUnpairedHistoryItCannotClean) {
 
 }  // namespace
 }  // namespace agentflow::openai
+namespace agentflow::openai {
+namespace {
+
+class StubConversation : public IConversation {
+ public:
+  asio::awaitable<absl::StatusOr<std::string>> SendAsync(
+      std::string, const TokenSink&, const CancelToken&) override {
+    co_return absl::StatusOr<std::string>(std::string("{}"));
+  }
+  void Cancel() override {}
+};
+
+TEST(IConversationTest, UpdateToolsDefaultsToUnimplemented) {
+  StubConversation conv;
+  const absl::Status status = conv.UpdateTools("[]");
+  EXPECT_EQ(status.code(), absl::StatusCode::kUnimplemented);
+  EXPECT_NE(std::string(status.message()).find("tool update unsupported"),
+            std::string::npos);
+}
+
+TEST(OpenAiChatBackendTest, UpdateToolsAppliesToTheNextRequest) {
+  asio::io_context io;
+  testing::FakeHttpClient http({
+      {.frames = {TextFrame("one")}},
+      {.frames = {TextFrame("two")}},
+  });
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  ChatConversationOptions opts;
+  opts.tools_json =
+      R"([{"type":"function","function":{"name":"old","description":"",)"
+      R"("parameters":{"type":"object","properties":{}}}}])";
+  auto conv = backend->CreateConversation(std::move(opts));
+  CancelSource cancel;
+
+  ASSERT_TRUE(Send(*conv,
+                   R"({"role":"user","content":[{"type":"text","text":"hi"}]})",
+                   io, cancel.Token())
+                  .response.ok());
+  const json first = json::parse(http.requests()[0].body);
+  ASSERT_TRUE(first.contains("tools"));
+  EXPECT_EQ(first["tools"][0]["function"]["name"], "old");
+
+  EXPECT_TRUE(conv->UpdateTools(
+                  R"([{"type":"function","function":{"name":"new",)"
+                  R"("description":"","parameters":{"type":"object","properties":{}}}}])")
+                  .ok());
+
+  ASSERT_TRUE(Send(*conv,
+                   R"({"role":"user","content":[{"type":"text","text":"again"}]})",
+                   io, cancel.Token())
+                  .response.ok());
+  const json second = json::parse(http.requests()[1].body);
+  ASSERT_TRUE(second.contains("tools"));
+  EXPECT_EQ(second["tools"][0]["function"]["name"], "new");
+}
+
+TEST(OpenAiChatBackendTest, UpdateToolsRejectsInvalidJsonAndKeepsTheOldTools) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("ok")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  ChatConversationOptions opts;
+  opts.tools_json =
+      R"([{"type":"function","function":{"name":"keep","description":"",)"
+      R"("parameters":{"type":"object","properties":{}}}}])";
+  auto conv = backend->CreateConversation(std::move(opts));
+
+  EXPECT_EQ(conv->UpdateTools("not json").code(),
+            absl::StatusCode::kInvalidArgument);
+  EXPECT_EQ(conv->UpdateTools(R"({"tools":[]})").code(),
+            absl::StatusCode::kInvalidArgument);
+  EXPECT_EQ(conv->UpdateTools(R"([1])").code(),
+            absl::StatusCode::kInvalidArgument);
+
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*conv,
+                   R"({"role":"user","content":[{"type":"text","text":"hi"}]})",
+                   io, cancel.Token())
+                  .response.ok());
+  const json body = json::parse(http.requests()[0].body);
+  ASSERT_TRUE(body.contains("tools"));
+  EXPECT_EQ(body["tools"][0]["function"]["name"], "keep");
+
+  // An empty array is a valid update: it advertises no tools.
+  EXPECT_TRUE(conv->UpdateTools("[]").ok());
+}
+
+}  // namespace
+}  // namespace agentflow::openai

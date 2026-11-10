@@ -251,6 +251,21 @@ class OpenAiConversation : public IConversation {
     return absl::OkStatus();
   }
 
+  absl::Status UpdateTools(std::string_view tools_json) override {
+    const json parsed = json::parse(tools_json, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_array()) {
+      return absl::InvalidArgumentError("tools must be a JSON array");
+    }
+    for (const auto& tool : parsed) {
+      if (!tool.is_object()) {
+        return absl::InvalidArgumentError(
+            "each tool must be a JSON object");
+      }
+    }
+    conv_opts_.tools_json = std::string(tools_json);
+    return absl::OkStatus();
+  }
+
   void Cancel() override {
     // Deliberate no-op, NOT an unimplemented stub: this class owns no
     // transport handle to close. Every SendAsync call threads its
