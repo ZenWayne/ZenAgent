@@ -135,3 +135,15 @@ cc_library(
         "@nlohmann_json//:json",
     ],
 )
+
+
+cc_library(
+    name = "task_graph",
+    srcs = ["task_graph.cc"],
+    hdrs = ["task_graph.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
