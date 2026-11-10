@@ -274,8 +274,12 @@ TEST_F(SkillToolsTest, LoadSkillEnforcesThePathBoundary) {
                                      {"path", (root_ / "outside.txt").string()}}
                           .dump())),
             "path_not_allowed");
-  EXPECT_EQ(ErrorCode(InvokeTool(load, R"({"name":"alpha","path":""})")),
-            "path_not_allowed");
+  // A strict-mode tool call always carries every declared property: a blank
+  // path means "the skill itself", not a file request.
+  EXPECT_EQ(InvokeTool(load, R"({"name":"alpha","path":""})"),
+            Hint("alpha") + "\n\n# Alpha\nBody.\n");
+  EXPECT_EQ(InvokeTool(load, R"({"name":"alpha","path":"   "})"),
+            Hint("alpha") + "\n\n# Alpha\nBody.\n");
   EXPECT_EQ(ErrorCode(InvokeTool(load, R"({"name":"alpha","path":"references"})")),
             "not_a_file");
   EXPECT_EQ(ErrorCode(InvokeTool(load, R"({"name":"alpha","path":"nope.md"})")),

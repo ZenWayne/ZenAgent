@@ -288,7 +288,10 @@ std::string LoadSkill(const SkillLibrary& library,
       return ErrorJson("bad_args", "'path' must be a string");
     }
     path = args["path"].get<std::string>();
-    has_path = true;
+    // Strict-mode tool calls must include every declared property, so a model
+    // that only wants the skill body sends path:"" — there is no file to name.
+    // A blank path therefore means "no path", not a file request.
+    has_path = !absl::StripAsciiWhitespace(path).empty();
   }
 
   auto outcome = ResolveLoad(library, visible, state->current_skill, name,
