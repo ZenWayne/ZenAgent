@@ -2,7 +2,7 @@ name: CI
 run-name: ci · ${{ inputs.source_ref || github.sha }} · ${{ inputs.scope || 'all' }}
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
     inputs:
       runner:
@@ -31,11 +31,24 @@ jobs:
     env:
       CI: 'true'
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref || github.sha }}
-          path: source
-          persist-credentials: false
+      # Plain git clone instead of actions/checkout: this repository carries
+      # gitlinks (edge-agent-workspace, rig) without .gitmodules entries, and the
+      # action's unconditional `git submodule foreach` fails on them. CI needs no
+      # submodule at all.
+      - name: Clone source at the requested revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ inputs.source_ref || github.sha }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          git -c http.extraHeader="Authorization: Basic $(printf 'oauth2:%s' "$GH_TOKEN" | base64)" \
+              clone --quiet --no-tags "$SERVER_URL/$REPOSITORY.git" source
+          git -C source fetch --quiet origin "$SOURCE_REF"
+          git -C source -c advice.detachedHead=false checkout --quiet --detach "$SOURCE_REF"
+          git -C source log -1 --format='source_sha=%H %s'
       - name: Static CI contract, no compiler
         run: |
           set -euo pipefail
@@ -56,16 +69,20 @@ jobs:
       # Compilation happens only here: inside the throwaway job container.
       CI_MIN_DISK_GIB: '6'
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_ref || github.sha }}
-          path: source
-          persist-credentials: false
-      - name: Record exact source revision
+      - name: Clone source at the requested revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ inputs.source_ref || github.sha }}
         run: |
           set -euo pipefail
+          git config --global --add safe.directory '*'
+          git -c http.extraHeader="Authorization: Basic $(printf 'oauth2:%s' "$GH_TOKEN" | base64)" \
+              clone --quiet --no-tags "$SERVER_URL/$REPOSITORY.git" source
+          git -C source fetch --quiet origin "$SOURCE_REF"
+          git -C source -c advice.detachedHead=false checkout --quiet --detach "$SOURCE_REF"
           git -C source log -1 --format='source_sha=%H %s'
-          echo "scope=$SCOPE image=$(printenv CI_IMAGE) bazel=$(printenv CI_BAZEL_VERSION)"
       - name: Locked Bazel build and unit tests
         run: |
           set -euo pipefail
