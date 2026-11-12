@@ -54,6 +54,8 @@ fj workflow run ci.yml \
 - `source_ref` 用完整 SHA，不用分支名：分支会在排队期间移动。
 - `scope`：`build`（只编译）、`test`（只跑单元测试）、`all`（默认）。
 - 派发成功不等于通过；排队和客户端报错都不是结论。
+- `fj workflow run` 可能报 `dispatched ... but could not find the triggered run`：运行通常已经创建，先用 `fj run list` 按 workflow、`source_ref`、时间核对，**不要重复派发**。无法唯一关联时保留"派发未确认"。
+- 自动触发只在向 `main` 推送时生效；镜像仓库 `wayne/zenagent` 当前默认分支是 CI 配置分支 `ci/forgejo-ci`，所以实际运行以 `workflow_dispatch` 为主。`source_ref` 写的必须是已同步到 Forgejo 的真实 40 位 SHA，写错会在克隆步骤直接失败。
 
 ## 4. 观察与取证据
 

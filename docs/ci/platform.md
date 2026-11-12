@@ -41,6 +41,10 @@ Bazel 的运行预算必须装进 3 GiB：`--jobs=2`、`--local_ram_resources=20
 - 基础：`docker.io/library/ubuntu:24.04`。
 - 工具链：`g++`/`make`/`patch`（`.bazelrc` 与 rules_cc 的宿主 C++20 工具链）、`git`（`git_override` protobuf、子模块相关 checkout）、`zlib1g-dev`（protobuf）、`python3`（配置与结果核验）、`openjdk-21-jdk-headless`（`//agentflow/jni` 的 Kotlin 目标需要 `@local_jdk`）。
 - Node 24.22.3（官方 tarball + sha256）：Forgejo 用 `node` 执行 `actions/checkout@v4` 与 `actions/upload-artifact@v3`，镜像里没有 `node` 会让 job 在 checkout 阶段以 exit 127 立刻失败。
+
+工作流不用 `actions/checkout`，改用普通 `git clone` + `git fetch`（见下）：本仓库的 `edge-agent-workspace`、`rig` 是 gitlink，却没有对应 `.gitmodules` 条目，`actions/checkout` 在收尾时无条件执行 `git submodule foreach --recursive`，会以 `fatal: No url found for submodule path` 退出 128，job 在第一步就失败。CI 不需要任何子模块，克隆时也不带子模块即可。
+
+> 派发后的 run 只取 `source_ref`；`github.token` 通过 `http.extraHeader` 传给 `git clone`，令牌不出现在 URL 或日志里。补好 `.gitmodules` 之前不要改回 `actions/checkout`。
 - Bazel 8.4.2 二进制从 `releases.bazel.build` 下载并按 sha256 校验后写入 `/usr/local/bin/bazel`；版本必须等于 `.bazelversion`。
 - 镜像自带标记 `CI_CONTAINER=1`、`CI_IMAGE`、`CI_BAZEL_VERSION`，`container-guard.sh` 与 `contract-check.sh` 依赖它们判定"确实在 CI 运行时里"。
 
@@ -73,7 +77,7 @@ Bazel 的下载（BCR 模块、`http_archive`、GitHub release、maven）走 Baz
 | `test` | `bazel test //tests/unit/...` | 单元测试全部执行且通过 |
 | `all`（默认） | 先 build 后 test | 推送分支和合并前的标准检查 |
 
-目前不做按改动路径的选测：完整 `//agentflow/...` + `//tests/unit/...` 实测一次约 25 分钟（构建 12 分钟 / 55 个测试目标 13.5 分钟，2 并行、3 GiB 上限），比维护一套易错的路径映射更可靠。等实测稳定超过 35 分钟再引入选测，并同时补"选择原因"证据。
+目前不做按改动路径的选测：完整 `//agentflow/...` + `//tests/unit/...` 实测一次约 15 分钟（run #4：构建 11.5 分钟、31 个目标 / 1286 actions / 776 编译动作；随后 55 个测试目标 531 用例 3.5 分钟，因为共用同一个输出基），比维护一套易错的路径映射更可靠。等实测稳定超过 35 分钟再引入选测，并同时补"选择原因"证据。
 
 新增/移动测试目标不需要改 CI；只要在 `//tests/unit/` 下，就会自动纳入。`//tests/integration`、`//tests/smoke`、`//tests/repro` 依赖模型文件或外部服务，不在普通 CI 范围。
 
@@ -109,5 +113,7 @@ Bazel 的下载（BCR 模块、`http_archive`、GitHub release、maven）走 Baz
 | `container guard: workspace ... is a mount point` | 有人把宿主 checkout 挂进容器编译 | 改为容器内私有副本（`reproduce.sh` 或工作流 checkout） |
 | 下载超时 / `Connection reset` 指向 github/BCR | 代理未传入 Bazel JVM | 确认 Runner 注入的 `https_proxy` 存在，`proxy-bazelrc.sh` 输出非空 |
 | `no field ... ` / artifact 为空 | 该次运行没跑到该步骤 | 按 artifacts 判断实际执行到哪一步，不要用状态位推断 |
+| `fj run logs` 报 `querying Loki for workflow logs` | 本机未部署 Loki 日志后端 | 读 Forgejo 存储里的原始任务日志（只读）：`podman cp forgejo-server:/data/gitea/actions_log/wayne/zenagent/<bucket>/<task>.log.zst /tmp/x.log.zst && zstd -dc /tmp/x.log.zst`；不要为此改造 Forgejo 或另写日志客户端 |
+| `Job 'CI contracts' failed` 但日志无错 | 先看任务日志里的第一次错误；`docker exec ... node` 报 `executable file 'node' not found` 是镜像缺 node | 重建镜像并核对 `node --version`；不要在工作流里临时装 node |
 
 宿主磁盘清理只针对可再生成的内容（镜像缓存、旧容器、悬空卷），清理前确认没有正在运行的 CI 或业务栈；不要删别人的卷来腾空间。

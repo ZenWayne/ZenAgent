@@ -23,6 +23,8 @@
 | 测试 | `checks.sh test` | `bazel test //tests/unit/...`，每个目标的 GTest XML 非空、用例数 > 0、无失败；结果不得来自测试缓存 |
 | 证据 | `deploy/ci/verify-results.py` | 写入 `identity.json`、`*.bep.jsonl`、`test-report.json`，由工作流上传为 artifacts |
 
+源码克隆用 `git clone` + `git fetch --detach`，不用 `actions/checkout`：本仓库有 gitlink 缺 `.gitmodules` 条目，checkout 的 `git submodule foreach` 会直接失败（见 [平台实现](platform.md#任务镜像)）。
+
 普通 CI 不构建 Android arm64（需要 NDK，见 [平台实现](platform.md#不做的检查)），不部署、不发布、不访问业务凭据。
 
 ## 目录
