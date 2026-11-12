@@ -140,6 +140,8 @@ use skills do not link yaml-cpp.
 
 The primary build system is **Bazel** (C++20). LiteRT-LM-aligned CMake files are also present.
 
+> **Builds and tests run in the Forgejo CI container, not on the host.** Do not run `bazel`, `cmake`, `make` or `g++` in a checkout: verification happens in `.forgejo/workflows/ci.yml` (see [`docs/ci/README.md`](docs/ci/README.md)), and `deploy/ci/reproduce.sh` reproduces it in a throwaway container. The commands below are what CI executes internally; they are not a host-side instruction.
+
 ```bash
 # Build the whole framework
 bazel build //agentflow/...

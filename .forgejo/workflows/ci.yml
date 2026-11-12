@@ -1,0 +1,104 @@
+name: CI
+run-name: ci · ${{ inputs.source_ref || github.sha }} · ${{ inputs.scope || 'all' }}
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Prepared ordinary-CI runner label; must expose the local zen-ci image'
+        type: string
+        default: linux-small
+      source_ref:
+        description: 'Source ref to verify; use a full SHA already synced to Forgejo'
+        type: string
+        required: false
+      scope:
+        description: 'Checks to run: build (//agentflow/...), test (//tests/unit/...), all'
+        type: choice
+        default: all
+        options: [build, test, all]
+concurrency:
+  group: zenagent-ci-${{ inputs.source_ref || github.sha }}
+  cancel-in-progress: false
+jobs:
+  quality:
+    name: CI contracts
+    runs-on: ${{ inputs.runner || 'linux-small' }}
+    container:
+      image: localhost/zen-ci:ubuntu24.04-bazel8.4.2
+    timeout-minutes: 10
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          path: source
+          persist-credentials: false
+      - name: Static CI contract, no compiler
+        run: |
+          set -euo pipefail
+          cd source
+          export CI_WORKSPACE="$PWD" CI_SCRATCH=/workspace/.ci
+          bash deploy/ci/contract-check.sh
+
+  verify:
+    name: Build and test
+    needs: quality
+    runs-on: ${{ inputs.runner || 'linux-small' }}
+    container:
+      image: localhost/zen-ci:ubuntu24.04-bazel8.4.2
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      SCOPE: ${{ inputs.scope || 'all' }}
+      # Compilation happens only here: inside the throwaway job container.
+      CI_MIN_DISK_GIB: '6'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          path: source
+          persist-credentials: false
+      - name: Record exact source revision
+        run: |
+          set -euo pipefail
+          git -C source log -1 --format='source_sha=%H %s'
+          echo "scope=$SCOPE image=$(printenv CI_IMAGE) bazel=$(printenv CI_BAZEL_VERSION)"
+      - name: Locked Bazel build and unit tests
+        run: |
+          set -euo pipefail
+          cd source
+          export CI_WORKSPACE="$PWD"
+          export CI_SCRATCH=/workspace/.ci
+          export CI_RESULTS=/workspace/results
+          mkdir -p "$CI_RESULTS"
+          bash deploy/ci/checks.sh "$SCOPE" 2>&1 | tee "$CI_RESULTS/ci.log"
+      - name: Retain check log
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: ci-log
+          path: /workspace/results/ci.log
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Retain resolved source identity
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: ci-source-identity
+          path: /workspace/results/identity.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Retain Bazel evidence
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: ci-bazel-evidence
+          path: |
+            /workspace/results/build.bep.jsonl
+            /workspace/results/test.bep.jsonl
+            /workspace/results/test-report.json
+          retention-days: 7
+          if-no-files-found: warn

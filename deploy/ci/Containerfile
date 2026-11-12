@@ -1,0 +1,57 @@
+# Forgejo job image for ZenAgent (agentflow) C++/Bazel builds.
+#
+# Two separate actions, never mixed:
+#   * building THIS image  -> host-side `podman build` is allowed (metadata-only,
+#     no project sources are compiled here);
+#   * compiling the project -> only inside the disposable job container started
+#     by the Forgejo runner from the image below. Host compilation is forbidden;
+#     see docs/ci/README.md and AGENTS.md.
+#
+# Build (host, from the repository root):
+#   podman build --network host -t localhost/zen-ci:ubuntu24.04-bazel8.4.2 \
+#     -f deploy/ci/Containerfile .
+#
+# The tag and the LABELs below are the CI contract: deploy/ci/contract-check.sh
+# verifies BAZEL_VERSION against .bazelversion and that the running image is
+# this one.
+FROM docker.io/library/ubuntu:24.04
+
+ARG BAZEL_VERSION=8.4.2
+# Official checksum from
+# https://releases.bazel.build/8.4.2/release/bazel-8.4.2-linux-x86_64.sha256
+ARG BAZEL_SHA256=4dc8e99dfa802e252dac176d08201fd15c542ae78c448c8a89974b6f387c282c
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# git: git_override of protobuf + submodule-aware worktrees
+# g++/make/patch: C++20 host toolchain expected by .bazelrc and rules_cc
+# zlib1g-dev: protobuf's zlib dependency
+# python3: JSON config parsing and result verification in deploy/ci
+# openjdk-21: //agentflow/jni has Kotlin targets; @local_jdk resolves the
+#   system JDK, and without one analysis fails before any C++ compile
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash ca-certificates curl git g++ make patch \
+        openjdk-21-jdk-headless \
+        python3 unzip xz-utils zlib1g-dev file \
+    && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+
+RUN curl --fail --location --retry 3 --connect-timeout 20 --max-time 300 \
+        "https://releases.bazel.build/${BAZEL_VERSION}/release/bazel-${BAZEL_VERSION}-linux-x86_64" \
+        -o /usr/local/bin/bazel \
+    && printf '%s  %s\n' "$BAZEL_SHA256" /usr/local/bin/bazel | sha256sum --check --strict - \
+    && chmod 755 /usr/local/bin/bazel \
+    && test "$(bazel --version)" = "bazel ${BAZEL_VERSION}"
+
+LABEL org.zen.ci.image="zen-ci" \
+      org.zen.ci.bazel.version="${BAZEL_VERSION}"
+
+# Marker read by deploy/ci/contract-check.sh. It is the only in-container
+# evidence that the job really runs in the disposable CI runtime.
+ENV CI_CONTAINER=1 \
+    CI_BAZEL_VERSION=${BAZEL_VERSION} \
+    CI_IMAGE=zen-ci:ubuntu24.04-bazel8.4.2
+
+WORKDIR /workspace
+CMD ["bash"]
