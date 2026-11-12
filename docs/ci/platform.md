@@ -40,6 +40,7 @@ Bazel 的运行预算必须装进 3 GiB：`--jobs=2`、`--local_ram_resources=20
 
 - 基础：`docker.io/library/ubuntu:24.04`。
 - 工具链：`g++`/`make`/`patch`（`.bazelrc` 与 rules_cc 的宿主 C++20 工具链）、`git`（`git_override` protobuf、子模块相关 checkout）、`zlib1g-dev`（protobuf）、`python3`（配置与结果核验）、`openjdk-21-jdk-headless`（`//agentflow/jni` 的 Kotlin 目标需要 `@local_jdk`）。
+- Node 24.22.3（官方 tarball + sha256）：Forgejo 用 `node` 执行 `actions/checkout@v4` 与 `actions/upload-artifact@v3`，镜像里没有 `node` 会让 job 在 checkout 阶段以 exit 127 立刻失败。
 - Bazel 8.4.2 二进制从 `releases.bazel.build` 下载并按 sha256 校验后写入 `/usr/local/bin/bazel`；版本必须等于 `.bazelversion`。
 - 镜像自带标记 `CI_CONTAINER=1`、`CI_IMAGE`、`CI_BAZEL_VERSION`，`container-guard.sh` 与 `contract-check.sh` 依赖它们判定"确实在 CI 运行时里"。
 

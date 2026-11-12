@@ -16,6 +16,11 @@
 # this one.
 FROM docker.io/library/ubuntu:24.04
 
+# Forgejo Actions run their own steps with `node`: actions/checkout@v4 and
+# actions/upload-artifact@v3 are Node actions executed inside this image.
+ARG NODE_VERSION=24.22.3
+ARG NODE_SHA256=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb
+
 ARG BAZEL_VERSION=8.4.2
 # Official checksum from
 # https://releases.bazel.build/8.4.2/release/bazel-8.4.2-linux-x86_64.sha256
@@ -38,6 +43,14 @@ RUN apt-get update \
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 
 RUN curl --fail --location --retry 3 --connect-timeout 20 --max-time 300 \
+        "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+        -o /tmp/node.tar.xz \
+    && printf '%s  %s\n' "$NODE_SHA256" /tmp/node.tar.xz | sha256sum --check --strict - \
+    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
+    && rm /tmp/node.tar.xz \
+    && test "$(node --version)" = "v${NODE_VERSION}"
+
+RUN curl --fail --location --retry 3 --connect-timeout 20 --max-time 300 \
         "https://releases.bazel.build/${BAZEL_VERSION}/release/bazel-${BAZEL_VERSION}-linux-x86_64" \
         -o /usr/local/bin/bazel \
     && printf '%s  %s\n' "$BAZEL_SHA256" /usr/local/bin/bazel | sha256sum --check --strict - \
@@ -45,7 +58,8 @@ RUN curl --fail --location --retry 3 --connect-timeout 20 --max-time 300 \
     && test "$(bazel --version)" = "bazel ${BAZEL_VERSION}"
 
 LABEL org.zen.ci.image="zen-ci" \
-      org.zen.ci.bazel.version="${BAZEL_VERSION}"
+      org.zen.ci.bazel.version="${BAZEL_VERSION}" \
+      org.zen.ci.node.version="${NODE_VERSION}"
 
 # Marker read by deploy/ci/contract-check.sh. It is the only in-container
 # evidence that the job really runs in the disposable CI runtime.
