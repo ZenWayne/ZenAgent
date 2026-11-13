@@ -1,12 +1,15 @@
 # AGENTS.md
 
-## Build & network
+## 构建与验证：只在 Forgejo CI，禁止宿主编译
 
-- **Downloads use proxy: `http://127.0.0.1:10808`** (http_proxy / https_proxy). Applies to: curl/wget/git clones, CFetchContent / ExternalProject / file(DOWNLOAD) during CMake configure-build, cargo/rustup, and bazel JVM args (`--host_jvm_args=-Dhttps.proxyHost=127.0.0.1 --host_jvm_args=-Dhttps.proxyPort=10808`).
-- Bazel primary build: `bazel build //agentflow/...`; tests: `bazel test //tests/unit/...`.
-- `--config=android_arm64` cross-compiles for Android arm64; requires `ANDROID_NDK_HOME=$HOME/android-ndk/android-ndk-r28b`.
-- Direct github routes from this machine are flaky (interrupted transfers, status 56); prefer the proxy.
-- Sandbox helpers: `.ultra_sandbox/bin/` contains a bundled toolchain (bazel, git, gh, ...) — use with care.
+- **绝对禁止在宿主机编译项目。** 任何 checkout（含本 worktree）里都不允许执行 `bazel`（`build`/`test`/`run`）、`cmake`、`make`、`g++`、`gradle`；宿主残留的 `bazel-*`、`bazel-out/`、`~/.cache/bazel/` 不能当作验证证据。宿主上唯一允许的构建动作是 CI 镜像本身：`podman build --network host -f deploy/ci/Containerfile -t localhost/zen-ci:ubuntu24.04-bazel8.4.2 .`（只装工具链，不编项目源码）。
+- 唯一验证入口是 Forgejo：`.forgejo/workflows/ci.yml` → `deploy/ci/checks.sh <build|test|all>`，在一次性任务容器里编译与测试。派发、观察和取证据见 `docs/ci/operations.md`；平台设计与门槛见 `docs/ci/platform.md`。
+- 本地复现用 `bash deploy/ci/reproduce.sh all`：同样在临时容器里执行，产物随容器销毁，不写宿主目录，也不替代目标 SHA 的 CI 记录。
+- 检查范围：`bazel build //agentflow/...` 与 `bazel test //tests/unit/...`。Android arm64（`--config=android_arm64`，需 `ANDROID_NDK_HOME`）不在普通 CI 范围，不要塞进现有工作流。
+- 结论只看 artifacts：`ci-source-identity`（实际 checkout 的 SHA）、`ci-bazel-evidence`（BEP + GTest XML）、`ci-log`。运行状态 success 或提交号显示一致都不等于本次提交被验证。
+- 参数与门槛在 `deploy/ci/bazel-ci-config.json` 和 `deploy/ci/verify-results.py`；不要为了通过而放宽 `--jobs`／删除目标／开启测试缓存。
+- 下载走代理：宿主机 `http://127.0.0.1:10808`；CI 容器内由 Runner 注入 `host.containers.internal:10809`，`deploy/ci/proxy-bazelrc.sh` 从环境变量派生 Bazel JVM 代理参数，不把机器地址写进仓库。直连 GitHub 不稳定，下载统一走代理。
+- `.ultra_sandbox/bin/` 里的 `bazel`/`gcc` 等同属宿主工具，不得用于项目编译。
 
 ## Framework boundaries
 

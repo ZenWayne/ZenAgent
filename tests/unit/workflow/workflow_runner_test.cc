@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 #include <asio/io_context.hpp>
+#include <nlohmann/json.hpp>
 
 #include "agentflow/tools/tool_registry.h"
 #include "agentflow/tools/native_fn_tool.h"
@@ -23,6 +24,18 @@ constexpr char kRosterJson[] = R"({
     "parent":{"system_prompt":"You delegate.","model":{"max_output_tokens":128},"tools":[],
               "delegates":{"agents":["worker"],"max_depth":2}},
     "worker":{"system_prompt":"Do work.","model":{},"tools":[]}
+  },
+  "main":"parent"
+})";
+
+constexpr char kForkRosterJson[] = R"({
+  "schema_version":1,"name":"t","version":"v1",
+  "state":{"kind":"dynamic_json","fields":{}},
+  "agents":{
+    "parent":{"system_prompt":"","model":{},"tools":[],
+              "delegates":{"agents":["worker"],"max_depth":2,
+                            "fork_agents":["worker"]}},
+    "worker":{"system_prompt":"","model":{},"tools":[]}
   },
   "main":"parent"
 })";
@@ -124,6 +137,50 @@ TEST(WorkflowRunnerTest, FailClosedRejectsConfirmToolWithoutGate) {
   spec.fail_closed_confirm = true;
   spec.tool_tiers["write"] = ToolTier::kConfirm;
   EXPECT_THROW((void)BuildAgentNode(spec), AgentflowError);
+}
+
+TEST(WorkflowRunnerTest, ForkAgentsExposeForkOnTheDelegateTool) {
+  asio::io_context io;
+  auto tools = std::make_shared<ToolRegistry>(io);
+  auto wf = *WorkflowLoader::Load(kForkRosterJson, *tools);
+
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{});
+  AgentNodeBuildSpec spec;
+  spec.workflow = wf;
+  spec.agent_name = "parent";
+  spec.host_tools = tools;
+  spec.backend = backend;
+  spec.io_ctx = &io;
+  auto built = BuildAgentNode(spec);
+  ASSERT_EQ(built.cfg.extra_tools.size(), 1u);
+  auto schema = nlohmann::json::parse(
+      built.cfg.extra_tools[0]->Schema().params_json_schema);
+  ASSERT_TRUE(schema["properties"].contains("fork"));
+  EXPECT_EQ(schema["properties"]["fork"]["type"], "boolean");
+  // The provider AgentNode::Run points at the parent conversation.
+  EXPECT_NE(built.cfg.history, nullptr);
+}
+
+TEST(WorkflowRunnerTest, NonForkingDelegateHasNoForkArgumentOrProvider) {
+  asio::io_context io;
+  auto tools = std::make_shared<ToolRegistry>(io);
+  auto wf = *WorkflowLoader::Load(kRosterJson, *tools);
+
+  auto backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{});
+  AgentNodeBuildSpec spec;
+  spec.workflow = wf;
+  spec.agent_name = "parent";
+  spec.host_tools = tools;
+  spec.backend = backend;
+  spec.io_ctx = &io;
+  auto built = BuildAgentNode(spec);
+  ASSERT_EQ(built.cfg.extra_tools.size(), 1u);
+  auto schema = nlohmann::json::parse(
+      built.cfg.extra_tools[0]->Schema().params_json_schema);
+  EXPECT_FALSE(schema["properties"].contains("fork"));
+  EXPECT_EQ(built.cfg.history, nullptr);
 }
 
 }  // namespace

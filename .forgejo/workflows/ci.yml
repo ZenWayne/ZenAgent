@@ -1,0 +1,126 @@
+name: CI
+run-name: ci · ${{ inputs.source_ref || github.sha }} · ${{ inputs.scope || 'all' }}
+on:
+  push:
+    # master is the upstream default branch; main is kept for a future rename.
+    # Only the default branch is gated by push — feature refs use workflow_dispatch
+    # with an explicit source_ref, so a mirror branch never burns the full suite.
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Prepared ordinary-CI runner label; must expose the local zen-ci image'
+        type: string
+        default: linux-small
+      source_ref:
+        description: 'Source ref to verify; use a full SHA already synced to Forgejo'
+        type: string
+        required: false
+      scope:
+        description: 'Checks to run: build (//agentflow/...), test (//tests/unit/...), all'
+        type: choice
+        default: all
+        options: [build, test, all]
+concurrency:
+  group: zenagent-ci-${{ inputs.source_ref || github.sha }}
+  cancel-in-progress: false
+jobs:
+  quality:
+    name: CI contracts
+    runs-on: ${{ inputs.runner || 'linux-small' }}
+    container:
+      image: localhost/zen-ci:ubuntu24.04-bazel8.4.2
+    timeout-minutes: 10
+    env:
+      CI: 'true'
+    steps:
+      # Plain git clone instead of actions/checkout: this repository carries
+      # gitlinks (edge-agent-workspace, rig) without .gitmodules entries, and the
+      # action's unconditional `git submodule foreach` fails on them. CI needs no
+      # submodule at all.
+      - name: Clone source at the requested revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ inputs.source_ref || github.sha }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          git -c http.extraHeader="Authorization: Basic $(printf 'oauth2:%s' "$GH_TOKEN" | base64)" \
+              clone --quiet --no-tags "$SERVER_URL/$REPOSITORY.git" source
+          git -C source fetch --quiet origin "$SOURCE_REF"
+          git -C source -c advice.detachedHead=false checkout --quiet --detach "$SOURCE_REF"
+          git -C source log -1 --format='source_sha=%H %s'
+      - name: Static CI contract, no compiler
+        run: |
+          set -euo pipefail
+          cd source
+          export CI_WORKSPACE="$PWD" CI_SCRATCH=/workspace/.ci
+          bash deploy/ci/contract-check.sh
+
+  verify:
+    name: Build and test
+    needs: quality
+    runs-on: ${{ inputs.runner || 'linux-small' }}
+    container:
+      image: localhost/zen-ci:ubuntu24.04-bazel8.4.2
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      SCOPE: ${{ inputs.scope || 'all' }}
+      # Compilation happens only here: inside the throwaway job container. The
+      # disk floor lives in deploy/ci/bazel-ci-config.json so there is one place
+      # to change it; nothing here overrides it.
+    steps:
+      - name: Clone source at the requested revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ inputs.source_ref || github.sha }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          git -c http.extraHeader="Authorization: Basic $(printf 'oauth2:%s' "$GH_TOKEN" | base64)" \
+              clone --quiet --no-tags "$SERVER_URL/$REPOSITORY.git" source
+          git -C source fetch --quiet origin "$SOURCE_REF"
+          git -C source -c advice.detachedHead=false checkout --quiet --detach "$SOURCE_REF"
+          git -C source log -1 --format='source_sha=%H %s'
+      - name: Locked Bazel build and unit tests
+        run: |
+          set -euo pipefail
+          cd source
+          export CI_WORKSPACE="$PWD"
+          export CI_SCRATCH=/workspace/.ci
+          export CI_RESULTS=/workspace/results
+          mkdir -p "$CI_RESULTS"
+          bash deploy/ci/checks.sh "$SCOPE" 2>&1 | tee "$CI_RESULTS/ci.log"
+      - name: Retain check log
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: ci-log
+          path: /workspace/results/ci.log
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Retain resolved source identity
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: ci-source-identity
+          path: /workspace/results/identity.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Retain Bazel evidence
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: ci-bazel-evidence
+          path: |
+            /workspace/results/build.bep.jsonl
+            /workspace/results/test.bep.jsonl
+            /workspace/results/test-report.json
+            /workspace/results/testlogs/
+          retention-days: 7
+          if-no-files-found: warn

@@ -63,6 +63,11 @@ struct AgentNodeConfig {
   // that bypasses the proto::TraceEvent observability stream. Non-owning; the
   // channel must outlive the run and live on the same io_context as io_ctx.
   TokenChannel* token_channel = nullptr;
+
+  // Optional. When set, Run points it at this run's conversation so a fork
+  // delegation can export the settled history to a child. Wired only by the
+  // workflow runner for an agent that declares fork_agents.
+  std::shared_ptr<ConversationHistoryProvider> history;
 };
 
 class AgentNode : public Node {

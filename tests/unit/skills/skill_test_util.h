@@ -5,6 +5,7 @@
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -29,6 +30,18 @@ inline std::string SkillMd(std::string_view name, std::string_view description,
                            std::string_view body) {
   return "---\nname: " + std::string(name) + "\ndescription: " +
          std::string(description) + "\n---\n" + std::string(body);
+}
+
+inline std::string SkillMdWithTools(std::string_view name,
+                                    std::string_view description,
+                                    std::string_view body,
+                                    const std::vector<std::string>& tools) {
+  std::string out = "---\nname: " + std::string(name) + "\ndescription: " +
+                    std::string(description) + "\ntools:\n";
+  for (const std::string& tool : tools) out += "  - " + tool + "\n";
+  out += "---\n";
+  out += std::string(body);
+  return out;
 }
 
 }  // namespace agentflow::skills::testing_util

@@ -201,6 +201,81 @@ void RepairToolCallPairing(std::vector<nlohmann::json>* messages) {
   }
 }
 
+void DropDanglingToolCalls(std::vector<nlohmann::json>* messages) {
+  if (messages == nullptr) return;
+  auto role_of = [](const json& m) -> std::string {
+    return m.is_object() ? m.value("role", std::string()) : std::string();
+  };
+
+  // The last assistant turn that asked for tool results.
+  size_t last_calls = messages->size();
+  for (size_t i = messages->size(); i > 0; --i) {
+    const json& m = (*messages)[i - 1];
+    if (role_of(m) != "assistant") continue;
+    auto calls = m.find("tool_calls");
+    if (calls != m.end() && calls->is_array() && !calls->empty()) {
+      last_calls = i - 1;
+      break;
+    }
+  }
+
+  if (last_calls == messages->size()) {
+    // No assistant tool call at all: a trailing tool message has no owner, and
+    // no provider accepts one.
+    size_t end = messages->size();
+    while (end > 0 && role_of((*messages)[end - 1]) == "tool") --end;
+    if (end != messages->size()) {
+      messages->erase(messages->begin() + static_cast<std::ptrdiff_t>(end),
+                      messages->end());
+    }
+    return;
+  }
+
+  std::vector<std::string> wanted;
+  for (const auto& c : (*messages)[last_calls]["tool_calls"]) {
+    if (c.is_object() && c.contains("id") && c["id"].is_string()) {
+      const auto& id = c["id"].get_ref<const std::string&>();
+      if (!id.empty()) wanted.push_back(id);
+    }
+  }
+
+  // The run of tool messages directly after the call is the only place its
+  // results may live — the provider stops looking at the first non-tool
+  // message.
+  size_t run_end = last_calls + 1;
+  std::vector<std::string> answered;
+  while (run_end < messages->size() &&
+         role_of((*messages)[run_end]) == "tool") {
+    answered.push_back((*messages)[run_end].value("tool_call_id", ""));
+    ++run_end;
+  }
+
+  const bool covered =
+      !wanted.empty() &&
+      std::all_of(wanted.begin(), wanted.end(),
+                  [&](const std::string& id) {
+                    return std::find(answered.begin(), answered.end(), id) !=
+                           answered.end();
+                  });
+  if (!covered) {
+    // The in-flight call is not settled: drop it and everything after it so
+    // the exported history stays a valid prefix.
+    messages->erase(messages->begin() + static_cast<std::ptrdiff_t>(last_calls),
+                    messages->end());
+    return;
+  }
+
+  // The call is settled. A tool result in the same run that answers no call of
+  // this turn is still invalid, so drop it. Orphans before this point are
+  // rejected by the export validation instead of being silently repaired.
+  for (size_t i = run_end; i > last_calls + 1; --i) {
+    const std::string id = (*messages)[i - 1].value("tool_call_id", "");
+    if (std::find(wanted.begin(), wanted.end(), id) == wanted.end()) {
+      messages->erase(messages->begin() + static_cast<std::ptrdiff_t>(i - 1));
+    }
+  }
+}
+
 // DeepSeek strict-mode normalization — family-specialized tool passing.
 // Per https://api-docs.deepseek.com/zh-cn/guides/tool_calls#strict-模式beta:
 //   every object's properties must ALL be `required` and `additionalProperties

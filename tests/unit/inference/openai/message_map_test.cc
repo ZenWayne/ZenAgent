@@ -517,5 +517,58 @@ TEST(ImageRefTest, MarkExpiredReplacesOnlyNamedKeys) {
   EXPECT_EQ(msgs[0]["content"][1], json::parse(R"({"type":"text","text":"[图片已失效]"})"));
 }
 
+TEST(DropDanglingToolCallsTest, KeepsACompletePair) {
+  std::vector<json> messages = {
+      json::parse(R"({"role":"user","content":"hi"})"),
+      json::parse(
+          R"({"role":"assistant","content":"","tool_calls":[)"
+          R"({"id":"a","type":"function","function":{"name":"t",)"
+          R"("arguments":"{}"}}]})"),
+      json::parse(R"({"role":"tool","tool_call_id":"a","content":"{}"})"),
+  };
+  auto got = messages;
+  DropDanglingToolCalls(&got);
+  EXPECT_EQ(got, messages);
+}
+
+TEST(DropDanglingToolCallsTest, DropsAnUnansweredAssistantToolCall) {
+  std::vector<json> messages = {
+      json::parse(R"({"role":"user","content":"hi"})"),
+      json::parse(
+          R"({"role":"assistant","content":"working","tool_calls":[)"
+          R"({"id":"a","type":"function","function":{"name":"t",)"
+          R"("arguments":"{}"}}]})"),
+  };
+  DropDanglingToolCalls(&messages);
+  ASSERT_EQ(messages.size(), 1u);
+  EXPECT_EQ(messages[0]["role"], "user");
+}
+
+TEST(DropDanglingToolCallsTest, DropsATrailingToolResultThatAnswersNothing) {
+  // The complete pair stays; the extra tail answer belongs to no call.
+  std::vector<json> messages = {
+      json::parse(R"({"role":"user","content":"hi"})"),
+      json::parse(
+          R"({"role":"assistant","content":"","tool_calls":[)"
+          R"({"id":"a","type":"function","function":{"name":"t",)"
+          R"("arguments":"{}"}}]})"),
+      json::parse(R"({"role":"tool","tool_call_id":"a","content":"{}"})"),
+      json::parse(R"({"role":"tool","tool_call_id":"z","content":"{}"})"),
+  };
+  DropDanglingToolCalls(&messages);
+  ASSERT_EQ(messages.size(), 3u);
+  EXPECT_EQ(messages[2]["tool_call_id"], "a");
+}
+
+TEST(DropDanglingToolCallsTest, DropsATrailingToolResultWithNoCallAtAll) {
+  std::vector<json> messages = {
+      json::parse(R"({"role":"user","content":"hi"})"),
+      json::parse(R"({"role":"tool","tool_call_id":"a","content":"{}"})"),
+  };
+  DropDanglingToolCalls(&messages);
+  ASSERT_EQ(messages.size(), 1u);
+  EXPECT_EQ(messages[0]["role"], "user");
+}
+
 }  // namespace
 }  // namespace agentflow::openai

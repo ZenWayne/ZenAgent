@@ -1,6 +1,7 @@
 // tests/unit/inference/chat_backend_test.cc
 #include "agentflow/inference/chat_backend.h"
 
+#include "absl/status/status.h"
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
@@ -68,6 +69,14 @@ TEST(ChatBackendTest, FakeBackendDeliversTextDeltasToTokenSink) {
 TEST(ChatBackendTest, DescribeCarriesNoCredentials) {
   testing::FakeChatBackend backend({});
   EXPECT_EQ(backend.Describe(), "fake");
+}
+
+TEST(ChatBackendTest, HistoryForkIsUnsupportedByDefault) {
+  testing::FakeChatBackend backend({});
+  auto conv = backend.CreateConversation(ChatConversationOptions{});
+  EXPECT_FALSE(conv->SupportsHistoryFork());
+  EXPECT_TRUE(absl::IsUnimplemented(conv->ExportHistory().status()));
+  EXPECT_TRUE(absl::IsUnimplemented(conv->ImportHistory("[]")));
 }
 
 }  // namespace

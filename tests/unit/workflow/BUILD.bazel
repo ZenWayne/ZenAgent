@@ -68,8 +68,22 @@ cc_test(
     size = "small",
     srcs = ["delegate_tool_test.cc"],
     deps = [
+        "//agentflow/core",
         "//agentflow/tools",
         "//agentflow/workflow:delegate_tool",
+        "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "agent_report_test",
+    size = "small",
+    srcs = ["agent_report_test.cc"],
+    deps = [
+        "//agentflow/workflow:agent_report",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
         "@nlohmann_json//:json",
@@ -89,6 +103,7 @@ cc_test(
         "@asio",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -118,6 +133,21 @@ cc_test(
         "//agentflow/workflow:workflow_loader",
         "//agentflow/workflow:workflow_registry",
         "@asio",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
+cc_test(
+    name = "task_graph_test",
+    size = "small",
+    srcs = ["task_graph_test.cc"],
+    deps = [
+        "//agentflow/workflow:task_graph",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],

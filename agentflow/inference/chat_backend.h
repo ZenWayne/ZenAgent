@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include <asio/awaitable.hpp>
 
@@ -58,6 +59,11 @@ struct ChatConversationOptions {
   // attachment_invalid (an image the model would silently never see is worse).
   ImageRefResolver image_ref_resolver;
 
+  // Optional seed history (an OpenAI wire message array) imported before the
+  // first SendAsync, used by fork delegation. Empty means none. A backend that
+  // cannot fork its history ignores this; SubAgentRuntime rejects a fork onto
+  // such a backend instead of silently falling back to a clean context.
+  std::string initial_history_json;
 };
 
 // One multi-turn conversation. The implementation OWNS history: locally the
@@ -91,6 +97,53 @@ class IConversation {
   // SOME code must register on the token the caller passes to SendAsync, or
   // cancellation silently does nothing.
   virtual void Cancel() = 0;
+
+  // Whether this backend can export a forkable message history and import it
+  // into another conversation. Default false; LiteRT-LM keeps its history in
+  // the engine and is not forkable in this phase.
+  virtual bool SupportsHistoryFork() const { return false; }
+
+  // Returns the settled message array as JSON. Implementations must exclude
+  // their own system message and any dangling tool_calls batch.
+  virtual absl::StatusOr<std::string> ExportHistory() const {
+    return absl::UnimplementedError("history export unsupported");
+  }
+
+  // Imports a message array before the first SendAsync. The implementation
+  // keeps its own system message and inserts the history after it.
+  virtual absl::Status ImportHistory(std::string_view /*messages_json*/) {
+    return absl::UnimplementedError("history import unsupported");
+  }
+
+  // Replaces the tools this conversation advertises. The next SendAsync (for
+  // example the next round of the same turn's tool loop) requests the new
+  // OpenAI tools array. A backend that cannot change tools mid-conversation
+  // returns Unimplemented("tool update unsupported"), and a skill load that
+  // needs new tools then fails instead of returning a body the model cannot
+  // act on.
+  virtual absl::Status UpdateTools(std::string_view /*tools_json*/) {
+    return absl::UnimplementedError("tool update unsupported");
+  }
+};
+
+// Reads a conversation's settled history for a fork delegation. Holds the
+// conversation weakly: the provider is attached to a node's config for the
+// whole run, while the conversation is created per Run.
+//
+// This lives next to IConversation rather than in the delegating layer: it is
+// the only consumer of ExportHistory(), and both the node that owns the parent
+// conversation and the delegate runtime that seeds a child depend on it.
+class ConversationHistoryProvider {
+ public:
+  std::weak_ptr<IConversation> conversation;
+
+  absl::StatusOr<std::string> Export() const {
+    auto conv = conversation.lock();
+    if (!conv) {
+      return absl::FailedPreconditionError("parent conversation unavailable");
+    }
+    return conv->ExportHistory();
+  }
 };
 
 class IChatBackend {

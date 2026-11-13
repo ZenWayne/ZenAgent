@@ -1,18 +1,27 @@
 #include "agentflow/skills/skill_library.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <system_error>
+#include <tuple>
 #include <utility>
 
 #include "absl/status/status.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/str_split.h"
 
 namespace agentflow::skills {
 namespace fs = std::filesystem;
 namespace {
+
+constexpr std::size_t kMaxIndexedFilesPerSkill = 200;
 
 absl::Status RootFailure(const SkillRoot& root, std::string_view detail) {
   return absl::FailedPreconditionError(absl::StrCat(root.label, ": ", detail));
@@ -68,10 +77,50 @@ absl::StatusOr<std::vector<fs::path>> ListSkillDirs(const SkillRoot& root) {
   return subdirs;
 }
 
+// Indexes the skill directory's direct regular files, skipping SKILL.md and
+// every subdirectory: sorted by name, then capped at 200 entries.
+absl::Status IndexFlatFiles(const SkillRoot& root, const fs::path& dir,
+                            std::vector<std::string>* files) {
+  std::error_code ec;
+  fs::directory_iterator it(dir, ec), end;
+  if (ec) {
+    return RootFailure(root, absl::StrCat("cannot list ", dir.string(), ": ",
+                                          ec.message()));
+  }
+  for (; it != end; it.increment(ec)) {
+    if (ec) break;
+    const std::string name = it->path().filename().string();
+    if (name == "SKILL.md") continue;
+    const bool is_dir = it->is_directory(ec);
+    if (ec) {
+      ec.clear();
+      continue;
+    }
+    if (is_dir) continue;
+    const bool is_file = it->is_regular_file(ec);
+    if (ec) {
+      ec.clear();
+      continue;
+    }
+    if (!is_file) continue;
+    files->push_back(name);
+  }
+  if (ec) {
+    return RootFailure(root, absl::StrCat("cannot list ", dir.string(), ": ",
+                                          ec.message()));
+  }
+  std::sort(files->begin(), files->end());
+  if (files->size() > kMaxIndexedFilesPerSkill) {
+    files->resize(kMaxIndexedFilesPerSkill);
+  }
+  return absl::OkStatus();
+}
+
 struct LoadedSkill {
   Skill skill;
   fs::path manifest;
   std::vector<std::string> unknown_fields;
+  std::vector<std::string> files;
 };
 
 // nullopt when the directory has no SKILL.md; any other problem is an error.
@@ -131,8 +180,43 @@ absl::StatusOr<std::optional<LoadedSkill>> LoadSkillDir(const SkillRoot& root,
     return RootFailure(root, absl::StrCat("cannot inspect scripts directory ",
                                           scripts_dir.string(), ": ", ec.message()));
   }
+  if (absl::Status status = IndexFlatFiles(root, dir, &loaded.files);
+      !status.ok()) {
+    return status;
+  }
   return loaded;
 }
+
+std::string Lower(std::string_view text) {
+  std::string out(text);
+  absl::AsciiStrToLower(&out);
+  return out;
+}
+
+std::vector<std::string> QueryTerms(std::string_view query) {
+  std::vector<std::string> terms;
+  for (absl::string_view term :
+       absl::StrSplit(query, absl::ByAnyChar(" \t\r\n"), absl::SkipEmpty())) {
+    std::string lower = Lower(term);
+    if (std::find(terms.begin(), terms.end(), lower) == terms.end()) {
+      terms.push_back(std::move(lower));
+    }
+  }
+  return terms;
+}
+
+bool ContainsAll(std::string_view haystack,
+                 const std::vector<std::string>& terms) {
+  for (const std::string& term : terms) {
+    if (haystack.find(term) == std::string_view::npos) return false;
+  }
+  return true;
+}
+
+struct Candidate {
+  int rank = 0;
+  SkillSearchResult result;
+};
 
 }  // namespace
 
@@ -154,14 +238,21 @@ absl::StatusOr<std::shared_ptr<const SkillLibrary>> SkillLibrary::Load(
               root.label, ": ", entry.manifest.string(),
               ": ignored unknown frontmatter field '", field, "'"));
         }
+        if (entry.skill.tools_from_allowed_tools) {
+          warnings->push_back(absl::StrCat(
+              root.label, ": ", entry.manifest.string(),
+              ": frontmatter 'allowed-tools' is a deprecated alias for 'tools'; "
+              "treating its entries as this skill's tools (migration warning)"));
+        }
         if (library->skills_.contains(entry.skill.name)) {
           warnings->push_back(absl::StrCat(
               root.label, ": skill '", entry.skill.name,
               "' overrides one from a lower-priority root"));
         }
       }
-      std::string name = entry.skill.name;
-      library->skills_.insert_or_assign(std::move(name), std::move(entry.skill));
+      const std::string name = entry.skill.name;
+      library->files_.insert_or_assign(name, std::move(entry.files));
+      library->skills_.insert_or_assign(name, std::move(entry.skill));
     }
   }
   return std::shared_ptr<const SkillLibrary>(std::move(library));
@@ -195,6 +286,77 @@ absl::StatusOr<std::vector<const Skill*>> SkillLibrary::Select(
     selected.push_back(skill);
   }
   return selected;
+}
+
+const std::vector<std::string>& SkillLibrary::Files(const Skill& skill) const {
+  static const std::vector<std::string> kEmpty;
+  const auto it = files_.find(skill.name);
+  return it == files_.end() ? kEmpty : it->second;
+}
+
+const std::string* SkillLibrary::FindFile(const Skill& skill,
+                                          std::string_view name) const {
+  const auto it = files_.find(skill.name);
+  if (it == files_.end()) return nullptr;
+  for (const std::string& file : it->second) {
+    if (file == name) return &file;
+  }
+  return nullptr;
+}
+
+std::vector<SkillSearchResult> SkillLibrary::Search(
+    std::string_view query, std::size_t limit,
+    const std::vector<std::string>& visible_skills) const {
+  std::vector<SkillSearchResult> results;
+  if (limit == 0) return results;
+  const std::string lowered_query = Lower(absl::StripAsciiWhitespace(query));
+  if (lowered_query.empty()) return results;
+  const std::vector<std::string> terms = QueryTerms(lowered_query);
+
+  std::vector<Candidate> candidates;
+  for (const auto& [name, skill] : skills_) {
+    if (!visible_skills.empty() &&
+        std::find(visible_skills.begin(), visible_skills.end(), name) ==
+            visible_skills.end()) {
+      continue;
+    }
+    Candidate candidate;
+    candidate.result.name = name;
+    candidate.result.description = skill.description;
+    if (lowered_query == name) {
+      candidate.rank = 1;
+    } else if (absl::StartsWith(name, lowered_query)) {
+      candidate.rank = 2;
+    } else if (name.find(lowered_query) != std::string::npos) {
+      candidate.rank = 3;
+    } else if (ContainsAll(Lower(skill.description), terms)) {
+      candidate.rank = 4;
+    } else {
+      const auto it = files_.find(name);
+      if (it != files_.end()) {
+        for (const std::string& file : it->second) {
+          if (ContainsAll(Lower(file), terms)) {
+            candidate.rank = 5;
+            candidate.result.matched = file;
+            break;
+          }
+        }
+      }
+    }
+    if (candidate.rank != 0) candidates.push_back(std::move(candidate));
+  }
+
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate& a, const Candidate& b) {
+              return std::tie(a.rank, a.result.name, a.result.matched) <
+                     std::tie(b.rank, b.result.name, b.result.matched);
+            });
+  if (candidates.size() > limit) candidates.resize(limit);
+  results.reserve(candidates.size());
+  for (Candidate& candidate : candidates) {
+    results.push_back(std::move(candidate.result));
+  }
+  return results;
 }
 
 }  // namespace agentflow::skills

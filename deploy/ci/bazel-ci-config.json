@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "min_disk_gib": 6,
+  "startup_options": [
+    "--batch",
+    "--nosystem_rc",
+    "--nohome_rc",
+    "--host_jvm_args=-Xmx1g",
+    "--host_jvm_args=-XX:ActiveProcessorCount=4"
+  ],
+  "build_options": [
+    "--jobs=2",
+    "--local_resources=memory=2048",
+    "--verbose_failures"
+  ],
+  "test_options": [
+    "--jobs=2",
+    "--local_resources=memory=2048",
+    "--local_test_jobs=1",
+    "--nocache_test_results",
+    "--runs_per_test=1",
+    "--flaky_test_attempts=1",
+    "--test_output=errors",
+    "--test_summary=detailed"
+  ]
+}

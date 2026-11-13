@@ -10,9 +10,15 @@
 
 #include "agentflow/core/cancel.h"
 #include "agentflow/core/token_channel.h"
+#include "agentflow/inference/chat_backend.h"
 #include "agentflow/tools/gated_tool.h"
 
 namespace agentflow::workflow {
+
+// Reads the parent conversation's settled history for a fork delegation. The
+// type lives in the inference layer next to IConversation; it is re-exported
+// here so delegate code can keep naming it without a second include.
+using ::agentflow::ConversationHistoryProvider;
 
 // Threaded through every delegate call. depth and root_invocation_id
 // propagate down the call chain; root stays constant for the whole tree.
@@ -30,6 +36,13 @@ struct SubAgentContext {
   // it streams. The delegate tool creates one channel per call and drains it
   // up to the top-level stream — different sub-agents use different channels.
   TokenChannel* token_channel = nullptr;
+
+  // Set by the delegate tool when the call asked for a forked child. The
+  // child inherits the parent's settled history instead of a clean context.
+  bool fork = false;
+  // The parent conversation to export when `fork` is true. Null means the
+  // caller had no conversation to offer (fork_unavailable).
+  std::shared_ptr<ConversationHistoryProvider> parent_history;
 };
 
 }  // namespace agentflow::workflow

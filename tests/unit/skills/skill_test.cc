@@ -184,3 +184,118 @@ TEST(ParseSkillMd, AllowsEmptyBody) {
 
 }  // namespace
 }  // namespace agentflow::skills
+namespace agentflow::skills {
+namespace {
+
+TEST(ParseSkillMd, ParsesToolList) {
+  auto s = ParseSkillMd(
+      "---\nname: x\ndescription: d\ntools:\n  - get_shot\n  - update_motion\n---\n",
+      "x");
+  ASSERT_TRUE(s.ok()) << s.status();
+  EXPECT_EQ(s->tools,
+            (std::vector<std::string>{"get_shot", "update_motion"}));
+  EXPECT_TRUE(s->allowed_tools.empty());
+  EXPECT_FALSE(s->tools_from_allowed_tools);
+}
+
+TEST(ParseSkillMd, ToolsAreDedupedAndCappedAtSixtyFour) {
+  auto deduped = ParseSkillMd(
+      "---\nname: x\ndescription: d\ntools: [a, a, b]\n---\n", "x");
+  ASSERT_TRUE(deduped.ok()) << deduped.status();
+  EXPECT_EQ(deduped->tools, (std::vector<std::string>{"a", "b"}));
+
+  std::string list;
+  for (int i = 0; i < 64; ++i) list += "  - t" + std::to_string(i) + "\n";
+  auto max_tools = ParseSkillMd(
+      "---\nname: x\ndescription: d\ntools:\n" + list + "---\n", "x");
+  ASSERT_TRUE(max_tools.ok()) << max_tools.status();
+  EXPECT_EQ(max_tools->tools.size(), 64u);
+
+  auto too_many = ParseSkillMd(
+      "---\nname: x\ndescription: d\ntools:\n" + list + "  - t64\n---\n", "x");
+  ASSERT_FALSE(too_many.ok());
+  EXPECT_NE(too_many.status().message().find("64"), std::string::npos);
+}
+
+TEST(ParseSkillMd, RejectsMalformedToolLists) {
+  EXPECT_FALSE(
+      ParseSkillMd("---\nname: x\ndescription: d\ntools: get_shot\n---\n", "x")
+          .ok());
+  EXPECT_FALSE(
+      ParseSkillMd("---\nname: x\ndescription: d\ntools: [\"\"]\n---\n", "x")
+          .ok());
+  EXPECT_FALSE(
+      ParseSkillMd("---\nname: x\ndescription: d\ntools: {a: b}\n---\n", "x")
+          .ok());
+}
+
+TEST(ParseSkillMd, AllowedToolsIsAMigrationAliasForTools) {
+  std::vector<std::string> unknown;
+  auto s = ParseSkillMd(
+      "---\nname: x\ndescription: d\n"
+      "allowed-tools: get_shot  update_dialogue\n---\n",
+      "x", &unknown);
+  ASSERT_TRUE(s.ok()) << s.status();
+  EXPECT_EQ(s->allowed_tools,
+            (std::vector<std::string>{"get_shot", "update_dialogue"}));
+  EXPECT_EQ(s->tools, s->allowed_tools);
+  EXPECT_TRUE(s->tools_from_allowed_tools);
+  EXPECT_TRUE(unknown.empty());
+}
+
+TEST(ParseSkillMd, ExplicitToolsWinOverAllowedToolsWithoutTheAlias) {
+  auto s = ParseSkillMd(
+      "---\nname: x\ndescription: d\ntools: [a, b]\nallowed-tools: c\n---\n",
+      "x");
+  ASSERT_TRUE(s.ok()) << s.status();
+  EXPECT_EQ(s->tools, (std::vector<std::string>{"a", "b"}));
+  EXPECT_EQ(s->allowed_tools, (std::vector<std::string>{"c"}));
+  EXPECT_FALSE(s->tools_from_allowed_tools);
+}
+
+TEST(ParseReferenceMd, PlainTextFileIsTheWholeBody) {
+  auto ref = ParseReferenceMd("# 灯光\n正文\n", "notes.md");
+  ASSERT_TRUE(ref.ok()) << ref.status();
+  EXPECT_EQ(ref->name, "notes");
+  EXPECT_TRUE(ref->description.empty());
+  EXPECT_TRUE(ref->tools.empty());
+  EXPECT_EQ(ref->body, "# 灯光\n正文\n");
+}
+
+TEST(ParseReferenceMd, ParsesToolsAndDescription) {
+  auto ref = ParseReferenceMd(
+      "---\ntools: [get_shot, update_shot]\ndescription: 灯光参考\n---\n"
+      "# 灯光\n暖色\n",
+      "室内灯光参考.md");
+  ASSERT_TRUE(ref.ok()) << ref.status();
+  EXPECT_EQ(ref->name, "室内灯光参考");
+  EXPECT_EQ(ref->description, "灯光参考");
+  EXPECT_EQ(ref->tools, (std::vector<std::string>{"get_shot", "update_shot"}));
+  EXPECT_EQ(ref->body, "# 灯光\n暖色\n");
+}
+
+TEST(ParseReferenceMd, DefaultsTheNameToTheFilenameWithoutMd) {
+  auto ref = ParseReferenceMd("body", "shot-grammar.md");
+  ASSERT_TRUE(ref.ok()) << ref.status();
+  EXPECT_EQ(ref->name, "shot-grammar");
+  auto other = ParseReferenceMd("body", "notes.txt");
+  ASSERT_TRUE(other.ok()) << other.status();
+  EXPECT_EQ(other->name, "notes.txt");
+}
+
+TEST(ParseReferenceMd, KeepingAnUnclosedFrontmatterAsBody) {
+  const std::string text = "---\ntools: [a]\nnot closed\n";
+  auto ref = ParseReferenceMd(text, "broken.md");
+  ASSERT_TRUE(ref.ok()) << ref.status();
+  EXPECT_TRUE(ref->tools.empty());
+  EXPECT_EQ(ref->body, text);
+}
+
+TEST(ParseReferenceMd, RejectsMalformedToolLists) {
+  EXPECT_FALSE(ParseReferenceMd("---\ntools: get_shot\n---\n", "x.md").ok());
+  EXPECT_FALSE(ParseReferenceMd("---\ntools: [\"\"]\n---\n", "x.md").ok());
+  EXPECT_FALSE(ParseReferenceMd("---\nname: \"\"\n---\n", "x.md").ok());
+}
+
+}  // namespace
+}  // namespace agentflow::skills

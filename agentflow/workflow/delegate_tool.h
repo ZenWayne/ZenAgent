@@ -30,7 +30,8 @@ std::shared_ptr<::agentflow::Tool> MakeDelegateTool(
     std::vector<std::string> allowed_children,
     SubAgentContext ctx,
     ::asio::io_context* io = nullptr,
-    TokenChannel* top_channel = nullptr);
+    TokenChannel* top_channel = nullptr,
+    std::vector<std::string> fork_agents = {});
 
 }  // namespace agentflow::workflow
 #endif

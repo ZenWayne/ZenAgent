@@ -1,6 +1,9 @@
 // agentflow/inference/openai/openai_chat_backend.cc
 #include "agentflow/inference/openai/openai_chat_backend.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -28,6 +31,52 @@ bool IsRetryable(const absl::Status& s) {
          s.code() == absl::StatusCode::kResourceExhausted;
 }
 
+// A forkable history must be a valid OpenAI conversation prefix: every tool
+// result answers a call that asked for it, and no call is left unanswered.
+// Export returns InvalidArgument instead of a half-valid history.
+absl::Status ValidateForkableHistory(const std::vector<json>& messages) {
+  std::unordered_set<std::string> open_calls;
+  bool first = true;
+  for (const auto& m : messages) {
+    if (!m.is_object()) {
+      return absl::InvalidArgumentError("history message is not an object");
+    }
+    const std::string role = m.value("role", std::string());
+    if (first && role == "tool") {
+      return absl::InvalidArgumentError("history starts with a tool result");
+    }
+    if (role == "assistant") {
+      // A new assistant turn may only start after every earlier call was
+      // answered; providers reject anything else.
+      if (!open_calls.empty()) {
+        return absl::InvalidArgumentError("history has an unanswered tool call");
+      }
+      if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+        for (const auto& c : m["tool_calls"]) {
+          if (!c.is_object() || !c.contains("id") || !c["id"].is_string()) {
+            continue;
+          }
+          const auto& id = c["id"].get_ref<const std::string&>();
+          if (!id.empty()) open_calls.insert(id);
+        }
+      }
+    } else if (role == "tool") {
+      const std::string id = m.value("tool_call_id", std::string());
+      if (open_calls.erase(id) == 0) {
+        return absl::InvalidArgumentError(
+            "history has a tool result with no matching call");
+      }
+    } else if (role == "user" && !open_calls.empty()) {
+      return absl::InvalidArgumentError("history has an unanswered tool call");
+    }
+    first = false;
+  }
+  if (!open_calls.empty()) {
+    return absl::InvalidArgumentError("history has an unanswered tool call");
+  }
+  return absl::OkStatus();
+}
+
 class OpenAiConversation : public IConversation {
  public:
   OpenAiConversation(OpenAiOptions opts, net::IHttpClient& http,
@@ -37,12 +86,17 @@ class OpenAiConversation : public IConversation {
         conv_opts_(std::move(conv_opts)) {
     if (auto sys = SystemMessage(conv_opts_.system_message_json)) {
       messages_.push_back(*std::move(sys));
+      has_system_ = true;
     }
   }
 
   asio::awaitable<absl::StatusOr<std::string>> SendAsync(
       std::string message_json, const TokenSink& on_token,
       const CancelToken& cancel) override {
+    // ImportHistory is only legal before the conversation has anything of its
+    // own; once a turn starts, the messages array is this conversation's
+    // history and seeding it would corrupt the exchange.
+    sent_ = true;
     auto incoming = ToOpenAiMessages(message_json);
     if (!incoming.ok()) co_return incoming.status();
     auto previous = messages_;
@@ -158,6 +212,60 @@ class OpenAiConversation : public IConversation {
     co_return last;
   }
 
+  bool SupportsHistoryFork() const override { return true; }
+
+  absl::StatusOr<std::string> ExportHistory() const override {
+    std::vector<json> out = messages_;
+    // The child keeps its own system prompt; only the settled turns travel.
+    if (has_system_ && !out.empty()) out.erase(out.begin());
+    DropDanglingToolCalls(&out);
+    if (auto status = ValidateForkableHistory(out); !status.ok()) {
+      return status;
+    }
+    return json(out).dump();
+  }
+
+  absl::Status ImportHistory(std::string_view messages_json) override {
+    if (sent_) {
+      return absl::FailedPreconditionError(
+          "history must be imported before the first send");
+    }
+    auto parsed = json::parse(messages_json, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_array()) {
+      return absl::InvalidArgumentError("history must be a message array");
+    }
+    std::vector<json> incoming;
+    incoming.reserve(parsed.size());
+    for (const auto& m : parsed) {
+      if (!m.is_object() || !m.contains("role") || !m["role"].is_string()) {
+        return absl::InvalidArgumentError(
+            "history contains a message without a string role");
+      }
+      incoming.push_back(m);
+    }
+    if (incoming.empty()) return absl::OkStatus();
+    const auto at = has_system_ ? messages_.begin() + 1 : messages_.begin();
+    messages_.insert(at, incoming.begin(), incoming.end());
+    // Idempotent: an already-paired history is left untouched.
+    RepairToolCallPairing(&messages_);
+    return absl::OkStatus();
+  }
+
+  absl::Status UpdateTools(std::string_view tools_json) override {
+    const json parsed = json::parse(tools_json, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_array()) {
+      return absl::InvalidArgumentError("tools must be a JSON array");
+    }
+    for (const auto& tool : parsed) {
+      if (!tool.is_object()) {
+        return absl::InvalidArgumentError(
+            "each tool must be a JSON object");
+      }
+    }
+    conv_opts_.tools_json = std::string(tools_json);
+    return absl::OkStatus();
+  }
+
   void Cancel() override {
     // Deliberate no-op, NOT an unimplemented stub: this class owns no
     // transport handle to close. Every SendAsync call threads its
@@ -176,6 +284,8 @@ class OpenAiConversation : public IConversation {
   net::IHttpClient& http_;
   ChatConversationOptions conv_opts_;
   std::vector<json> messages_;
+  bool has_system_ = false;
+  bool sent_ = false;
 };
 
 }  // namespace

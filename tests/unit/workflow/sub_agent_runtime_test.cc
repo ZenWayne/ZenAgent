@@ -53,6 +53,50 @@ SubAgentRuntime::ConversationFactory NoLlmFactory() {
   };
 }
 
+constexpr char kForkRosterJson[] = R"({
+  "schema_version":1,"name":"t","version":"v1",
+  "state":{"kind":"dynamic_json","fields":{}},
+  "agents":{
+    "parent":{"system_prompt":"","model":{},"tools":[],
+              "delegates":{"agents":["child"],"max_depth":2,
+                            "fork_agents":["child"],
+                            "max_fork_history_bytes":64}},
+    "child":{"system_prompt":"","model":{},"tools":[]}
+  },
+  "main":"parent"
+})";
+
+// Reports a fixed history for a fork export.
+class HistoryConversation : public IConversation {
+ public:
+  explicit HistoryConversation(std::string history)
+      : history_(std::move(history)) {}
+
+  asio::awaitable<absl::StatusOr<std::string>> SendAsync(
+      std::string, const TokenSink&, const CancelToken&) override {
+    co_return std::string(
+        R"({"role":"assistant","content":[{"type":"text","text":"pong"}]})");
+  }
+  void Cancel() override {}
+  bool SupportsHistoryFork() const override { return true; }
+  absl::StatusOr<std::string> ExportHistory() const override {
+    return history_;
+  }
+
+ private:
+  std::string history_;
+};
+
+// The provider holds the conversation WEAKLY (mirroring the real wiring,
+// where the agent node owns it for the run), so the test must keep a strong
+// reference alive for as long as RunAsync can export.
+std::shared_ptr<ConversationHistoryProvider> ProviderFor(
+    const std::shared_ptr<IConversation>& conversation) {
+  auto provider = std::make_shared<ConversationHistoryProvider>();
+  provider->conversation = conversation;
+  return provider;
+}
+
 constexpr char kRosterJson[] = R"({
   "schema_version":1,"name":"t","version":"v1",
   "state":{"kind":"dynamic_json","fields":{}},
@@ -423,6 +467,247 @@ TEST(SubAgentRuntimeTest, ToolResultCarriesOriginatingCallId) {
   EXPECT_EQ(tool_msg["content"][0]["id"], "call_7");
   EXPECT_EQ(tool_msg["content"][0]["name"], "search");
   EXPECT_EQ(tool_msg["content"][0]["response"]["value"], "SEARCH_RESULT");
+}
+
+struct NestedDelegateResult {
+  std::string tool_result;
+  int grandchildren_started = 0;
+};
+
+NestedDelegateResult RunNestedDelegate(const nlohmann::ordered_json& args) {
+  constexpr char kNestedRoster[] = R"({
+    "schema_version":1,"name":"t","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "agents":{
+      "parent":{"system_prompt":"","model":{},"tools":[],
+                "delegates":{"agents":["child"],"max_depth":2}},
+      "child":{"system_prompt":"","model":{},"tools":[],
+               "delegates":{"agents":["grandchild"],"max_depth":2}},
+      "grandchild":{"system_prompt":"","model":{},"tools":[]}
+    },
+    "main":"parent"
+  })";
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kNestedRoster, host_tools);
+  NullEventEmitter emit;
+  NestedDelegateResult observed;
+  auto grandchild_backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","content":[{"type":"text","text":"grandchild finished"}]})"});
+  auto grandchild_factory =
+      SubAgentRuntime::DefaultConversationFactory(grandchild_backend);
+  SubAgentRuntime rt(
+      wf, host_tools, emit,
+      [&](std::string_view backend, std::string_view agent,
+          ChatConversationOptions opts) -> SubAgentRuntime::SendFn {
+        if (agent == "grandchild") {
+          ++observed.grandchildren_started;
+          return grandchild_factory(backend, agent, std::move(opts));
+        }
+        return [&, turn = 0](const std::string& message,
+                             const SubAgentRuntime::TokenSink&,
+                             const CancelToken&) mutable
+                   -> asio::awaitable<absl::StatusOr<std::string>> {
+          if (turn++ == 0) {
+            co_return nlohmann::ordered_json{
+                {"role", "assistant"},
+                {"tool_calls", {{{"id", "nested-call"},
+                                  {"name", "delegate"},
+                                  {"arguments", args.dump()}}}}}.dump();
+          }
+          observed.tool_result = nlohmann::ordered_json::parse(message)
+              ["content"][0]["response"]["value"].get<std::string>();
+          co_return std::string(
+              R"({"role":"assistant","content":[{"type":"text","text":"done"}]})");
+        };
+      });
+  const auto result = RunAsyncBlocking(rt, io, "parent", "child", "go", {});
+  EXPECT_EQ(result, "done");
+  return observed;
+}
+
+TEST(SubAgentRuntimeTest, NestedDelegateRejectsForkBeforeStartingGrandchild) {
+  const auto observed = RunNestedDelegate(
+      {{"agent", "grandchild"}, {"goal", "go"}, {"fork", true}});
+  EXPECT_EQ(observed.tool_result, R"({"error":"fork_not_allowed"})");
+  EXPECT_EQ(observed.grandchildren_started, 0);
+}
+
+TEST(SubAgentRuntimeTest, NestedDelegateRejectsNonBooleanFork) {
+  for (const auto& fork : nlohmann::ordered_json::array(
+           {nullptr, "true", 1, nlohmann::ordered_json::object(),
+            nlohmann::ordered_json::array()})) {
+    SCOPED_TRACE(fork.dump());
+    const auto observed = RunNestedDelegate(
+        {{"agent", "grandchild"}, {"goal", "go"}, {"fork", fork}});
+    EXPECT_EQ(observed.tool_result, R"({"error":"bad_args"})");
+    EXPECT_EQ(observed.grandchildren_started, 0);
+  }
+}
+
+TEST(SubAgentRuntimeTest, NestedDelegateAllowsAbsentOrFalseFork) {
+  for (const bool explicit_false : {false, true}) {
+    SCOPED_TRACE(explicit_false);
+    nlohmann::ordered_json args = {{"agent", "grandchild"}, {"goal", "go"}};
+    if (explicit_false) args["fork"] = false;
+    const auto observed = RunNestedDelegate(args);
+    EXPECT_EQ(observed.tool_result, "grandchild finished");
+    EXPECT_EQ(observed.grandchildren_started, 1);
+  }
+}
+
+TEST(SubAgentRuntimeTest, ForkSeedsTheChildOptionsWithParentHistory) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kForkRosterJson, host_tools);
+  NullEventEmitter emit;
+
+  const std::string kHistory = R"([{"role":"user","content":"q"}])";
+  ChatConversationOptions seen;
+  bool created = false;
+  SubAgentRuntime::ConversationFactory fake =
+      [&](std::string_view, std::string_view,
+          ChatConversationOptions opts) -> SubAgentRuntime::SendFn {
+    seen = opts;
+    created = true;
+    return [](const std::string&, const SubAgentRuntime::TokenSink&,
+              const CancelToken&)
+               -> asio::awaitable<absl::StatusOr<std::string>> {
+      co_return std::string(
+          R"({"role":"assistant","content":[{"type":"text","text":"pong"}]})");
+    };
+  };
+
+  SubAgentRuntime rt(wf, host_tools, emit, std::move(fake));
+  SubAgentContext ctx;
+  auto conversation = std::make_shared<HistoryConversation>(kHistory);
+  ctx.fork = true;
+  ctx.parent_history = ProviderFor(conversation);
+
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "go", ctx);
+  ASSERT_TRUE(result.is_string()) << result.dump();
+  EXPECT_EQ(result.get<std::string>(), "pong");
+  EXPECT_TRUE(created);
+  EXPECT_EQ(seen.initial_history_json, kHistory);
+}
+
+TEST(SubAgentRuntimeTest, PlainDelegateNeverExportsHistory) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kForkRosterJson, host_tools);
+  NullEventEmitter emit;
+
+  ChatConversationOptions seen;
+  SubAgentRuntime::ConversationFactory fake =
+      [&](std::string_view, std::string_view,
+          ChatConversationOptions opts) -> SubAgentRuntime::SendFn {
+    seen = opts;
+    return [](const std::string&, const SubAgentRuntime::TokenSink&,
+              const CancelToken&)
+               -> asio::awaitable<absl::StatusOr<std::string>> {
+      co_return std::string(
+          R"({"role":"assistant","content":[{"type":"text","text":"pong"}]})");
+    };
+  };
+
+  SubAgentRuntime rt(wf, host_tools, emit, std::move(fake));
+  SubAgentContext ctx;
+  // A provider is present but fork is false: it must not be used.
+  auto conversation = std::make_shared<HistoryConversation>("[]");
+  ctx.parent_history = ProviderFor(conversation);
+
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "go", ctx);
+  ASSERT_TRUE(result.is_string()) << result.dump();
+  EXPECT_TRUE(seen.initial_history_json.empty());
+}
+
+TEST(SubAgentRuntimeTest, ForkWithoutAProviderIsUnavailable) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kForkRosterJson, host_tools);
+  NullEventEmitter emit;
+  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory());
+  SubAgentContext ctx;
+  ctx.fork = true;
+
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "go", ctx);
+  ASSERT_TRUE(result.is_object());
+  EXPECT_EQ(result.value("error", ""), "fork_unavailable");
+}
+
+TEST(SubAgentRuntimeTest, ForkHistoryBeyondTheCapIsRejected) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kForkRosterJson, host_tools);
+  NullEventEmitter emit;
+  SubAgentRuntime rt(wf, host_tools, emit, NoLlmFactory());
+  SubAgentContext ctx;
+  auto conversation = std::make_shared<HistoryConversation>(std::string(128, 'x'));
+  ctx.fork = true;
+  ctx.parent_history = ProviderFor(conversation);
+
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "go", ctx);
+  ASSERT_TRUE(result.is_object());
+  EXPECT_EQ(result.value("error", ""), "fork_history_too_large");
+}
+
+TEST(SubAgentRuntimeTest, ForkOntoABackendWithoutHistoryIsUnsupported) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kForkRosterJson, host_tools);
+  NullEventEmitter emit;
+
+  // Mirrors DefaultConversationFactory's failure shape for a backend that
+  // cannot import history.
+  SubAgentRuntime::ConversationFactory unsupported =
+      [](std::string_view, std::string_view,
+         ChatConversationOptions) -> SubAgentRuntime::SendFn {
+    return [](const std::string&, const SubAgentRuntime::TokenSink&,
+              const CancelToken&)
+               -> asio::awaitable<absl::StatusOr<std::string>> {
+      co_return absl::UnimplementedError("history import unsupported");
+    };
+  };
+
+  SubAgentRuntime rt(wf, host_tools, emit, std::move(unsupported));
+  SubAgentContext ctx;
+  auto conversation = std::make_shared<HistoryConversation>(
+      R"([{"role":"user","content":"q"}])");
+  ctx.fork = true;
+  ctx.parent_history = ProviderFor(conversation);
+
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "go", ctx);
+  ASSERT_TRUE(result.is_object());
+  EXPECT_EQ(result.value("error", ""), "fork_unsupported");
+}
+
+TEST(SubAgentRuntimeTest, FailedForkImportIsReportedAsForkFailed) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kForkRosterJson, host_tools);
+  NullEventEmitter emit;
+
+  SubAgentRuntime::ConversationFactory rejected =
+      [](std::string_view, std::string_view,
+         ChatConversationOptions) -> SubAgentRuntime::SendFn {
+    return [](const std::string&, const SubAgentRuntime::TokenSink&,
+              const CancelToken&)
+               -> asio::awaitable<absl::StatusOr<std::string>> {
+      co_return absl::InvalidArgumentError("bad history");
+    };
+  };
+
+  SubAgentRuntime rt(wf, host_tools, emit, std::move(rejected));
+  SubAgentContext ctx;
+  auto conversation = std::make_shared<HistoryConversation>(
+      R"([{"role":"user","content":"q"}])");
+  ctx.fork = true;
+  ctx.parent_history = ProviderFor(conversation);
+
+  auto result = RunAsyncBlocking(rt, io, "parent", "child", "go", ctx);
+  ASSERT_TRUE(result.is_object());
+  EXPECT_EQ(result.value("error", ""), "fork_failed");
 }
 
 }  // namespace

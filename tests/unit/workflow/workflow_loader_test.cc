@@ -332,5 +332,101 @@ TEST(WorkflowLoaderTest, Tier3RejectsBadDescriptorSet) {
   EXPECT_FALSE(wf_or.ok());
 }
 
+// One delegating agent a -> b, with `extra` spliced into a's delegates so
+// each rejection test can vary exactly one key.
+std::string ForkSpec(const std::string& extra) {
+  return std::string(R"({
+    "schema_version":1,"name":"x","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "agents":{
+      "a":{"system_prompt":"","model":{},"tools":[],
+           "delegates":{"agents":["b"],"max_depth":2)") +
+         extra + R"(}},
+      "b":{"system_prompt":"","model":{},"tools":[]}
+    },
+    "main":"a"
+  })";
+}
+
+TEST(WorkflowLoaderTest, ParsesForkDelegationConfig) {
+  std::string spec = R"({
+    "schema_version":1,"name":"x","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "agents":{
+      "a":{"system_prompt":"","model":{},"tools":[],
+           "delegates":{"agents":["b","c"],"max_depth":2,
+                         "fork_agents":["b"],"max_fork_history_bytes":1024}},
+      "b":{"system_prompt":"","model":{},"tools":[]},
+      "c":{"system_prompt":"","model":{},"tools":[]}
+    },
+    "main":"a"
+  })";
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(spec, host_tools);
+  ASSERT_TRUE(wf_or.ok()) << wf_or.status();
+  const auto& d = (*wf_or)->spec().agents().at("a").delegates();
+  ASSERT_EQ(d.fork_agents_size(), 1);
+  EXPECT_EQ(d.fork_agents(0), "b");
+  EXPECT_EQ(d.max_fork_history_bytes(), 1024u);
+}
+
+TEST(WorkflowLoaderTest, ForkAgentOutsideTheRosterIsRejected) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(
+      ForkSpec(R"(,"fork_agents":["ghost"])"), host_tools);
+  EXPECT_FALSE(wf_or.ok());
+  EXPECT_TRUE(absl::StrContains(wf_or.status().message(), "fork_agents"));
+}
+
+TEST(WorkflowLoaderTest, ForkAgentsMustBeAnArrayOfNonEmptyStrings) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  for (const char* extra :
+       {R"(,"fork_agents":"b")", R"(,"fork_agents":[""])",
+        R"(,"fork_agents":[42])"}) {
+    auto wf_or = WorkflowLoader::Load(ForkSpec(extra), host_tools);
+    EXPECT_FALSE(wf_or.ok()) << extra;
+    EXPECT_TRUE(absl::StrContains(wf_or.status().message(), "fork_agents"))
+        << extra;
+  }
+}
+
+TEST(WorkflowLoaderTest, DuplicateForkAgentsAreRejected) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(
+      ForkSpec(R"(,"fork_agents":["b","b"])"), host_tools);
+  EXPECT_FALSE(wf_or.ok());
+  EXPECT_TRUE(absl::StrContains(wf_or.status().message(), "duplicate"));
+}
+
+TEST(WorkflowLoaderTest, MaxForkHistoryBytesMustBeANonNegativeInteger) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  for (const char* extra :
+       {R"(,"max_fork_history_bytes":"big")", R"(,"max_fork_history_bytes":-1)",
+        R"(,"max_fork_history_bytes":1.5)"}) {
+    auto wf_or = WorkflowLoader::Load(ForkSpec(extra), host_tools);
+    EXPECT_FALSE(wf_or.ok()) << extra;
+    EXPECT_TRUE(
+        absl::StrContains(wf_or.status().message(), "max_fork_history_bytes"))
+        << extra;
+  }
+}
+
+TEST(WorkflowLoaderTest, ZeroMaxForkHistoryBytesMeansUseTheDefault) {
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf_or = WorkflowLoader::Load(
+      ForkSpec(R"(,"fork_agents":["b"],"max_fork_history_bytes":0)"),
+      host_tools);
+  ASSERT_TRUE(wf_or.ok()) << wf_or.status();
+  EXPECT_EQ((*wf_or)->spec().agents().at("a").delegates()
+                .max_fork_history_bytes(),
+            0u);
+}
+
 }  // namespace
 }  // namespace agentflow::workflow
