@@ -3,7 +3,7 @@
 
 Usage:
   verify-results.py build <bep-jsonl> [--report <json>]
-  verify-results.py test  <bep-jsonl> --testlogs <bazel-testlogs> [--report <json>]
+  verify-results.py test  <bep-jsonl> --testlogs <bazel-testlogs> [--xml-out <dir>] [--report <json>]
 
 Gates enforced here:
   * build: buildFinished reports overall success, at least one target completed
@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 
@@ -44,6 +45,20 @@ def label_path(label):
     package, _, name = body.partition(":")
     name = name or package.rsplit("/", 1)[-1]
     return os.path.join(package, name)
+
+
+def retain_xml(testlogs, label, xml_out):
+    """Copy one target's raw GTest XML into the uploaded evidence directory.
+
+    bazel-testlogs is a symlink into the output base, which the disposable job
+    container takes with it when the run ends. The summary JSON cannot stand in
+    for the per-case evidence AGENTS.md asks for, so the XML is copied out here
+    (shutil follows the symlink) under the same label path Bazel uses.
+    """
+    relative = label_path(label)
+    target = pathlib.Path(xml_out) / relative / "test.xml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(pathlib.Path(testlogs) / relative / "test.xml", target)
 
 
 def verify_build(bep):
@@ -89,7 +104,7 @@ def verify_build(bep):
     }
 
 
-def verify_test(bep, testlogs):
+def verify_test(bep, testlogs, xml_out=None):
     reports = []
     for event in events(bep):
         event_id = event.get("id", {})
@@ -126,6 +141,8 @@ def verify_test(bep, testlogs):
             die(f"{label}: {failures} failures / {errors} errors")
         if status != "PASSED":
             die(f"{label}: Bazel reports {status}")
+        if xml_out:
+            retain_xml(testlogs, label, xml_out)
         reports.append(
             {"label": label, "status": status, "tests": tests, "skipped": skipped}
         )
@@ -148,6 +165,7 @@ def main():
     parser.add_argument("kind", choices=("build", "test"))
     parser.add_argument("bep")
     parser.add_argument("--testlogs")
+    parser.add_argument("--xml-out")
     parser.add_argument("--report")
     args = parser.parse_args()
 
@@ -159,7 +177,7 @@ def main():
     else:
         if not args.testlogs:
             die("--testlogs is required for test verification")
-        report = verify_test(args.bep, args.testlogs)
+        report = verify_test(args.bep, args.testlogs, args.xml_out)
 
     if args.report:
         pathlib.Path(args.report).parent.mkdir(parents=True, exist_ok=True)

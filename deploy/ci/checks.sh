@@ -15,6 +15,10 @@
 #   CI_SCRATCH          private scratch dir for bazel output and reports
 #   CI_MIN_DISK_GIB     minimum free disk before starting (default 6)
 #   CI_RESULTS          results directory (default $CI_SCRATCH/results)
+#
+# Test evidence: $CI_RESULTS/testlogs/<package>/<target>/test.xml holds the raw
+# GTest XML for every executed target, copied out of the Bazel output tree so it
+# survives the disposable container.
 set -euo pipefail
 control=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$control/../.." && pwd)
@@ -91,7 +95,9 @@ run_test() {
   ( cd "$workspace" && "${bazel_cmd[@]}" test //tests/unit/... "${test_options[@]}" \
       "--build_event_json_file=$bep" ) || status=1
   python3 "$control/verify-results.py" test "$bep" \
-    "--testlogs=$workspace/bazel-testlogs" "--report=$results/test-report.json" || status=1
+    "--testlogs=$workspace/bazel-testlogs" \
+    "--xml-out=$results/testlogs" \
+    "--report=$results/test-report.json" || status=1
 }
 
 case $scope in

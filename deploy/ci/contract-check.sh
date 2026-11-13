@@ -40,6 +40,40 @@ for script in "$control"/*.sh; do
   bash -n "$script" || die "syntax error in ${script#"$root"/}"
 done
 
+# The workspace mount guard is the only thing keeping a bind-mounted host
+# checkout out of the build. Exercise the predicate itself against fixtures: a
+# workspace on the image filesystem must pass, a workspace at or below a bind
+# mount must be rejected, and mountinfo's \040 escapes must be decoded.
+probe=$(mktemp -d)
+trap 'rm -rf "$probe"' EXIT
+printf '%s\n' \
+  '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
+  '31 22 0:29 / /proc rw,nosuid - proc proc rw' \
+  >"$probe/image-fs"
+printf '%s\n' \
+  '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
+  '56 22 0:60 /home/wayne/tools/zen /workspace rw,relatime - ext4 /dev/nvme0n1p2 rw' \
+  >"$probe/bind-parent"
+printf '%s\n' \
+  '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
+  '56 22 0:60 /mnt/ci/zen /workspace/zen rw,relatime - ext4 /dev/nvme0n1p2 rw' \
+  >"$probe/bind-exact"
+printf '%s\n' \
+  '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
+  '56 22 0:60 /mnt/my\040checkout /mnt/my\040checkout rw,relatime - ext4 /dev/sdb rw' \
+  >"$probe/bind-escaped"
+
+bash "$control/container-guard.sh" --probe "$probe/image-fs" /workspace/zen \
+  || die 'mount guard rejects a workspace on the container filesystem'
+for sample in bind-parent bind-exact; do
+  if bash "$control/container-guard.sh" --probe "$probe/$sample" /workspace/zen >/dev/null; then
+    die "mount guard misses a host bind mount (fixture $sample)"
+  fi
+done
+if bash "$control/container-guard.sh" --probe "$probe/bind-escaped" '/mnt/my checkout/zen' >/dev/null; then
+  die 'mount guard does not decode mountinfo path escapes'
+fi
+
 [[ $(sed -n 's/^ARG BAZEL_SHA256=\(.*\)$/\1/p' "$control/Containerfile") =~ ^[0-9a-f]{64}$ ]] \
   || die 'deploy/ci/Containerfile must pin a full BAZEL_SHA256'
 

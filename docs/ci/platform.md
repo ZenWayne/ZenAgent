@@ -93,7 +93,7 @@ Bazel 的下载（BCR 模块、`http_archive`、GitHub release、maven）走 Baz
 
 - build：BEP 必须有 `buildFinished{overallSuccess:true}`，并且存在 `actionCompleted` 事件（否则是"分析通过、什么都没编"）。
 - test：对 BEP 中每个 `testSummary`，`bazel-testlogs/<label>/test.xml` 必须存在、非空，`tests > 0`，`failures/errors == 0`，Bazel 状态 `PASSED`；出现 `testResult{cachedLocally:true}` 直接失败。
-- 结果写入 `results/identity.json`、`results/*.bep.jsonl`、`results/test-report.json`，工作流始终上传为 `ci-source-identity`、`ci-bazel-evidence`、`ci-log`（保留 7 天）。
+- 结果写入 `results/identity.json`、`results/*.bep.jsonl`、`results/test-report.json`、`results/testlogs/<package>/<target>/test.xml`（原始 GTest XML，从 Bazel 输出树复制，因为 `bazel-testlogs` 是指向 output base 的符号链接，会随一次性容器消失），工作流始终上传为 `ci-source-identity`、`ci-bazel-evidence`、`ci-log`（保留 7 天）。
 
 `identity.json` 记录 `source_sha`、`configuration_sha`、镜像 tag、Bazel 版本、run/job/attempt。派发时传入的 `source_ref` 只是声明；结论必须同时核对 checkout 出来的 SHA 与 artifacts。
 

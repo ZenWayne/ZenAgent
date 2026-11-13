@@ -74,10 +74,10 @@ fj run download <run_number> --host 127.0.0.1:3001 --repo wayne/zenagent
 | artifact | 用途 |
 | --- | --- |
 | `ci-source-identity` | `identity.json`：实际 checkout 的 `source_sha`、`configuration_sha`、镜像、Bazel 版本、run/job/attempt |
-| `ci-bazel-evidence` | `build.bep.jsonl`、`test.bep.jsonl`、`test-report.json`：目标数、用例数、每个目标状态 |
+| `ci-bazel-evidence` | `build.bep.jsonl`、`test.bep.jsonl`、`test-report.json`：目标数、用例数、每个目标状态；`testlogs/`：每个已执行目标的原始 GTest `test.xml`（按 label 路径，从 Bazel 输出树复制出来） |
 | `ci-log` | 完整执行日志（含预检、参数、失败原因） |
 
-`status=success` 与 commit 显示都不算证据。结论要求：`identity.json` 的 `source_sha` 等于待验证 SHA；`test-report.json` 的 `targets` 覆盖本次应有目标且 `test_cases > 0`；日志里没有 skip/缓存命中。
+`status=success` 与 commit 显示都不算证据。结论要求：`identity.json` 的 `source_sha` 等于待验证 SHA；`test-report.json` 的 `targets` 覆盖本次应有目标且 `test_cases > 0`；`testlogs/` 里有对应目标的原始 XML；日志里没有 skip/缓存命中。
 
 ## 5. 本地复现
 

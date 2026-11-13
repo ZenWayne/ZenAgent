@@ -120,5 +120,6 @@ jobs:
             /workspace/results/build.bep.jsonl
             /workspace/results/test.bep.jsonl
             /workspace/results/test-report.json
+            /workspace/results/testlogs/
           retention-days: 7
           if-no-files-found: warn
