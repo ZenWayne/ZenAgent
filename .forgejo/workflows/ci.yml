@@ -2,7 +2,10 @@ name: CI
 run-name: ci · ${{ inputs.source_ref || github.sha }} · ${{ inputs.scope || 'all' }}
 on:
   push:
-    branches: [main]
+    # master is the upstream default branch; main is kept for a future rename.
+    # Only the default branch is gated by push — feature refs use workflow_dispatch
+    # with an explicit source_ref, so a mirror branch never burns the full suite.
+    branches: [master, main]
   workflow_dispatch:
     inputs:
       runner:
