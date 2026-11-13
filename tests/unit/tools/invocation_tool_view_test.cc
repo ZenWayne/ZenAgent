@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
 #include <asio/steady_timer.hpp>
@@ -92,7 +93,11 @@ class SuspendingTool final : public Tool {
   asio::awaitable<std::string> Invoke(std::string_view, std::string_view,
                                       const CancelToken&) override {
     ++started;
-    co_await release_->async_wait(asio::use_awaitable);
+    // Cancelling the timer is how the test releases the call, so the aborted
+    // wait is the expected path, not a failure.
+    auto [error] = co_await release_->async_wait(
+        asio::as_tuple(asio::use_awaitable));
+    static_cast<void>(error);
     co_return label_;
   }
 
@@ -141,7 +146,7 @@ TEST(InvocationToolViewTest, ReRegistrationKeepsAnInFlightCallAlive) {
   registry.Register(second);
   ASSERT_TRUE(view.AddFromRegistry(registry, "write", ToolTier::kReadonly).ok());
 
-  release->expires_at(std::chrono::steady_clock::now());
+  release->cancel();
   io.run();
   EXPECT_EQ(future.get(), "first");
   EXPECT_EQ(second->started, 0);
