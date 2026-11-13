@@ -24,7 +24,6 @@ cc_library(
         "//agentflow/inference:canonical_message",
         "//agentflow/inference:chat_backend",
         "//agentflow/tools",
-        "//agentflow/workflow:sub_agent_runtime",
         "@abseil-cpp//absl/status",
         "@asio",
         "@nlohmann_json//:json",

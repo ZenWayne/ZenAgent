@@ -19,7 +19,6 @@
 #include "agentflow/tools/tool.h"
 #include "agentflow/tools/invocation_tool_view.h"
 #include "agentflow/tools/tool_registry.h"
-#include "agentflow/workflow/sub_agent_context.h"
 
 namespace agentflow {
 
@@ -68,7 +67,7 @@ struct AgentNodeConfig {
   // Optional. When set, Run points it at this run's conversation so a fork
   // delegation can export the settled history to a child. Wired only by the
   // workflow runner for an agent that declares fork_agents.
-  std::shared_ptr<workflow::ConversationHistoryProvider> history;
+  std::shared_ptr<ConversationHistoryProvider> history;
 };
 
 class AgentNode : public Node {

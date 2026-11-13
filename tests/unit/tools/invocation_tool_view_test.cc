@@ -1,5 +1,6 @@
 #include "agentflow/tools/invocation_tool_view.h"
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -9,6 +10,8 @@
 #include "absl/status/status.h"
 #include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
 #include <gtest/gtest.h>
 
@@ -75,6 +78,86 @@ std::shared_ptr<NativeFnTool> NativeCounter(int* calls) {
         ++*calls;
         co_return "ran";
       });
+}
+
+// Parks its coroutine on a shared timer so a re-registration can land while the
+// call is in flight. `started` counts how often this instance actually ran.
+class SuspendingTool final : public Tool {
+ public:
+  SuspendingTool(std::shared_ptr<asio::steady_timer> release, std::string label)
+      : release_(std::move(release)), label_(std::move(label)) {}
+
+  const ToolSchema& Schema() const override { return schema_; }
+
+  asio::awaitable<std::string> Invoke(std::string_view, std::string_view,
+                                      const CancelToken&) override {
+    ++started;
+    co_await release_->async_wait(asio::use_awaitable);
+    co_return label_;
+  }
+
+  int started = 0;
+
+ private:
+  ToolSchema schema_{"write", "", "{}"};
+  std::shared_ptr<asio::steady_timer> release_;
+  std::string label_;
+};
+
+TEST(InvocationToolViewTest, ReRegistrationKeepsAnInFlightCallAlive) {
+  asio::io_context io;
+  auto release = std::make_shared<asio::steady_timer>(io);
+  release->expires_after(std::chrono::hours(1));
+  ToolRegistry registry;
+  auto first = std::make_shared<SuspendingTool>(release, "first");
+  registry.Register(first);
+  InvocationToolView view(registry, {}, {}, {}, nullptr);
+  ASSERT_TRUE(view.AddFromRegistry(registry, "write", ToolTier::kReadonly).ok());
+
+  auto future = asio::co_spawn(
+      io,
+      [&]() -> asio::awaitable<std::string> {
+        co_return co_await view.Invoke("write", "{}", "call-1", CancelToken{});
+      },
+      asio::use_future);
+  // Start the call, then stop as soon as it is parked on the timer.
+  while (first->started == 0) {
+    io.poll();
+    io.restart();
+  }
+
+  // A skill load re-registers "write" while the call is suspended. The wrapper
+  // the call started in must survive: GatedTool::Invoke holds a raw `this` and
+  // reaches back into inner_/Schema() after the resume.
+  auto second = std::make_shared<SuspendingTool>(release, "second");
+  registry.Register(second);
+  ASSERT_TRUE(view.AddFromRegistry(registry, "write", ToolTier::kReadonly).ok());
+
+  release->expires_at(std::chrono::steady_clock::now());
+  io.run();
+  EXPECT_EQ(future.get(), "first");
+  EXPECT_EQ(second->started, 0);
+}
+
+TEST(InvocationToolViewTest, UnchangedReRegistrationIsANoOp) {
+  int invoked = 0;
+  ToolRegistry registry;
+  registry.Register(NativeCounter(&invoked));
+  auto gate = std::make_shared<FixedGate>(ToolGateDecision{true, {}, {}});
+  InvocationToolView view(registry, {"write"}, {}, {}, gate);
+  ASSERT_TRUE(view.Has("write"));
+
+  // Same tool at the same tier keeps the wrapper the constructor built; a
+  // different tier is a real update and re-wraps.
+  ASSERT_TRUE(view.AddFromRegistry(registry, "write", ToolTier::kReadonly).ok());
+  asio::io_context io;
+  EXPECT_EQ(InvokeView(view, "write", io), "ran");
+  EXPECT_EQ(gate->calls, 0);
+
+  ASSERT_TRUE(view.AddFromRegistry(registry, "write", ToolTier::kConfirm).ok());
+  EXPECT_EQ(InvokeView(view, "write", io), "ran");
+  EXPECT_EQ(gate->calls, 1);
+  EXPECT_EQ(invoked, 2);
 }
 
 TEST(InvocationToolViewTest, AddFromRegistryGatesConfirmTools) {

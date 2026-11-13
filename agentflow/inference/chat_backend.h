@@ -126,6 +126,26 @@ class IConversation {
   }
 };
 
+// Reads a conversation's settled history for a fork delegation. Holds the
+// conversation weakly: the provider is attached to a node's config for the
+// whole run, while the conversation is created per Run.
+//
+// This lives next to IConversation rather than in the delegating layer: it is
+// the only consumer of ExportHistory(), and both the node that owns the parent
+// conversation and the delegate runtime that seeds a child depend on it.
+class ConversationHistoryProvider {
+ public:
+  std::weak_ptr<IConversation> conversation;
+
+  absl::StatusOr<std::string> Export() const {
+    auto conv = conversation.lock();
+    if (!conv) {
+      return absl::FailedPreconditionError("parent conversation unavailable");
+    }
+    return conv->ExportHistory();
+  }
+};
+
 class IChatBackend {
  public:
   virtual ~IChatBackend() = default;

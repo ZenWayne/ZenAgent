@@ -14,7 +14,7 @@
 #include "agentflow/core/errors.h"
 #include "agentflow/core/json_text.h"
 #include "agentflow/inference/canonical_message.h"
-#include "agentflow/workflow/sub_agent_context.h"
+#include "agentflow/inference/chat_backend.h"
 
 namespace agentflow {
 

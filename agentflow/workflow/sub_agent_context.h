@@ -15,20 +15,10 @@
 
 namespace agentflow::workflow {
 
-// Reads the parent conversation's settled history for a fork delegation.
-// Holds the conversation weakly: the provider is attached to the agent node's
-// config for the whole run, while the conversation is created per Run.
-struct ConversationHistoryProvider {
-  std::weak_ptr<::agentflow::IConversation> conversation;
-
-  absl::StatusOr<std::string> Export() const {
-    auto conv = conversation.lock();
-    if (!conv) {
-      return absl::FailedPreconditionError("parent conversation unavailable");
-    }
-    return conv->ExportHistory();
-  }
-};
+// Reads the parent conversation's settled history for a fork delegation. The
+// type lives in the inference layer next to IConversation; it is re-exported
+// here so delegate code can keep naming it without a second include.
+using ::agentflow::ConversationHistoryProvider;
 
 // Threaded through every delegate call. depth and root_invocation_id
 // propagate down the call chain; root stays constant for the whole tree.
