@@ -211,6 +211,16 @@ asio::awaitable<nlohmann::ordered_json> SubAgentRuntime::RunAsync(
               !args["goal"].is_string()) {
             co_return R"({"error":"bad_args"})";
           }
+          // Nested delegation cannot fork; reject an explicit request rather
+          // than silently running the grandchild without inherited history.
+          if (args.contains("fork")) {
+            if (!args["fork"].is_boolean()) {
+              co_return R"({"error":"bad_args"})";
+            }
+            if (args["fork"].get<bool>()) {
+              co_return R"({"error":"fork_not_allowed"})";
+            }
+          }
           SubAgentContext next = nested_ctx;
           next.parent_cancel = &cancel;
           auto result = co_await RunAsync(parent, args["agent"].get<std::string>(),
