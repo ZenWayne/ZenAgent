@@ -74,6 +74,10 @@ check_mount_guard() {
     '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
     "56 22 0:60 /home/wayne/tools/zen $build_ws rw,relatime - ext4 /dev/nvme0n1p2 rw" \
     >"$probe/checkout-at-workspace"
+  cat "$probe/runner-workspace" >"$probe/nested-checkout"
+  tail -n 1 "$probe/checkout-at-workspace" >>"$probe/nested-checkout"
+  cat "$probe/checkout-at-workspace" >"$probe/nested-checkout-reversed"
+  tail -n 1 "$probe/runner-workspace" >>"$probe/nested-checkout-reversed"
   printf '%s\n' \
     '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
     '57 22 0:61 /mnt/scratch /mnt/scratch rw,relatime - ext4 /dev/sdb rw' \
@@ -90,6 +94,10 @@ check_mount_guard() {
     || die 'mount guard rejects a workspace inside the runner workspace mount'
   for fixture in "runner-workspace|$build_ws|" \
                  "checkout-at-workspace|$build_ws|$runner_ws" \
+                 "nested-checkout|$build_ws|$runner_ws" \
+                 "nested-checkout-reversed|$build_ws|$runner_ws" \
+                 "nested-checkout|$build_ws/child|$runner_ws" \
+                 "nested-checkout-reversed|$build_ws/child|$runner_ws" \
                  "foreign-mount|/mnt/scratch/build|$runner_ws"; do
     IFS='|' read -r sample case_workspace case_runner <<<"$fixture"
     if bash "$guard" --probe "$probe/$sample" "$case_workspace" \

@@ -8,7 +8,7 @@ set -euo pipefail
 
 die() { echo "ci container guard: $*" >&2; exit 1; }
 
-# Prints the mount that provides $2 when that is not the container's own
+# Prints the deepest mount that provides $1 when that is not the container's own
 # filesystem, empty otherwise. A bind-mounted host checkout is exactly what must
 # never become the workspace: Bazel would write bazel-out/ into the host tree
 # and CI artifacts would become host artifacts. Both shapes count — the
@@ -27,8 +27,10 @@ workspace_host_mount() {
       gsub(/\\012/, "\n", mount)
       gsub(/\\134/, "\\\\", mount)
       if (mount == "/") next
-      if (target == mount || index(target, mount "/") == 1) { print mount; exit }
+      if ((target == mount || index(target, mount "/") == 1) &&
+          length(mount) > length(deepest)) deepest = mount
     }
+    END { if (deepest != "") print deepest }
   ' "$source"
 }
 
