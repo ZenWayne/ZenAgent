@@ -61,6 +61,8 @@ podman build --network host -t localhost/zen-ci:ubuntu24.04-bazel8.4.2 \
 
 改动 Bazel 版本时三处必须同步：`.bazelversion`、`Containerfile` 的 `ARG BAZEL_VERSION`（含新的 `BAZEL_SHA256`）、以及镜像 tag；`contract-check.sh` 会拒绝不一致。
 
+已知缺口：`identity.json` 只记镜像 tag，不记镜像 ID/digest。镜像被本地重建后（例如被别人的 `podman image prune` 清掉再重建），artifacts 看不出内容已经变了。需要严格复现时，派发前自行核对 `podman images --format '{{.ID}}' localhost/zen-ci:ubuntu24.04-bazel8.4.2`，或在后续把 digest 写进 identity。
+
 ## Bazel 参数来源
 
 `deploy/ci/bazel-ci-config.json` 是**唯一**的启动/构建/测试参数来源，`checks.sh` 从它读参数，不在工作流里另写一份：
@@ -119,5 +121,7 @@ Bazel 的下载（BCR 模块、`http_archive`、GitHub release、maven）走 Baz
 | `no field ... ` / artifact 为空 | 该次运行没跑到该步骤 | 按 artifacts 判断实际执行到哪一步，不要用状态位推断 |
 | `fj run logs` 报 `querying Loki for workflow logs` | 本机未部署 Loki 日志后端 | 读 Forgejo 存储里的原始任务日志（只读）：`podman cp forgejo-server:/data/gitea/actions_log/wayne/zenagent/<bucket>/<task>.log.zst /tmp/x.log.zst && zstd -dc /tmp/x.log.zst`；不要为此改造 Forgejo 或另写日志客户端 |
 | `Job 'CI contracts' failed` 但日志无错 | 先看任务日志里的第一次错误；`docker exec ... node` 报 `executable file 'node' not found` 是镜像缺 node | 重建镜像并核对 `node --version`；不要在工作流里临时装 node |
+| 任务在 `docker pull image=localhost/zen-ci:...` 处报 `Error response from daemon: connection refused` | 宿主 `podman.service` 正在重启（其他栈的 compose 活动也会触发），与 CI 配置无关 | 确认 `podman info` 与 socket `_ping` 恢复后重新派发；不要因此改工作流或镜像 |
+| 镜像突然「不存在」/ `image not known`，本机也没人删过 | 其他任务执行了 `podman image prune`（本机曾把 `zen-ci` 和 `ubuntu:24.04` 一起清掉） | 按 [任务镜像](#任务镜像) 重建后再派发；镜像 tag 不进 `identity.json`，所以镜像被静默重建无法从 artifacts 看出，重要结论要同时核对镜像 ID |
 
 宿主磁盘清理只针对可再生成的内容（镜像缓存、旧容器、悬空卷），清理前确认没有正在运行的 CI 或业务栈；不要删别人的卷来腾空间。
