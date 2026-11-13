@@ -18,7 +18,7 @@
 | 阶段 | 位置 | 门槛 |
 | --- | --- | --- |
 | 静态契约 | `deploy/ci/contract-check.sh` | 镜像版本 = `.bazelversion` = Containerfile ARG；Bazel 参数 JSON 合法；脚本语法正确；工作流必须在容器里跑 |
-| 预检 | `deploy/ci/checks.sh` | 容器内标识存在；工作区是容器内私有副本而非宿主挂载（挂载点本身或其下的路径均判为宿主挂载，覆盖 `\040` 转义）；可用磁盘 ≥ `CI_MIN_DISK_GIB`（默认 6 GiB） |
+| 预检 | `deploy/ci/checks.sh` | 容器内标识存在；工作区是容器内私有副本而非宿主挂载：允许位于 Runner 的 `GITHUB_WORKSPACE` 挂载之下，工作区自身是挂载点或位于其它挂载之下则拒绝（含 `\040` 转义）；可用磁盘 ≥ `CI_MIN_DISK_GIB`（默认 6 GiB） |
 | 构建 | `checks.sh build` | `bazel build //agentflow/...`，BEP 出现成功 `buildFinished` 且确有 action 执行 |
 | 测试 | `checks.sh test` | `bazel test //tests/unit/...`，每个目标的 GTest XML 非空、用例数 > 0、无失败；结果不得来自测试缓存 |
 | 证据 | `deploy/ci/verify-results.py` | 写入 `identity.json`、`*.bep.jsonl`、`test-report.json`，并把每个已执行目标的原始 GTest `test.xml` 复制到 `testlogs/`（按 label 路径），由工作流上传为 artifacts |

@@ -41,36 +41,48 @@ for script in "$control"/*.sh; do
 done
 
 # The workspace mount guard is the only thing keeping a bind-mounted host
-# checkout out of the build. Exercise the predicate itself against fixtures: a
-# workspace on the image filesystem must pass, a workspace at or below a bind
-# mount must be rejected, and mountinfo's \040 escapes must be decoded.
+# checkout out of the build. Exercise the predicate against fixtures: the runner
+# workspace mount is expected, a workspace that is itself a mount or sits below
+# any other mount is not, and mountinfo's \040 escapes must be decoded.
 probe=$(mktemp -d)
 trap 'rm -rf "$probe"' EXIT
+runner_ws=/workspace/wayne/zenagent
+build_ws=$runner_ws/source
 printf '%s\n' \
   '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
   '31 22 0:29 / /proc rw,nosuid - proc proc rw' \
   >"$probe/image-fs"
 printf '%s\n' \
   '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
-  '56 22 0:60 /home/wayne/tools/zen /workspace rw,relatime - ext4 /dev/nvme0n1p2 rw' \
-  >"$probe/bind-parent"
+  "56 22 0:60 $runner_ws $runner_ws rw,relatime - ext4 /dev/nvme0n1p2 rw" \
+  >"$probe/runner-workspace"
 printf '%s\n' \
   '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
-  '56 22 0:60 /mnt/ci/zen /workspace/zen rw,relatime - ext4 /dev/nvme0n1p2 rw' \
-  >"$probe/bind-exact"
+  "56 22 0:60 /home/wayne/tools/zen $build_ws rw,relatime - ext4 /dev/nvme0n1p2 rw" \
+  >"$probe/checkout-at-workspace"
+printf '%s\n' \
+  '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
+  '57 22 0:61 /mnt/scratch /mnt/scratch rw,relatime - ext4 /dev/sdb rw' \
+  >"$probe/foreign-mount"
 printf '%s\n' \
   '22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/a' \
   '56 22 0:60 /mnt/my\040checkout /mnt/my\040checkout rw,relatime - ext4 /dev/sdb rw' \
-  >"$probe/bind-escaped"
+  >"$probe/escaped-mount"
 
-bash "$control/container-guard.sh" --probe "$probe/image-fs" /workspace/zen \
+guard="$control/container-guard.sh"
+bash "$guard" --probe "$probe/image-fs" "$build_ws" \
   || die 'mount guard rejects a workspace on the container filesystem'
-for sample in bind-parent bind-exact; do
-  if bash "$control/container-guard.sh" --probe "$probe/$sample" /workspace/zen >/dev/null; then
-    die "mount guard misses a host bind mount (fixture $sample)"
+bash "$guard" --probe "$probe/runner-workspace" "$build_ws" "$runner_ws" \
+  || die 'mount guard rejects a workspace inside the runner workspace mount'
+for fixture in "runner-workspace|$build_ws|" \
+            "checkout-at-workspace|$build_ws|$runner_ws" \
+            "foreign-mount|/mnt/scratch/build|$runner_ws"; do
+  IFS='|' read -r sample workspace runner <<<"$fixture"
+  if bash "$guard" --probe "$probe/$sample" "$workspace" ${runner:+"$runner"} >/dev/null; then
+    die "mount guard misses a host mount (fixture $sample)"
   fi
 done
-if bash "$control/container-guard.sh" --probe "$probe/bind-escaped" '/mnt/my checkout/zen' >/dev/null; then
+if bash "$guard" --probe "$probe/escaped-mount" '/mnt/my checkout/zen' "$runner_ws" >/dev/null; then
   die 'mount guard does not decode mountinfo path escapes'
 fi
 

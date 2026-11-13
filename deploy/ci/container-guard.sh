@@ -8,7 +8,7 @@ set -euo pipefail
 
 die() { echo "ci container guard: $*" >&2; exit 1; }
 
-# Prints the mount that provides $1 when that is not the container's own
+# Prints the mount that provides $2 when that is not the container's own
 # filesystem, empty otherwise. A bind-mounted host checkout is exactly what must
 # never become the workspace: Bazel would write bazel-out/ into the host tree
 # and CI artifacts would become host artifacts. Both shapes count — the
@@ -32,17 +32,37 @@ workspace_host_mount() {
   ' "$source"
 }
 
-# `--probe <mountinfo> <workspace>` evaluates only the workspace predicate, so
-# deploy/ci/contract-check.sh can exercise it against fixtures without a
-# container. Sourcing this file — the real entry point — never sees arguments.
+# Exit 0 when $1 is a safe workspace for the given mountinfo ($2) and runner
+# workspace ($3). Otherwise prints the offending mount and returns 1.
+#
+# The runner mounts its own workspace directory into the job container, so being
+# below that one mount is normal and expected. A checkout mounted *at* the
+# workspace, or a workspace below any other mount, would put Bazel output in a
+# host tree.
+workspace_mount_problem() {
+  local target=$1 source=$2 runner=${3%/}
+  local mount
+  mount=$(workspace_host_mount "$target" "$source")
+  [[ -n $mount ]] || return 0
+  [[ $mount != "$target" ]] || { printf '%s\n' "$mount"; return 1; }
+  [[ -n $runner && $mount == "$runner" ]] && return 0
+  printf '%s\n' "$mount"
+  return 1
+}
+
+# `--probe <mountinfo> <workspace> [runner-workspace]` evaluates only the
+# workspace predicate, so deploy/ci/contract-check.sh can exercise it against
+# fixtures without a container. Sourcing this file — the real entry point —
+# never sees arguments.
 if [[ ${1:-} == --probe ]]; then
-  [[ $# == 3 ]] || {
-    echo 'usage: container-guard.sh --probe <mountinfo> <workspace>' >&2
+  [[ $# == 3 || $# == 4 ]] || {
+    echo 'usage: container-guard.sh --probe <mountinfo> <workspace> [runner-workspace]' >&2
     exit 2
   }
-  mount=$(workspace_host_mount "$3" "$2")
-  [[ -n $mount ]] || exit 0
-  echo "$mount"
+  if problem=$(workspace_mount_problem "$3" "$2" "${4:-}"); then
+    exit 0
+  fi
+  echo "$problem"
   exit 1
 fi
 
@@ -54,7 +74,10 @@ fi
 workspace=$(realpath -- "${CI_WORKSPACE:-}")
 [[ -n $workspace && -d $workspace ]] || die 'CI_WORKSPACE is not an existing directory: '${CI_WORKSPACE:-}
 [[ $workspace != / ]] || die 'workspace must not be the container root'
-host_mount=$(workspace_host_mount "$workspace")
-[[ -z $host_mount ]] \
-  || die "workspace $workspace is on the mount $host_mount; CI must build a private copy, not a host mount"
+if problem=$(workspace_mount_problem "$workspace" /proc/self/mountinfo \
+    "${GITHUB_WORKSPACE:-}"); then
+  :
+else
+  die "workspace $workspace is on the mount $problem, which is not the runner workspace ('${GITHUB_WORKSPACE:-}'); CI must build a private copy, not a host mount"
+fi
 [[ -w $workspace ]] || die "workspace $workspace is not writable"

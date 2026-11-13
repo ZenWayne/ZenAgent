@@ -30,7 +30,8 @@
 - Runner：`forgejo-runner` 13.1.0 容器，通过本机 rootless Podman socket 创建任务容器；标签 `linux-small`；并发 3。
 - 任务容器上限（Runner 配置，不由工作流放宽）：内存 3 GiB、`--memory-swap` 3 GiB、4 CPU、512 进程；任务超时 45 分钟。
 - Runner 注入代理 `host.containers.internal:10809`（宿主代理的容器侧地址），并设置 `NO_PROXY`。
-- 工作流不挂载任何宿主目录，也不使用共享协调卷；同一 `source_ref` 通过 concurrency group 串行，不同源码可并行。
+- Runner 把 `GITHUB_WORKSPACE`（`/workspace/<owner>/<repo>`）本身挂进任务容器，这是 act 的固定行为，也是工作流 clone 源码的位置；工作流没有其它挂载，也不使用共享协调卷。因此 `container-guard.sh` 允许工作区位于**这个**挂载之下，但拒绝两种情形：工作区自己就是挂载点，或工作区位于其它挂载之下。`GITHUB_WORKSPACE` 缺失时一律拒绝（fail closed）。
+- 同一 `source_ref` 通过 concurrency group 串行，不同源码可并行。
 
 Bazel 的运行预算必须装进 3 GiB：`--jobs=2`、`--local_ram_resources=2048`、`--local_test_jobs=1`、JVM `-Xmx1g`。调大任何一个之前先按 [排障](#排障) 复现一次峰值，不要把"能跑完一次"当作余量证明。
 
