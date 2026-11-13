@@ -111,7 +111,15 @@ TEST(InvocationToolViewTest, ReRegistrationKeepsAnInFlightCallAlive) {
   ToolRegistry registry;
   auto first = std::make_shared<SuspendingTool>(release, "first");
   registry.Register(first);
-  InvocationToolView view(registry, {}, {}, {}, nullptr);
+  // The emit callback is the second dangling access: GatedTool::Invoke reaches
+  // Schema() after the resume, next to inner_ and gate_.
+  std::vector<std::string> phases;
+  ToolInvocationContext context;
+  context.event = [&phases](std::string_view phase, const ToolInvocationContext&,
+                            std::string_view, std::string_view) {
+    phases.emplace_back(phase);
+  };
+  InvocationToolView view(registry, {}, {}, context, nullptr);
   ASSERT_TRUE(view.AddFromRegistry(registry, "write", ToolTier::kReadonly).ok());
 
   auto future = asio::co_spawn(
@@ -137,6 +145,7 @@ TEST(InvocationToolViewTest, ReRegistrationKeepsAnInFlightCallAlive) {
   io.run();
   EXPECT_EQ(future.get(), "first");
   EXPECT_EQ(second->started, 0);
+  EXPECT_EQ(phases, (std::vector<std::string>{"requested", "completed"}));
 }
 
 TEST(InvocationToolViewTest, UnchangedReRegistrationIsANoOp) {
