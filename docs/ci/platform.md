@@ -39,9 +39,9 @@ Bazel 的运行预算必须装进 3 GiB：`--jobs=2`、`--local_ram_resources=20
 
 门槛是 `deploy/ci/bazel-ci-config.json` 的 `min_disk_gib`，`checks.sh` 从那一处读取；工作流不再自己设 `CI_MIN_DISK_GIB`（设了会被 `contract-check.sh` 拒绝），避免了两个数字各说各话。
 
-当前值 24 GiB，依据：`c14961f` 之后的两次运行分别在 14 GiB 可用空间下启动，都在 `external/protobuf+` 的编译阶段写到 `No space left on device`（run #10、#11，约 8–9 分钟时耗尽）。宿主 ext4 还有约 15 GiB 的 root 保留块，rootless podman 用不到，因此 `df` 报的 avail 就是真实上限。
+当前值 6 GiB。此前共享宿主的磁盘问题已解决，恢复原有启动门槛。这个值用于启动前检查，不代表构建的峰值空间需求。
 
-`checks.sh` 在每个 scope 前后都记录一次可用空间（`build:` / `build finished;` / `test:` / `test finished;` 行）。这个数才是目标的峰值依据：下次有成功运行后，按实测峰值 + 余量修正 `min_disk_gib`，不要继续按猜测放大。门槛调高只影响"能不能开始"，不改变构建本身，也不会让失败的运行变通过。
+`checks.sh` 在每个 scope 前后都记录一次可用空间（`build:` / `build finished;` / `test:` / `test finished;` 行）。前后差值反映净变化，不能单独证明峰值，且会受到共享宿主其它任务的影响。调整门槛时应结合构建期间的空间观测和余量；门槛不改变构建本身的资源消耗。
 
 ## 任务镜像
 
