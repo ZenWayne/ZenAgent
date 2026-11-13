@@ -2,3 +2,17 @@
 	path = LiteRT-LM
 	url = https://github.com/ZenWayne/LiteRT-LM.git
 	branch = zenagent/constrained-decoding
+[submodule "rig"]
+	path = rig
+	url = https://github.com/0xPlaygrounds/rig.git
+# 残留 gitlink：索引里的提交 c97f96e0（2026-04 的 rig-litert Rust workspace 方案）
+# 在任何远端都不存在（GitHub 上无此仓库，本机也无对应对象），无法给出可用 url。
+# 这里只补路径映射，让 git submodule status/foreach/update 不再以
+# "No url found for submodule path" 退出 128；update=none 明确禁止初始化。
+# 如果那套 workspace 之后确实要回来，把下面的占位 url 换成真实地址并去掉 update=none。
+# 仍需写一个 url：git submodule update --init 会先解析 url 再判断 update=none，
+# 缺 url 时它照样 fatal 128；example.invalid 是保留域名，永远不会被误当成真仓库拉取。
+[submodule "edge-agent-workspace"]
+	path = edge-agent-workspace
+	url = https://example.invalid/edge-agent-workspace.git
+	update = none
