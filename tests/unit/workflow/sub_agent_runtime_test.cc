@@ -469,6 +469,94 @@ TEST(SubAgentRuntimeTest, ToolResultCarriesOriginatingCallId) {
   EXPECT_EQ(tool_msg["content"][0]["response"]["value"], "SEARCH_RESULT");
 }
 
+struct NestedDelegateResult {
+  std::string tool_result;
+  int grandchildren_started = 0;
+};
+
+NestedDelegateResult RunNestedDelegate(const nlohmann::ordered_json& args) {
+  constexpr char kNestedRoster[] = R"({
+    "schema_version":1,"name":"t","version":"v1",
+    "state":{"kind":"dynamic_json","fields":{}},
+    "agents":{
+      "parent":{"system_prompt":"","model":{},"tools":[],
+                "delegates":{"agents":["child"],"max_depth":2}},
+      "child":{"system_prompt":"","model":{},"tools":[],
+               "delegates":{"agents":["grandchild"],"max_depth":2}},
+      "grandchild":{"system_prompt":"","model":{},"tools":[]}
+    },
+    "main":"parent"
+  })";
+  asio::io_context io;
+  ToolRegistry host_tools(io);
+  auto wf = *WorkflowLoader::Load(kNestedRoster, host_tools);
+  NullEventEmitter emit;
+  NestedDelegateResult observed;
+  auto grandchild_backend = std::make_shared<testing::FakeChatBackend>(
+      std::vector<std::string>{
+          R"({"role":"assistant","content":[{"type":"text","text":"grandchild finished"}]})"});
+  auto grandchild_factory =
+      SubAgentRuntime::DefaultConversationFactory(grandchild_backend);
+  SubAgentRuntime rt(
+      wf, host_tools, emit,
+      [&](std::string_view backend, std::string_view agent,
+          ChatConversationOptions opts) -> SubAgentRuntime::SendFn {
+        if (agent == "grandchild") {
+          ++observed.grandchildren_started;
+          return grandchild_factory(backend, agent, std::move(opts));
+        }
+        return [&, turn = 0](const std::string& message,
+                             const SubAgentRuntime::TokenSink&,
+                             const CancelToken&) mutable
+                   -> asio::awaitable<absl::StatusOr<std::string>> {
+          if (turn++ == 0) {
+            co_return nlohmann::ordered_json{
+                {"role", "assistant"},
+                {"tool_calls", {{{"id", "nested-call"},
+                                  {"name", "delegate"},
+                                  {"arguments", args.dump()}}}}}.dump();
+          }
+          observed.tool_result = nlohmann::ordered_json::parse(message)
+              ["content"][0]["response"]["value"].get<std::string>();
+          co_return std::string(
+              R"({"role":"assistant","content":[{"type":"text","text":"done"}]})");
+        };
+      });
+  const auto result = RunAsyncBlocking(rt, io, "parent", "child", "go", {});
+  EXPECT_EQ(result, "done");
+  return observed;
+}
+
+TEST(SubAgentRuntimeTest, NestedDelegateRejectsForkBeforeStartingGrandchild) {
+  const auto observed = RunNestedDelegate(
+      {{"agent", "grandchild"}, {"goal", "go"}, {"fork", true}});
+  EXPECT_EQ(observed.tool_result, R"({"error":"fork_not_allowed"})");
+  EXPECT_EQ(observed.grandchildren_started, 0);
+}
+
+TEST(SubAgentRuntimeTest, NestedDelegateRejectsNonBooleanFork) {
+  for (const auto& fork : nlohmann::ordered_json::array(
+           {nullptr, "true", 1, nlohmann::ordered_json::object(),
+            nlohmann::ordered_json::array()})) {
+    SCOPED_TRACE(fork.dump());
+    const auto observed = RunNestedDelegate(
+        {{"agent", "grandchild"}, {"goal", "go"}, {"fork", fork}});
+    EXPECT_EQ(observed.tool_result, R"({"error":"bad_args"})");
+    EXPECT_EQ(observed.grandchildren_started, 0);
+  }
+}
+
+TEST(SubAgentRuntimeTest, NestedDelegateAllowsAbsentOrFalseFork) {
+  for (const bool explicit_false : {false, true}) {
+    SCOPED_TRACE(explicit_false);
+    nlohmann::ordered_json args = {{"agent", "grandchild"}, {"goal", "go"}};
+    if (explicit_false) args["fork"] = false;
+    const auto observed = RunNestedDelegate(args);
+    EXPECT_EQ(observed.tool_result, "grandchild finished");
+    EXPECT_EQ(observed.grandchildren_started, 1);
+  }
+}
+
 TEST(SubAgentRuntimeTest, ForkSeedsTheChildOptionsWithParentHistory) {
   asio::io_context io;
   ToolRegistry host_tools(io);
