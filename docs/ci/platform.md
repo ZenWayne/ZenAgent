@@ -35,6 +35,14 @@
 
 Bazel 的运行预算必须装进 3 GiB：`--jobs=2`、`--local_ram_resources=2048`、`--local_test_jobs=1`、JVM `-Xmx1g`。调大任何一个之前先按 [排障](#排障) 复现一次峰值，不要把"能跑完一次"当作余量证明。
 
+### 磁盘门槛
+
+门槛是 `deploy/ci/bazel-ci-config.json` 的 `min_disk_gib`，`checks.sh` 从那一处读取；工作流不再自己设 `CI_MIN_DISK_GIB`（设了会被 `contract-check.sh` 拒绝），避免了两个数字各说各话。
+
+当前值 24 GiB，依据：`c14961f` 之后的两次运行分别在 14 GiB 可用空间下启动，都在 `external/protobuf+` 的编译阶段写到 `No space left on device`（run #10、#11，约 8–9 分钟时耗尽）。宿主 ext4 还有约 15 GiB 的 root 保留块，rootless podman 用不到，因此 `df` 报的 avail 就是真实上限。
+
+`checks.sh` 在每个 scope 前后都记录一次可用空间（`build:` / `build finished;` / `test:` / `test finished;` 行）。这个数才是目标的峰值依据：下次有成功运行后，按实测峰值 + 余量修正 `min_disk_gib`，不要继续按猜测放大。门槛调高只影响"能不能开始"，不改变构建本身，也不会让失败的运行变通过。
+
 ## 任务镜像
 
 `deploy/ci/Containerfile` → `localhost/zen-ci:ubuntu24.04-bazel8.4.2`。
@@ -114,7 +122,8 @@ Bazel 的下载（BCR 模块、`http_archive`、GitHub release、maven）走 Baz
 | 现象 | 判断 | 处理 |
 | --- | --- | --- |
 | `Server terminated abruptly (error code: 14 ... recvmsg:Connection reset by peer)` | Bazel 服务器 JVM 被 cgroup OOM kill | 降低 `--jobs` 或 `--local_ram_resources`；不要抬高容器内存上限来"修好"一次运行 |
-| `ci preflight: NGiB free, 6GiB required` | 容器内可用磁盘不足 | 先在宿主腾出空间（见下），再重跑；不要降低门槛掩盖 |
+| `ci preflight: NGiB free, MGiB required` | 容器内可用磁盘不足（M 来自 `bazel-ci-config.json` 的 `min_disk_gib`） | 先在宿主腾出空间（见下），再重跑；不要降低门槛掩盖 |
+| 构建进行到一半 `fatal error: error closing /tmp/ccXXXX.s: No space left on device` | 启动时够、跑到中途被写满：本机可用空间低于全量构建的实际峰值 | 先看 `ci-log` 里 `build:` 与 `build finished;` 两次磁盘读数的差值估算峰值，再腾空间；必要时按实测峰值调 `min_disk_gib` |
 | `ci contract: ... differs from the job image` | `.bazelversion`、图片 ARG、镜像 tag 不一致 | 同步三处并重建镜像 |
 | `missing image localhost/zen-ci:...` | Runner 主机没有该镜像 | 在宿主按 [任务镜像](#任务镜像) 构建；不要改成拉取公网镜像 |
 | `container guard: workspace ... is a mount point` | 有人把宿主 checkout 挂进容器编译 | 改为容器内私有副本（`reproduce.sh` 或工作流 checkout） |

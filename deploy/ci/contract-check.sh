@@ -34,7 +34,17 @@ for key in ('startup_options', 'build_options', 'test_options'):
 for required in ('--nocache_test_results', '--test_output=errors'):
     if required not in config['test_options']:
         raise SystemExit(f'ci contract: test options must keep {required}')
+min_disk = config.get('min_disk_gib')
+if not isinstance(min_disk, int) or min_disk < 6:
+    raise SystemExit('ci contract: bazel-ci-config min_disk_gib must be an integer >= 6')
+print(f'ci contract: min_disk_gib {min_disk}')
 PY
+
+# The workflow used to pin its own CI_MIN_DISK_GIB, which silently overrode the
+# config. One threshold, one place.
+if grep -q 'CI_MIN_DISK_GIB' "$root"/.forgejo/workflows/*.yml; then
+  die 'the workflow must not set CI_MIN_DISK_GIB; use bazel-ci-config min_disk_gib'
+fi
 
 for script in "$control"/*.sh; do
   bash -n "$script" || die "syntax error in ${script#"$root"/}"

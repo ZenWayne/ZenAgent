@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "min_disk_gib": 24,
   "startup_options": [
     "--batch",
     "--nosystem_rc",

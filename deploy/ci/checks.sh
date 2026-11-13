@@ -13,7 +13,8 @@
 # Environment (set by .forgejo/workflows/ci.yml):
 #   CI_WORKSPACE        private source copy inside the container (required)
 #   CI_SCRATCH          private scratch dir for bazel output and reports
-#   CI_MIN_DISK_GIB     minimum free disk before starting (default 6)
+#   CI_MIN_DISK_GIB     minimum free disk before starting; default is
+#                       min_disk_gib in deploy/ci/bazel-ci-config.json
 #   CI_RESULTS          results directory (default $CI_SCRATCH/results)
 #
 # Test evidence: $CI_RESULTS/testlogs/<package>/<target>/test.xml holds the raw
@@ -38,17 +39,23 @@ mkdir -p "$scratch" "$results"
 
 status=0
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
+# Free space on the scratch filesystem, in GiB. Logged around every scope so a
+# run records the peak it actually needed instead of the guess in the config.
+free_gib() { df -Pk "$scratch" | awk 'NR==2 {printf "%d", $4 / 1024 / 1024}'; }
 
 # ── Preflight ───────────────────────────────────────────────────────
 source "$control/contract-check.sh"
 
-min_disk_gib=${CI_MIN_DISK_GIB:-6}
-available_gib=$(df -Pk "$scratch" | awk 'NR==2 {printf "%d", $4 / 1024 / 1024}')
+config_min_disk_gib=$(python3 -c \
+  'import json,sys;print(json.load(open(sys.argv[1]))["min_disk_gib"])' \
+  "$control/bazel-ci-config.json")
+min_disk_gib=${CI_MIN_DISK_GIB:-$config_min_disk_gib}
+available_gib=$(free_gib)
 [[ $available_gib -ge $min_disk_gib ]] || {
   echo "ci preflight: ${available_gib}GiB free, ${min_disk_gib}GiB required" >&2
   exit 1
 }
-log "preflight: ${available_gib}GiB free, image $CI_IMAGE, bazel $CI_BAZEL_VERSION"
+log "preflight: ${available_gib}GiB free (${min_disk_gib}GiB required), image $CI_IMAGE, bazel $CI_BAZEL_VERSION"
 
 source_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo unknown)
 configuration_sha=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)
@@ -83,21 +90,23 @@ bazel_cmd=(bazel "${startup[@]}" "--output_user_root=$scratch/bazel" "--bazelrc=
 
 run_build() {
   local bep=$results/build.bep.jsonl
-  log 'build: //agentflow/...'
+  log "build: //agentflow/... ($(free_gib)GiB free)"
   ( cd "$workspace" && "${bazel_cmd[@]}" build //agentflow/... "${build_options[@]}" \
       "--build_event_json_file=$bep" ) || status=1
   python3 "$control/verify-results.py" build "$bep" || status=1
+  log "build finished; $(free_gib)GiB free"
 }
 
 run_test() {
   local bep=$results/test.bep.jsonl
-  log 'test: //tests/unit/...'
+  log "test: //tests/unit/... ($(free_gib)GiB free)"
   ( cd "$workspace" && "${bazel_cmd[@]}" test //tests/unit/... "${test_options[@]}" \
       "--build_event_json_file=$bep" ) || status=1
   python3 "$control/verify-results.py" test "$bep" \
     "--testlogs=$workspace/bazel-testlogs" \
     "--xml-out=$results/testlogs" \
     "--report=$results/test-report.json" || status=1
+  log "test finished; $(free_gib)GiB free"
 }
 
 case $scope in

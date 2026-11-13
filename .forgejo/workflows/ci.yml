@@ -69,8 +69,9 @@ jobs:
     env:
       CI: 'true'
       SCOPE: ${{ inputs.scope || 'all' }}
-      # Compilation happens only here: inside the throwaway job container.
-      CI_MIN_DISK_GIB: '6'
+      # Compilation happens only here: inside the throwaway job container. The
+      # disk floor lives in deploy/ci/bazel-ci-config.json so there is one place
+      # to change it; nothing here overrides it.
     steps:
       - name: Clone source at the requested revision
         env:
