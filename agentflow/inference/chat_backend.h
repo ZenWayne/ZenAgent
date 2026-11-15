@@ -17,6 +17,19 @@
 
 namespace agentflow {
 
+// Provider model identifiers are bounded printable tokens, never credentials.
+inline absl::Status ValidateModelName(std::string_view name) {
+  if (name.empty() || name.size() > 128) {
+    return absl::InvalidArgumentError("model_name must contain 1 to 128 bytes");
+  }
+  for (unsigned char c : name) {
+    if (c <= 32 || c >= 127) {
+      return absl::InvalidArgumentError("model_name must be a printable token without whitespace");
+    }
+  }
+  return absl::OkStatus();
+}
+
 // One text delta from the model.
 //
 // Returns an awaitable and is ALWAYS co_awaited by its caller, so a consumer
@@ -72,6 +85,12 @@ struct ChatConversationOptions {
 class IConversation {
  public:
   virtual ~IConversation() = default;
+
+  // Call on the conversation's executor BETWEEN SendAsync requests. Updates
+  // only this conversation; history, tools and backend defaults stay intact.
+  virtual absl::Status SetModel(std::string_view /*model_name*/) {
+    return absl::UnimplementedError("runtime model switching unsupported");
+  }
 
   // Sends one message JSON and awaits the full canonical assistant JSON:
   //   {"role":"assistant",

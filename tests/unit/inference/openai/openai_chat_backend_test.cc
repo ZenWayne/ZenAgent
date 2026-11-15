@@ -60,6 +60,50 @@ SendResult Send(IConversation& conv, const std::string& message_json,
   return r;
 }
 
+TEST(OpenAiChatBackendTest, SetModelPreservesHistoryAndToolsAndIsolatesConversations) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("first")}},
+                               {.frames = {TextFrame("second")}},
+                               {.frames = {TextFrame("sibling")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+  auto sibling = backend->CreateConversation(ChatConversationOptions{});
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"remember amber"})", io,
+                   cancel.Token()).response.ok());
+  const std::string tools = R"([{"type":"function","function":{"name":"lookup","description":"Lookup","parameters":{"type":"object","properties":{}}}}])";
+  ASSERT_TRUE(conv->UpdateTools(tools).ok());
+  ASSERT_TRUE(conv->SetModel("second-model").ok());
+  ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"recall"})", io,
+                   cancel.Token()).response.ok());
+  ASSERT_TRUE(Send(*sibling, R"({"role":"user","content":"hello"})", io,
+                   cancel.Token()).response.ok());
+  ASSERT_EQ(http.requests().size(), 3u);
+  const auto second = json::parse(http.requests()[1].body);
+  EXPECT_EQ(json::parse(http.requests()[0].body)["model"], "test-model");
+  EXPECT_EQ(second["model"], "second-model");
+  EXPECT_EQ(second["messages"][0]["content"], "remember amber");
+  EXPECT_EQ(second["messages"][1]["content"], "first");
+  EXPECT_EQ(second["tools"], json::parse(tools));
+  EXPECT_EQ(json::parse(http.requests()[2].body)["model"], "test-model");
+}
+
+TEST(OpenAiChatBackendTest, SetModelRejectsInvalidNamesWithoutChangingBinding) {
+  asio::io_context io;
+  testing::FakeHttpClient http({{.frames = {TextFrame("ok")}}});
+  auto backend = OpenAiChatBackend::Create(TestOptions(), http);
+  auto conv = backend->CreateConversation(ChatConversationOptions{});
+  for (const auto& name : {std::string(), std::string("  "), std::string(129, 'x'),
+                           std::string("bad\nmodel")}) {
+    EXPECT_EQ(conv->SetModel(name).code(), absl::StatusCode::kInvalidArgument);
+  }
+  ASSERT_TRUE(conv->SetModel("test-model").ok());
+  CancelSource cancel;
+  ASSERT_TRUE(Send(*conv, R"({"role":"user","content":"hello"})", io,
+                   cancel.Token()).response.ok());
+  EXPECT_EQ(json::parse(http.requests()[0].body)["model"], "test-model");
+}
+
 TEST(OpenAiChatBackendTest, ProviderControlsWhetherReasoningIsAdded) {
   for (const auto provider : {UsageProvider::kGoogle, UsageProvider::kDeepSeek, UsageProvider::kOpenAi}) {
     asio::io_context io;

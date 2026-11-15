@@ -212,6 +212,12 @@ class OpenAiConversation : public IConversation {
     co_return last;
   }
 
+  absl::Status SetModel(std::string_view model_name) override {
+    if (auto status = ValidateModelName(model_name); !status.ok()) return status;
+    opts_.model = std::string(model_name);
+    return absl::OkStatus();
+  }
+
   bool SupportsHistoryFork() const override { return true; }
 
   absl::StatusOr<std::string> ExportHistory() const override {
