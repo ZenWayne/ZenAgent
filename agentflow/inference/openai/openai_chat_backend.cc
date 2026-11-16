@@ -218,6 +218,20 @@ class OpenAiConversation : public IConversation {
     return absl::OkStatus();
   }
 
+  absl::Status AppendToolResults(std::string_view message_json) override {
+    auto incoming = ToOpenAiMessages(message_json);
+    if (!incoming.ok()) return incoming.status();
+    if (incoming->empty() || std::any_of(incoming->begin(), incoming->end(),
+        [](const json& message) { return message.value("role", "") != "tool"; })) {
+      return absl::InvalidArgumentError("expected a nonempty tool-result message");
+    }
+    auto settled = messages_;
+    settled.insert(settled.end(), incoming->begin(), incoming->end());
+    if (auto status = ValidateForkableHistory(settled); !status.ok()) return status;
+    messages_ = std::move(settled);
+    return absl::OkStatus();
+  }
+
   bool SupportsHistoryFork() const override { return true; }
 
   absl::StatusOr<std::string> ExportHistory() const override {

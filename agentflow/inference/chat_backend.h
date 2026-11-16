@@ -103,6 +103,13 @@ class IConversation {
       std::string message_json, const TokenSink& on_token,
       const CancelToken& cancel) = 0;
 
+  // Records a completed canonical tool-result message without inference. Call
+  // between SendAsync requests when the tool loop ends before another send.
+  // Backends without mutable message history retain their existing behavior.
+  virtual absl::Status AppendToolResults(std::string_view /*message_json*/) {
+    return absl::UnimplementedError("tool-result append unsupported");
+  }
+
   // Breaks the in-flight request. Safe to call from any thread.
   //
   // This method itself is NOT the only legal way to satisfy that contract:
